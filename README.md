@@ -1,42 +1,132 @@
+<p align="center">
+  <img src="docs/banner.jpg" alt="Brain Trail, by Unkillable Companies: see what your Claude session knows" width="100%">
+</p>
+
 # Brain Trail
 
-A pane beside the chat in the Claude Code desktop app. It shows what the session puts in front of the model, so you can see why Claude answers the way it does and when its context starts to work against you.
+A pane beside the Claude Code chat. It shows what your session put in front of the model: the files it read and wrote, the ones it only saw in a search or through a link, and the tools it called.
 
-Made by Unkillable Companies. MIT license.
+You see why Claude answers the way it does, what it never looked at, and when its context starts to work against you.
 
-## Install
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/map-dark.png">
+  <img src="docs/map-light.png" alt="The Brain Trail map: a company's notes as one disc, the files a session read in blue, wrote in amber, saw in a search in violet, saw through a link in teal, and the services it called above" width="760">
+</picture>
+</p>
 
-In a terminal, one line (Claude Code 2.1.275 or later):
+<sub>A session preparing a client call, on a demo company brain (made-up notes). Claude reads the account, the kickoff notes and the proposal, checks the CRM, the inbox and the calendar, then writes a call prep.</sub>
+
+## Install (30 seconds)
+
+### 1. Get the plugin
+
+<details>
+<summary><b>From a terminal</b></summary>
+
+<br>
 
 ```bash
 claude plugin install brain-trail-v2 --marketplace go-silex/brain-trail
 ```
 
-Answer `y` to add the marketplace, then Enter for your user scope. Open a new session in the desktop app: the pane opens by itself, whatever the folder (a code project, an Obsidian vault, a client folder). After closing it, type `/brain-trail-v2`.
+Answer `y` to add the marketplace, then Enter for your user scope. Needs Claude Code 2.1.275 or later.
 
-Without a terminal, in the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `go-silex/brain-trail`, then Add plugin.
+</details>
 
-Update: `claude plugin update brain-trail-v2`.
+<details>
+<summary><b>From the Claude desktop app</b></summary>
 
-## The tabs
+<br>
 
-- **Map**: the session's folder as one disc (one circle per folder, one dot per file). Every file that entered the context lights up in its colour: blue read, amber written, violet seen in a result (a search, a listing, a connector, a sub-agent's report), teal seen through a link of a note Claude read. Claude's path from file to file is drawn as arcs, dashed red where two notes have no link, and the outside services it calls (MCP) appear with their logo. The legend under the map counts each colour; a press lists the files. Follow Claude, replay the session step by step, zoom with the wheel or the buttons. A 3D button turns the map into a brain that spins in the pane; « Full screen » opens a WebGL version in the browser.
-- **Which folder**: the session's own. Inside an Obsidian vault (a folder with `.obsidian` above it), the whole vault. In the home folder, its first three levels only.
-- **Goal**: the current request, Claude's plan, and the history per request in plain words.
-- **Context**: how full the context window is, with the advice that goes with it (keep going, compact, or start a new session), the plan use (5 h and week) and the session cost. Details: what is loaded before the first message and the tool results that take the most room.
-- **Files**: figures (loaded at start, read, written, seen in a search, read by a sub-agent, missing links). Click a figure to list its files. Then the files as a tree of their folders.
-- **Coach**: tips about how the session is going, in business words. « Apply » fills the prompt box.
+1. Click **+** next to the prompt box, then **Plugins**.
+2. **Add marketplace**: `go-silex/brain-trail`.
+3. **Add plugin**: Brain Trail.
 
-The pane never writes in your files (only in its own folder `~/.claude/brain-trail-v2`). English and French.
+</details>
+
+<details>
+<summary><b>Update or remove</b></summary>
+
+<br>
+
+```bash
+claude plugin update brain-trail-v2
+```
+
+```bash
+claude plugin uninstall brain-trail-v2
+```
+
+Had an earlier copy in `~/.claude/mods/`? Remove it, or two panes open.
+
+</details>
+
+### 2. Open a new session
+
+The pane opens by itself beside the chat, whatever the folder: a code project, an Obsidian vault, a client folder. Closed it? Type `/brain-trail-v2`.
+
+The map is drawn in the desktop app. The terminal shows the text tabs only.
+
+## What the map shows
+
+Your folder as one disc: one circle per folder, one dot per file. Every file that entered the context lights up.
+
+| Colour | Means |
+| --- | --- |
+| 🔵 Blue | Read. Its content is in the context. |
+| 🟠 Amber | Written or edited by Claude. |
+| 🟣 Violet | Seen in a result: a search, a listing, a connector, a sub-agent's report. Only its name came in. |
+| 🟢 Teal | Seen through a link in a note Claude read. Claude can follow it. |
+| 🔴 Dashed red | A jump between two notes that no link joins. Adding the link helps the next session. |
+
+The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc with their logo and their call count. The legend under the map counts each colour; click it to list the files.
+
+Follow Claude as it works, replay the session step by step, zoom with the wheel. The **3D** button turns the map into a brain; **Full screen** opens it in your browser.
+
+Inside an Obsidian vault, the map shows the whole vault, even when the session started in a sub-folder.
+
+## The five tabs
+
+- **Map**: the trail above.
+- **Goal**: your request, Claude's plan, and what it did, in plain words.
+- **Context**: how full the context window is and what to do about it (keep going, compact, start a new session), your plan usage and the session cost.
+- **Files**: every file the session used, why it is there, and the links your notes are missing.
+- **Coach**: tips on how the session went. **Apply** puts the suggestion in your prompt box.
+
+English and French.
+
+## Privacy
+
+Everything stays on your machine. Brain Trail writes only in its own folder, `~/.claude/brain-trail-v2`, never in your files. No account, no tracking.
+
+The one exception is the Coach's analysis: when you ask for it, Claude reads the session, on your own plan.
 
 ## How it measures
 
-- The gauge is the engine's own figure, the one the status line shows. Right after a compaction it shows the `/context` estimate, marked ≈.
-- The breakdown at start is the one `/context` prints, estimated locally (no API call).
-- The weight of a tool result is estimated from its length (about 3.6 characters per token).
+- The context gauge is Claude Code's own figure, the one the status line shows. Right after a compaction it shows the `/context` estimate, marked ≈.
+- What is loaded before your first message is the `/context` breakdown, computed locally.
+- The weight of a tool result is estimated from its length, about 3.6 characters per token.
 
-## Tests
+## Made by Unkillable Companies
+
+We help business leaders rebuild how their company works with AI. The leader builds their own system first, then brings the company along. Brain Trail is the tool we use to see what our own company brain gives Claude.
+
+[unkillablecompanies.com](https://unkillablecompanies.com) · [Unkillable Academy](https://academy.unkillablecompanies.com)
+
+<details>
+<summary><b>For contributors</b></summary>
+
+<br>
+
+Run the tests:
 
 ```bash
-claude plugin test <path to this folder>
+claude plugin test .
 ```
+
+The map is drawn as SVG under the 131,072 characters a pane accepts. `hooks/map.ts` draws it, `hooks/files.ts` decides which files a tool call touched, `hooks/register.tsx` wires the pane.
+
+</details>
+
+MIT license. `hooks/vendor/d3-hierarchy` is ISC.

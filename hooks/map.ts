@@ -263,7 +263,10 @@ export const draw = (
     const fs = Math.min((g.depth === 1 ? 10.5 : 9.5) * px, (g.r * 1.5) / (name.length * 0.62))
     if ((g.depth === 1 && fs >= 8 * px) || (g.depth === 2 && g.r / px > 46 && fs >= 8 * px)) {
       const y = g.ty - g.ry + fs * 1.5, w = name.length * fs * 0.62
-      placed.push({ x: g.tx - w / 2, y: y - fs, w, h: fs * 1.3 })
+      const box = { x: g.tx - w / 2, y: y - fs, w, h: fs * 1.3 }
+      // a sub-folder's name never runs over its folder's (folders come first)
+      if (placed.some(o => box.x < o.x + o.w && o.x < box.x + box.w && box.y < o.y + o.h && o.y < box.y + box.h)) continue
+      placed.push(box)
       folderLabels.push(`<text class="l fn" x="${f(g.tx)}" y="${f(y)}" font-size="${f(fs)}" text-anchor="middle"${g.depth === 2 ? ' fill-opacity=".7"' : ''}>${esc(name)}</text>`)
     }
   }
