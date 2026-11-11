@@ -1,0 +1,14 @@
+{
+  "name": "brain-trail",
+  "description": "Brain Trail: a pane beside the Claude Code chat that maps what the session puts in its context.",
+  "owner": {
+    "name": "Unkillable Companies"
+  },
+  "plugins": [
+    {
+      "name": "brain-trail-v2",
+      "source": "./",
+      "description": "Map of the files and services a Claude Code session uses, with its context gauge and coach"
+    }
+  ]
+}

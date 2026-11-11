@@ -1,0 +1,30 @@
+{
+  "name": "brain-trail-v2",
+  "version": "2.1.0",
+  "description": "A pane beside the chat that shows what this Claude Code session puts in its context: a map of the files it moves through, the list of every file and why it is there, and a gauge that tells you when to compact or start a new session",
+  "author": {
+    "name": "Unkillable Companies"
+  },
+  "homepage": "https://github.com/go-silex/brain-trail",
+  "repository": "https://github.com/go-silex/brain-trail",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open by itself",
+      "description": "Open the pane when a session starts. Off: type /brain-trail to open it.",
+      "default": true
+    },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language of the pane at first open (en or fr). It can be switched in the pane.",
+      "options": [
+        "en",
+        "fr"
+      ],
+      "default": "en"
+    }
+  }
+}
