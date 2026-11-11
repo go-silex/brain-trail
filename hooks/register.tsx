@@ -1,20 +1,24 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionContextBreakdown } from 'claude-code'
+import type { BoxProps, ButtonProps, ElementConstructor, ElementTable, EngineInterface, Register, RenderChildren, RenderElement, RenderNode, SessionContextBreakdown, TextProps } from 'claude-code'
 
-import type { Handoff, Lang, Meter, TrailSettings, Tab, Totals, TrailEvent } from '../types'
+import type { Lang, Meter, TrailSettings, Tab, Totals, TrailEvent } from '../types/model'
 import { MAX_FILES, MAX_SEEN, afterCd, describe, keepFile, linksIn, makeIndex, pairKey, pathsIn, touchedBy } from './files'
 import type { Index } from './files'
 import { coachPrompt, strings } from './i18n'
 import type { Strings } from './i18n'
-import { DARK, LIGHT, SIZE, banner, draw, fileName, gauge, kindColors, packFiles, rank, tilt } from './map'
-import { isLocal, nameServer, splitMcp, toolsByServer } from './mcp'
+import { DARK, LIGHT, SIZE, banner, draw, fileName, gauge, kindColors, packFiles, tilt } from './map'
+import { isLocal, toolsByServer } from './mcp'
 import { base3d, data3d, page3d } from './brain3d'
 import { LOGOS } from './logos'
 import { CAM0, PITCH_MAX, PITCH_MIN, drawSpin, pickSpin, yawAt } from './spin'
 import type { Cam, SpinView } from './spin'
-import type { Call, Kind, Layout, Move, Palette, Trail } from './map'
+import type { Layout, Palette } from './map'
+import { nameServers, replay, sliceToStep } from './fold'
+import { assembleCapture, coachTips, dur, goalBlocks, hhmm, mcpServerRows, needsMcpScan, needsTouch, planNow, tell, toolLabel } from './acts'
+import { costRatio, costStats, costsSinceCompact, fileFigures, fileTree, fmt, keepCosts, limitOf, projectFiles, resetLabel, usd, usedStart, windowFacts, zoneOf } from './readout'
+import type { CostEntry, FileDir, FileEntry, FileFigure } from './readout'
+import { panFrame, pickAt, zoomFrame } from './pointer'
 
-const NAME = 'brain-trail-v2'
 const COMMAND = 'brain-trail-v2'
 const PANE = 'brain-trail-v2'
 const TITLE = 'Brain Trail'
@@ -40,23 +44,12 @@ const cam3dA = atom({ plugin: 'brain-trail-v2', key: 'cam3d' } as const, CAM0 as
 let lastSpin: { view: SpinView; L: Layout; touched: Set<number> } | undefined
 let drag3d: { yaw: number; pitch: number; spin: boolean } | undefined
 const STEP_MS = 900
-// the steps a replay walks through: notes read or written, calls to a service
-const isStep = (ev: TrailEvent) => ((ev.k === 'read' || ev.k === 'write') && !ev.out) || ev.k === 'mcp'
 // a file read inside the pane (the « Preview in Brain Trail » choice), or none
 const previewA = atom({ plugin: 'brain-trail-v2', key: 'preview' } as const, null as { p: string; out?: boolean } | null, { shape: 'preview-1' })
 // the coach's analysis of the session, and the lines it proposes for the instructions file
 const coachA = atom({ plugin: 'brain-trail-v2', key: 'coach' } as const, { text: '', at: 0, busy: false } as { text: string; patch?: string; at: number; busy: boolean; error?: string }, { shape: 'coach-1' })
 // the weather of the context window: clear below a quarter, a storm past three quarters
 const weather = (p: number) => (p < 25 ? '☀️' : p < 50 ? '🌤️' : p < 75 ? '🌧️' : '⛈️')
-const resetLabel = (iso: string | undefined, lang: Lang) => {
-  if (iso === undefined) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  const today = new Date().toDateString() === d.toDateString()
-  return today ? time : `${d.toLocaleDateString(lang === 'fr' ? 'fr-FR' : 'en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`
-}
-const limitOf = (m: Meter, kind: string) => m.limits?.find(l => l.kind === kind)
 const DEFAULT_SETTINGS: TrailSettings = { openMd: 'default', openOther: 'default', hover: true }
 const settingsA = atom({ plugin: 'brain-trail-v2', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'settings-1' })
 
@@ -64,19 +57,7 @@ const settingsA = atom({ plugin: 'brain-trail-v2', key: 'settings' } as const, D
 
 // Each server is named from all its tools: those the context lists (connected) and those the session called.
 let connected = new Map<string, Set<string>>()
-const nameServers = (list: TrailEvent[]) => {
-  const tools = new Map<string, Set<string>>([...connected].map(([k, v]) => [k, new Set(v)]))
-  for (const ev of list) if (ev.k === 'mcp') tools.set(ev.server, new Set([...(tools.get(ev.server) ?? []), ev.tool]))
-  return new Map([...tools].map(([server, set]) => [server, nameServer(server, set)]))
-}
-const LABEL_KEYS = ['query', 'q', 'search', 'subject', 'title', 'name', 'url', 'prompt']
-const callLabel = (input: Record<string, unknown>) => {
-  for (const k of LABEL_KEYS) {
-    const v = input[k]
-    if (typeof v === 'string' && v.trim() !== '' && !v.includes('@')) return v.split(/\s+/).join(' ').slice(0, 80)
-  }
-  return ''
-}
+const folded = (list: readonly TrailEvent[]) => replay(list, I, linked, connected)
 
 // ---- the folder, packed into one disc ----
 
@@ -195,65 +176,6 @@ const readMeta = async ($: EngineInterface, p: string, out?: true): Promise<stri
   return targets.slice(0, MAX_SEEN).map(m => I!.paths[m]!)
 }
 
-// ---- the trail, replayed from the events ----
-
-const isNote = (p: string) => p.endsWith('.md')
-
-const replay = (list: TrailEvent[]) => {
-  const names = nameServers(list)
-  const state = new Map<number, { k: Kind; count: number }>()
-  const moves: Move[] = []
-  const calls: Call[] = []
-  const perSvc = new Map<string, number>()
-  const stats = { read: 0, write: 0, hit: 0, link: 0, gap: 0 }
-  let outside = 0
-  const outSeen = new Set<string>()
-  list.forEach((ev, i) => {
-    if (ev.k === 'mcp') {
-      const svc = names.get(ev.server) ?? ev.server
-      calls.push({ svc, tool: ev.tool, label: ev.label, err: ev.err === true, from: moves.at(-1)?.n, at: ev.at })
-      perSvc.set(svc, (perSvc.get(svc) ?? 0) + 1)
-      return
-    }
-    // a name that entered the context: lit on the map, no move
-    const mark = (n: number, k: Kind) => {
-      const prev = state.get(n)
-      if (!prev) stats[k]++
-      else if (rank[k] > rank[prev.k]) { stats[prev.k]--; stats[k]++ }
-      state.set(n, { k: prev && rank[prev.k] > rank[k] ? prev.k : k, count: (prev?.count ?? 0) + 1 })
-    }
-    if (ev.k === 'seen') {
-      for (const p of ev.ps) { const n = I?.ids.get(p); if (n !== undefined) mark(n, ev.via === 'link' ? 'link' : 'hit') }
-      return
-    }
-    if (ev.k !== 'read' && ev.k !== 'write' && ev.k !== 'hit') return
-    if (ev.out) { if (!outSeen.has(ev.p)) { outSeen.add(ev.p); outside++ } return }
-    const n = I?.ids.get(ev.p)
-    if (n === undefined) return
-    mark(n, ev.k)
-    if (ev.k === 'hit') return
-    const from = moves.at(-1)?.n
-    if (from === n) return
-    // a jump with no link only counts between two notes: code files have no links to follow
-    const gap = from !== undefined && isNote(ev.p) && isNote(I!.paths[from]!) && !linked.has(pairKey(from, n))
-    moves.push({ n, gap, at: ev.at, i })
-    if (gap) stats.gap++
-  })
-  const gaps: { from: number; to: number }[] = []
-  for (let j = moves.length - 1; j > 0; j--) {
-    const m = moves[j]!, prev = moves[j - 1]!
-    if (m.gap && !linked.has(pairKey(prev.n, m.n)) && !gaps.some(g => pairKey(g.from, g.to) === pairKey(prev.n, m.n))) gaps.push({ from: prev.n, to: m.n })
-  }
-  // the links the notes the session read declare, between two files it met
-  const links: [number, number][] = []
-  for (const k of linked) {
-    const [a, b] = k.split(':').map(Number) as [number, number]
-    if (state.has(a) && state.has(b)) links.push([a, b])
-  }
-  const trail: Trail = { state, moves, calls, perSvc, links }
-  return { trail, stats, gaps, outside, names }
-}
-
 // ---- theme ----
 
 let theme: { P: Palette; at: number } | undefined
@@ -293,9 +215,6 @@ const record = async ($: EngineInterface, list: TrailEvent[]) => {
 // the main shell keeps its directory from one command to the next; a sub-agent's starts where the session does
 let shellDir: string | undefined
 
-const fmt = (n: number) => (n >= 100000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)))
-const estimate = (text: string) => Math.round(text.length / 3.6)
-const zoneOf = (p: number) => (p < 50 ? 'ok' : p < 75 ? 'warn' : 'bad') as 'ok' | 'warn' | 'bad'
 let toasted: 'ok' | 'warn' | 'bad' = 'ok'
 
 // The engine drops the window's fill on a compaction and only reports it again with the next
@@ -369,7 +288,7 @@ const openFile = async ($: EngineInterface, p: string, out?: true) => {
 
 // ---- cost: the API price of this session, kept per session to compare with the person's own habits ----
 
-type CostEntry = { day: string; usd: number; prompts: number }
+
 const saveCost = async ($: EngineInterface, usd: number) => {
   const id = await $.session.id()
   const day = new Date(await $.clock.now()).toISOString().slice(0, 10)
@@ -377,21 +296,16 @@ const saveCost = async ($: EngineInterface, usd: number) => {
   const all = ((await $.store.get('costs').catch(() => undefined)) ?? {}) as Record<string, CostEntry>
   all[id] = { day: all[id]?.day ?? day, usd, prompts }
   // the last 400 sessions are enough to know one's habits
-  const kept = Object.fromEntries(Object.entries(all).sort((a, z) => z[1].day.localeCompare(a[1].day)).slice(0, 400))
+  const kept = keepCosts(all)
   await $.store.set('costs', kept)
 }
 const costHistory = ($: EngineInterface) => costHistoryOf($).catch(() => ({ median: undefined as number | undefined, count: 0, monthUsd: 0 }))
 const costHistoryOf = async ($: EngineInterface) => {
   const id = await $.session.id()
   const all = ((await $.store.get('costs').catch(() => undefined)) ?? {}) as Record<string, CostEntry>
-  const others = Object.entries(all).filter(([k, v]) => k !== id && v.usd > 0.01).map(([, v]) => v)
-  const sorted = others.map(v => v.usd).sort((a, z) => a - z)
-  const median = sorted.length === 0 ? undefined : sorted[Math.floor(sorted.length / 2)]
   const month = new Date(await $.clock.now()).toISOString().slice(0, 7)
-  const monthUsd = Object.values(all).filter(v => v.day.startsWith(month)).reduce((a, v) => a + v.usd, 0)
-  return { median, count: others.length, monthUsd }
+  return costStats(all, id, month)
 }
-const usd = (n: number) => (n >= 100 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`)
 
 // ---- the map's pointer layer ----
 
@@ -405,26 +319,16 @@ let dragBase: { vx: number; vy: number; vw: number; vh: number; px: number } | u
 // zooms the map by `f` (under 1 = closer) around the point at (fx, fy) of the frame shown
 const zoomAt = async ($: EngineInterface, fx: number, fy: number, f: number) => {
   if (lastMap === undefined) return
-  const v = lastMap.view
-  const X = v.vx + fx * v.vw, Y = v.vy + fy * v.vh
-  const side = Math.max(70, Math.min(v.vw, v.vh) * f)
-  if (side >= SIZE * 1.02) await update($, cameraA, () => null)
-  else await update($, cameraA, () => ({ x: X - fx * side, y: Y - fy * side, side }))
+  const next = zoomFrame(lastMap.view, fx, fy, f, SIZE)
+  await update($, cameraA, () => next)
 }
 
 const pick = (fx: number, fy: number) => {
   if (lastMap === undefined) return undefined
   const { view, L, touched } = lastMap
-  const X = view.vx + fx * view.vw, Y = view.vy + fy * view.vh
-  // a file Claude touched answers from further away than the others: it is the one people look for
-  let best: { n: number; d: number } | undefined
   const TL = tilt(L)
-  TL.files.forEach(([x, y], n) => {
-    const d = Math.hypot(x - X, y - Y) / (touched.has(n) ? 2.2 : 1)
-    if (d < 9 * view.px && (best === undefined || d < best.d)) best = { n, d }
-  })
-  const folder = TL.groups.filter(g => g.depth > 0 && ((g.tx - X) / g.r) ** 2 + ((g.ty - Y) / g.ry) ** 2 < 1).sort((a, z) => z.depth - a.depth)[0]
-  return { file: best?.n, folder, X, Y }
+  const hit = pickAt(TL.files, TL.groups, view, touched, fx, fy)
+  return { file: hit.file, folder: hit.folder, X: hit.X, Y: hit.Y }
 }
 
 const miniGauge = (P: Palette, pct: number) => {
@@ -436,53 +340,6 @@ const miniGauge = (P: Palette, pct: number) => {
     + `<circle cx="${at.toFixed(1)}" cy="4" r="3" fill="#35b0ff"/></svg>`
 }
 
-// ---- Claude's actions and plan, as a project manager would tell them ----
-
-const str = (v: unknown) => (typeof v === 'string' ? v : '')
-const host = (u: string) => { const m = /^https?:\/\/([^/]+)/.exec(u); return m?.[1] ?? u }
-// what an action was about, kept short: a file name, a search, the description Claude gave its command
-const whatOf = (tool: string, input: Record<string, unknown>) => {
-  const file = str(input.file_path) || str(input.notebook_path)
-  if (file !== '') return fileName(file)
-  if (tool === 'Grep' || tool === 'Glob') return str(input.pattern)
-  if (tool === 'Bash') return str(input.description) || str(input.command).slice(0, 60)
-  if (tool === 'WebFetch') return host(str(input.url))
-  if (tool === 'WebSearch') return str(input.query)
-  if (tool === 'Agent' || tool === 'Task') return str(input.description) || str(input.subagent_type)
-  if (tool === 'Skill') return str(input.skill) || str(input.command)
-  if (tool === 'AskUserQuestion') return str((input.questions as { question?: string }[] | undefined)?.[0]?.question)
-  if (tool.startsWith('mcp__')) return callLabel(input)
-  return ''
-}
-// the plan Claude keeps: TodoWrite, the task tools, or the app's own task list
-const planOf = (tool: string, input: Record<string, unknown>, at: number): TrailEvent | undefined => {
-  if (tool === 'TodoWrite' && Array.isArray(input.todos)) return { k: 'plan', items: (input.todos as { content?: string; status?: string }[]).map(x => ({ t: str(x.content), s: str(x.status) })), at }
-  if (tool === 'TaskCreate') return { k: 'plan', add: { id: '', t: str(input.subject) }, at }
-  if (tool === 'TaskUpdate') return { k: 'plan', upd: { id: str(input.taskId), ...(input.status ? { s: str(input.status) } : {}), ...(input.subject ? { t: str(input.subject) } : {}) }, at }
-  if (tool.endsWith('__update_plan')) {
-    if (Array.isArray(input.items)) return { k: 'plan', items: (input.items as { content?: string; status?: string }[]).map(x => ({ t: str(x.content), s: str(x.status) })), at }
-    if (input.advance === true) return { k: 'plan', adv: true, at }
-    if (Array.isArray(input.done) || typeof input.start === 'number') return { k: 'plan', done: (input.done as number[] | undefined) ?? [], ...(typeof input.start === 'number' ? { start: input.start } : {}), at }
-  }
-  return undefined
-}
-// the plan as it stands after every change
-const planNow = (list: TrailEvent[]) => {
-  let items: { id: string; t: string; s: string }[] = []
-  for (const ev of list) {
-    if (ev.k !== 'plan') continue
-    if (ev.items) items = ev.items.map((x, i) => ({ id: String(i + 1), t: x.t, s: x.s }))
-    else if (ev.add) items = [...items, { id: String(items.length + 1), t: ev.add.t, s: 'pending' }]
-    else if (ev.upd) items = items.map(x => (x.id === ev.upd!.id ? { ...x, s: ev.upd!.s ?? x.s, t: ev.upd!.t ?? x.t } : x)).filter(x => x.s !== 'deleted')
-    else if (ev.adv) {
-      const cur = items.findIndex(x => x.s === 'in_progress')
-      items = items.map((x, i) => (i === cur ? { ...x, s: 'completed' } : i === (cur === -1 ? items.findIndex(y => y.s === 'pending') : cur + 1) && x.s === 'pending' ? { ...x, s: 'in_progress' } : x))
-    } else if (ev.done || ev.start !== undefined) {
-      items = items.map((x, i) => (ev.done?.includes(i + 1) ? { ...x, s: 'completed' } : ev.start === i + 1 ? { ...x, s: 'in_progress' } : x))
-    }
-  }
-  return items
-}
 
 let opened = false
 
@@ -497,7 +354,7 @@ const write3d = async ($: EngineInterface) => {
   if (key === live3d.key) return
   live3d.key = key
   const prompt = [...list].reverse().find(ev => ev.k === 'prompt')
-  await $.fs.write(`${live3d.dir}/data.js`, data3d(replay(list).trail, { v: key, logos: LOGOS, prompt: prompt?.k === 'prompt' ? prompt.text : undefined }))
+  await $.fs.write(`${live3d.dir}/data.js`, data3d(folded(list).trail, { v: key, logos: LOGOS, prompt: prompt?.k === 'prompt' ? prompt.text : undefined }))
 }
 const open3d = async ($: EngineInterface) => {
   const L = layout
@@ -592,37 +449,13 @@ export const register: Register = (on, options) => {
     const input = e as unknown as Record<string, unknown>
     const output = ran.text ?? ''
     enqueue(async () => {
-      const out: TrailEvent[] = []
-      const plan = planOf(tool, input, at)
-      if (plan !== undefined) out.push(plan)
-      else if (!(tool.startsWith('mcp__') && isLocal(splitMcp(tool).server)) && tool !== 'ToolSearch') {
-        out.push({ k: 'act', tool, what: whatOf(tool, input), at, ...(agent ? { agent } : {}) })
-      }
-      // what the result added to the main context; a sub-agent's results stay in its own
-      if (!agent && output.length > 0) {
-        const fp = typeof input.file_path === 'string' ? input.file_path : undefined
-        const label = tool.startsWith('mcp__') ? splitMcp(tool).tool
-          : fp !== undefined ? fp
-          : typeof input.command === 'string' ? input.command.slice(0, 90)
-          : typeof input.pattern === 'string' ? input.pattern
-          : typeof input.url === 'string' ? input.url
-          : typeof input.description === 'string' ? input.description : ''
-        out.push({ k: 'cost', tool, label, tokens: estimate(output), at })
-      }
-      if (tool.startsWith('mcp__')) {
-        const { server, tool: t } = splitMcp(tool)
-        if (!isLocal(server)) {
-          out.push({ k: 'mcp', server, tool: t, label: callLabel(input), at, ...(ran.isError === true ? { err: true as const } : {}), ...(agent ? { agent } : {}) })
-          // a connector's result can name files of the folder (a search in the vault, a note's path): seen
-          if (ran.isError !== true && output !== '') {
-            await load($).catch(() => {})
-            if (I !== undefined) {
-              const ps = pathsIn(I, output, await rootDir($), await homeDir($))
-              if (ps.length > 0) out.push({ k: 'seen', ps, via: 'search', at, ...(agent ? { agent } : {}) })
-            }
-          }
-        }
-      } else if (ran.isError !== true) {
+      const isError = ran.isError === true
+      let searchPaths: string[] | undefined
+      let touch: { found: TrailEvent[]; metas: string[][] } | undefined
+      if (needsMcpScan(tool, isError, output)) {
+        await load($).catch(() => {})
+        if (I !== undefined) searchPaths = pathsIn(I, output, await rootDir($), await homeDir($))
+      } else if (needsTouch(tool, isError)) {
         await load($).catch(() => {})
         if (I !== undefined) {
           const h = await homeDir($)
@@ -633,14 +466,10 @@ export const register: Register = (on, options) => {
           const list = await read($, events)
           const found = touchedBy(I, tool, input, output, list, at, start, h, agent)
           const metas = await Promise.all(found.map(ev => (ev.k === 'read' || ev.k === 'write' ? readMeta($, ev.p, ev.out) : Promise.resolve([] as string[]))))
-          out.push(...found)
-          // the notes a note read links to: their names came in with it
-          const touched = new Set(found.flatMap(ev => (ev.k === 'read' || ev.k === 'write' ? [ev.p] : [])))
-          const viaLink = [...new Set(found.flatMap((ev, j) => (ev.k === 'read' ? metas[j]! : [])))].filter(p => !touched.has(p))
-          if (viaLink.length > 0) out.push({ k: 'seen', ps: viaLink, via: 'link', at, ...(agent ? { agent } : {}) })
+          touch = { found, metas }
         }
       }
-      await record($, out)
+      await record($, assembleCapture({ tool, input, output, at, agent, isError, searchPaths, touch }))
     })
     return ran
   }).catch(($, e, next) => next(e))
@@ -716,8 +545,8 @@ export const register: Register = (on, options) => {
     if (d.kind === 'drag' && typeof d.sfx === 'number' && typeof d.sfy === 'number') {
       // the frame the drag started from, moved by the distance the pointer went
       if (dragBase === undefined) dragBase = { ...lastMap.view }
-      const b = dragBase, side = Math.min(b.vw, b.vh)
-      await update($, cameraA, () => ({ x: b.vx + (b.vw - side) / 2 - (d.fx! - d.sfx!) * b.vw, y: b.vy + (b.vh - side) / 2 - (d.fy! - d.sfy!) * b.vh, side }))
+      const pannedFrame = panFrame(dragBase, d.fx! - d.sfx!, d.fy! - d.sfy!)
+      await update($, cameraA, () => pannedFrame)
       return { props: { tip: null } }
     }
     if (d.kind === 'click') {
@@ -783,7 +612,7 @@ export const register: Register = (on, options) => {
     const zone = zoneOf(pct)
 
     const label = (text: string) => <Text size="caption" weight="medium" dimColor>{text.toUpperCase()}</Text>
-    const card = (key: string, title: string, children: any) => (
+    const card = (key: string, title: string, children: RenderChildren) => (
       <Box key={key} flexDirection="column" gap="xs" borderStyle="single" borderColor={P.line} padding="sm">
         {label(title)}
         {children}
@@ -871,45 +700,28 @@ const rank2 = (z: 'ok' | 'warn' | 'bad') => (z === 'ok' ? 0 : z === 'warn' ? 1 :
 // The tabs share these: the element constructors and helpers of the render pass.
 type Ctx = {
   S: Strings; P: Palette; list: TrailEvent[]; now: number
-  card: (key: string, title: string, children: unknown) => any
-  Box: any; Text: any; Button: any; ui: any
+  card: (key: string, title: string, children: RenderChildren) => RenderElement
+  Box: ElementConstructor<BoxProps>; Text: ElementConstructor<TextProps>; Button: ElementConstructor<ButtonProps>; ui: ElementTable
   isOpen: (k: string) => boolean
-  more: (k: string) => any
+  more: (k: string) => RenderElement
 }
 
 // ---- Context: the gauge, what was loaded at start, what fills it ----
 
-const contextTab = async ($: EngineInterface, c: Ctx & { m: Meter; widthPx: number; lang: Lang; svg: (k: string, s: string, w: number, h: number, a: string) => any }) => {
+const contextTab = async ($: EngineInterface, c: Ctx & { m: Meter; widthPx: number; lang: Lang; svg: (k: string, s: string, w: number, h: number, a: string) => RenderNode }) => {
   const { S, P, m, list, card, Box, Text, Button } = c
   const b = await getBreakdown($, c.now)
-  const pct = m.percent ?? 0
-  const zone = zoneOf(pct)
-  const win = m.window || b?.rawMaxTokens || 0
-  const compactAt = b?.isAutoCompactEnabled && b.autoCompactThreshold !== undefined && win > 0 ? Math.round((b.autoCompactThreshold / win) * 100) : undefined
+  const facts = windowFacts(m.percent, m.window, b)
+  const pct = facts.pct
+  const zone = facts.zone
+  const win = facts.win
+  const compactAt = facts.compactAt
   const gw = Math.max(200, c.widthPx - 40)
-
-  const used = (b?.categories ?? []).filter(k => k.kind === 'used')
-  const startCats = used.filter(k => k.name !== 'Messages')
-  const startTotal = startCats.reduce((a, k) => a + k.tokens, 0)
-  const messages = used.find(k => k.name === 'Messages')
-
-  // the tool results that took the most room since the last compaction
-  let since = 0
-  list.forEach((ev, i) => { if (ev.k === 'compact') since = i + 1 })
-  const costs = list.slice(since).flatMap(ev => (ev.k === 'cost' ? [ev] : [])).sort((a, z) => z.tokens - a.tokens).slice(0, 5)
+  const { startCats, startTotal, messages } = usedStart(b?.categories)
+  const costs = costsSinceCompact(list)
   const tipFor = (tool: string) => (tool.startsWith('mcp__') ? S.tip.mcp : (S.tip as Record<string, string>)[tool] ?? S.tip.other)
-  const toolName = (tool: string) => { if (!tool.startsWith('mcp__')) return tool; const { server, tool: t } = splitMcp(tool); return `${nameServer(server, byServer.get(server) ?? new Set([t]))} · ${t}` }
-
-  // grouped by the name a person knows (a claude.ai connector has a UUID), local app tools included: they cost too
-  const byServer = toolsByServer((b?.mcpTools ?? []).map(t => t.name))
-  const mcpServers = new Map<string, { tools: number; tokens: number; loaded: number }>()
-  for (const t of b?.mcpTools ?? []) {
-    const server = splitMcp(t.name).server
-    const name = nameServer(server, byServer.get(server) ?? new Set())
-    const s = mcpServers.get(name) ?? { tools: 0, tokens: 0, loaded: 0 }
-    s.tools++; s.tokens += t.tokens; if (t.isLoaded) s.loaded++
-    mcpServers.set(name, s)
-  }
+  const { byServer, mcpServers } = mcpServerRows(b?.mcpTools ?? [])
+  const toolName = (tool: string) => toolLabel(tool, byServer)
   const bar = (key: string, tokens: number, max: number, color: string) => c.svg(key,
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 6" width="100" height="6" preserveAspectRatio="none"><rect width="100" height="6" rx="3" fill="${P.line}"/><rect width="${Math.max(1.5, Math.min(100, (tokens / Math.max(max, 1)) * 100))}" height="6" rx="3" fill="${color}" fill-opacity=".8"/></svg>`,
     100, 6, '')
@@ -927,7 +739,7 @@ const contextTab = async ($: EngineInterface, c: Ctx & { m: Meter; widthPx: numb
   const hist = await costHistory($)
   const set = await read($, settingsA)
   const prompts = Math.max(1, list.filter(ev => ev.k === 'prompt').length)
-  const ratio = m.usd !== undefined && hist.median !== undefined && hist.count >= 3 ? m.usd / hist.median : undefined
+  const ratio = costRatio(m.usd, hist.median, hist.count)
   const verdict = ratio === undefined ? S.verdictWait(hist.count) : ratio < 0.6 ? S.verdictLight(ratio) : ratio <= 1.5 ? S.verdictUsual : S.verdictHeavy(ratio)
   const open = c.isOpen('context')
 
@@ -1027,12 +839,10 @@ const contextTab = async ($: EngineInterface, c: Ctx & { m: Meter; widthPx: numb
   )
 }
 
-const label2 = (Text: any, text: string) => <Text size="caption" weight="medium" dimColor>{text}</Text>
+const label2 = (Text: ElementConstructor<TextProps>, text: string) => <Text size="caption" weight="medium" dimColor>{text}</Text>
 
 // ---- Files: the figures first, then the session's files as a tree of their folders ----
 
-type Entry = { p: string; out?: true; reads: number; writes: number; seen: boolean; linked: boolean; start: boolean; agent: boolean; tokens: number }
-type Dir = { name: string; path: string; dirs: Map<string, Dir>; files: Entry[] }
 
 const filesTab = async ($: EngineInterface, c: Ctx) => {
   const { S, P, list, card, Box, Text, Button } = c
@@ -1044,42 +854,19 @@ const filesTab = async ($: EngineInterface, c: Ctx) => {
   if (shown !== null) return previewView($, c, shown)
 
   const root = I?.root ?? ''
-  const rel = (abs: string) => (root !== '' && abs.startsWith(`${root}/`) ? { p: abs.slice(root.length + 1) } : { p: abs, out: true as const })
-  const all = new Map<string, Entry>()
-  const entry = (p: string, out?: true) => {
-    let x = all.get(p)
-    if (x === undefined) { x = { p, ...(out ? { out } : {}), reads: 0, writes: 0, seen: false, linked: false, start: false, agent: false, tokens: 0 }; all.set(p, x) }
-    return x
-  }
-  for (const f of b?.memoryFiles ?? []) { const r = rel(f.path); const x = entry(r.p, r.out); x.start = true; x.tokens += f.tokens }
-  const costByFile = new Map<string, number>()
-  for (const ev of list) if (ev.k === 'cost' && ev.tool === 'Read') costByFile.set(ev.label, (costByFile.get(ev.label) ?? 0) + ev.tokens)
-  for (const ev of list) {
-    if (ev.k === 'seen') { for (const p of ev.ps) { const x = entry(p); if (ev.via === 'link') x.linked = true; else x.seen = true } continue }
-    if (ev.k !== 'read' && ev.k !== 'write' && ev.k !== 'hit') continue
-    const x = entry(ev.p, ev.out)
-    if (ev.k === 'hit') x.seen = true
-    else if (ev.agent) x.agent = true
-    else if (ev.k === 'read') x.reads++
-    else x.writes++
-  }
-  for (const x of all.values()) if (x.reads > 0) x.tokens += costByFile.get(x.out ? x.p : `${root}/${x.p}`) ?? costByFile.get(x.p) ?? 0
-  const { gaps } = replay(list)
-
-  // the figures: one card each
+  const all = projectFiles(list, b?.memoryFiles ?? [], root)
+  const { gaps } = folded(list)
   const entries = [...all.values()]
-  // each figure opens the list of its files under the cards (one at a time)
-  type Fig = { id: string; label: string; why: string; files?: Entry[]; n: number }
-  const pickFiles = (keep: (x: Entry) => boolean) => entries.filter(keep).sort((a, z) => z.tokens - a.tokens || a.p.localeCompare(z.p))
-  const figures: Fig[] = [
-    { id: 'start', label: S.gStart, why: S.gStartWhy, files: pickFiles(x => x.start) },
-    { id: 'read', label: S.gRead, why: S.gReadWhy, files: pickFiles(x => x.reads > 0) },
-    { id: 'written', label: S.gWritten, why: S.gWrittenWhy, files: pickFiles(x => x.writes > 0) },
-    { id: 'found', label: S.gFound, why: S.gFoundWhy, files: pickFiles(x => x.seen && x.reads === 0 && x.writes === 0) },
-    { id: 'linked', label: S.gLinked, why: S.gLinkedWhy, files: pickFiles(x => x.linked && !x.seen && x.reads === 0 && x.writes === 0) },
-    ...(entries.some(x => x.agent) ? [{ id: 'agent', label: S.gAgent, why: S.gAgentWhy, files: pickFiles(x => x.agent) }] : []),
-    { id: 'missing', label: S.missing, why: S.missingWhy },
-  ].map(fg => ({ ...fg, n: fg.files?.length ?? gaps.length }))
+  const copy: Record<FileFigure['id'], { label: string; why: string }> = {
+    start: { label: S.gStart, why: S.gStartWhy },
+    read: { label: S.gRead, why: S.gReadWhy },
+    written: { label: S.gWritten, why: S.gWrittenWhy },
+    found: { label: S.gFound, why: S.gFoundWhy },
+    linked: { label: S.gLinked, why: S.gLinkedWhy },
+    agent: { label: S.gAgent, why: S.gAgentWhy },
+    missing: { label: S.missing, why: S.missingWhy },
+  }
+  const figures = fileFigures(entries, gaps.length).map(fg => ({ ...fg, ...copy[fg.id] }))
   const chosen = figures.find(fg => c.isOpen(`kpi:${fg.id}`))
   const choose = (id: string) => update($, openA, l => {
     const was = l.includes(`kpi:${id}`)
@@ -1096,7 +883,7 @@ const filesTab = async ($: EngineInterface, c: Ctx) => {
       ))}
     </Box>
   )
-  const detailRow = (x: Entry) => {
+  const detailRow = (x: FileEntry) => {
     const facts = [x.reads > 0 ? S.kpiRead(x.reads) : '', x.writes > 0 ? S.kpiWrite(x.writes) : '', x.tokens > 0 ? S.kpiTokens(fmt(x.tokens)) : ''].filter(Boolean).join(' · ')
     const dir = x.p.includes('/') ? x.p.slice(0, x.p.lastIndexOf('/')) : ''
     return (
@@ -1111,28 +898,15 @@ const filesTab = async ($: EngineInterface, c: Ctx) => {
   }
 
   // the tree: the folders of the files the session used, as they sit in the folder; files outside it after
-  const top: Dir = { name: '', path: '', dirs: new Map(), files: [] }
-  const outside: Entry[] = []
-  for (const x of entries) {
-    if (x.reads === 0 && x.writes === 0 && !x.start && !x.agent) continue
-    if (x.out) { outside.push(x); continue }
-    const parts = x.p.split('/')
-    let d = top
-    for (const part of parts.slice(0, -1)) {
-      const path = d.path === '' ? part : `${d.path}/${part}`
-      if (!d.dirs.has(part)) d.dirs.set(part, { name: part, path, dirs: new Map(), files: [] })
-      d = d.dirs.get(part)!
-    }
-    d.files.push(x)
-  }
-  const fileRow = (x: Entry, depth: number) => (
+  const { top, outside } = fileTree(entries)
+  const fileRow = (x: FileEntry, depth: number) => (
     <Box key={`f-${x.p}`} flexDirection="row" paddingLeft={depth * 2 + 2}>
       <Button key={`open-${x.p}`} plain label={fileName(x.p)} onPress={() => openFile($, x.p, x.out)} />
     </Box>
   )
   // a folder opens and closes; all are open at first
-  const rows: any[] = []
-  const walk = (d: Dir, depth: number) => {
+  const rows: RenderNode[] = []
+  const walk = (d: FileDir, depth: number) => {
     for (const s of [...d.dirs.values()].sort((a, z) => a.name.localeCompare(z.name))) {
       const closed = c.isOpen(`fold:${s.path}`)
       rows.push(
@@ -1164,7 +938,7 @@ const filesTab = async ($: EngineInterface, c: Ctx) => {
           <Text size="caption" wrap="truncate-end">{fileName(from)}</Text>
           <Text size="caption" dimColor wrap="truncate-end">{S.then} {fileName(to)}</Text>
         </Box>
-        <Button key={`copy-${pairKey(g.from, g.to)}`} label={S.copy} onPress={async (press: { surface: 'desktop' }) => {
+        <Button key={`copy-${pairKey(g.from, g.to)}`} label={S.copy} onPress={async press => {
           const res = await $.ui.copy({ text: line, surface: press.surface }).catch(() => undefined)
           if (res !== undefined) void $.ui.toast(`${S.copied}: ${line}`)
         }} />
@@ -1245,10 +1019,10 @@ const mapTab = async ($: EngineInterface, c: Ctx & { widthPx: number }) => {
   const play = await read($, playA)
   await getBreakdown($, c.now)
   // a replay draws the session as it stood at one step, the step's move drawn as it happens
-  const steps = list.flatMap((ev, k) => (isStep(ev) ? [k] : []))
-  const at = play.step === null ? undefined : Math.min(play.step, steps.length - 1)
-  const shownList = at === undefined || steps.length === 0 ? list : list.slice(0, steps[at]! + 1).map((ev, k) => (k === steps[at]! ? { ...ev, at: c.now } : ev))
-  const R = replay(shownList)
+  const sliced = sliceToStep(list, play.step, c.now)
+  const steps = sliced.steps
+  const at = sliced.at
+  const R = folded(sliced.shown)
   const T = R.trail
   const services = [...T.perSvc.keys()]
   const vault = L.files.every(([p]) => p.endsWith('.md'))
@@ -1287,7 +1061,7 @@ const mapTab = async ($: EngineInterface, c: Ctx & { widthPx: number }) => {
   const following = isTrail && (in3d || camera === null)
   // controls laid over the map: one group per corner, each a single row on the map's own background.
   // No fragment inside: the app lays a fragment out as a column of its own.
-  const group = (key: string, children: any[]) => (
+  const group = (key: string, children: RenderNode[]) => (
     <Box key={key} flexDirection="row" flexWrap="nowrap" columnGap="xs" alignItems="center" padding="xs">{children}</Box>
   )
   const playing = play.step !== null
@@ -1375,7 +1149,7 @@ const mapTab = async ($: EngineInterface, c: Ctx & { widthPx: number }) => {
 // ---- TrailSettings: what opens a file, the language, the map's hover names ----
 
 const settingsTab = async ($: EngineInterface, c: Ctx & { lang: Lang }) => {
-  const { S, P, card, Box, Text, Button, lang } = c
+  const { S, card, Box, Text, Button, lang } = c
   const set = await read($, settingsA)
   const list = ['preview', 'default', ...(await installedApps($))]
   const save = async (patch: Partial<TrailSettings>) => {
@@ -1446,77 +1220,18 @@ const settingsTab = async ($: EngineInterface, c: Ctx & { lang: Lang }) => {
   )
 }
 
-// ---- Goal: what Claude does, told the way a project manager would tell it ----
-
-const dur = (ms: number, S: Strings) => { const m = Math.round(ms / 60000); return m < 1 ? S.lessMin : S.mins(m) }
-
-// what a service's tool does, from its name: look something up, add, update, send, remove
-const verbOf = (tool: string): 'look' | 'add' | 'update' | 'send' | 'remove' | 'use' => {
-  const t = tool.toLowerCase().replace(/^(slack_|notion-)/, '')
-  if (/^(get|list|search|read|fetch|query|find|load|lookup|semantic|view|download|inspect|check)/.test(t)) return 'look'
-  if (/^(create|add|upsert|insert|new|upload|import)/.test(t)) return 'add'
-  if (/^(update|edit|set|change|modify|apply|mark|move|rename|configure|reorder)/.test(t)) return 'update'
-  if (/^(send|post|reply|forward|publish|invite|share|schedule)/.test(t)) return 'send'
-  if (/^(delete|trash|remove|cancel|archive)/.test(t)) return 'remove'
-  return 'use'
-}
-
-type Told = { key: string; items: string[]; tell: (items: string[]) => string; agent?: true }
-
-// each action becomes a sentence; actions of the same kind in a row become one sentence
-const tell = (events: TrailEvent[], S: Strings, names: Map<string, string>) => {
-  const out: Told[] = []
-  for (const ev of events) {
-    if (ev.k !== 'act') continue
-    let key = ev.tool, item = ev.what, phrase: (items: string[]) => string
-    if (ev.tool === 'Read') phrase = S.g.read
-    else if (ev.tool === 'Write') phrase = S.g.write
-    else if (['Edit', 'MultiEdit', 'NotebookEdit'].includes(ev.tool)) { key = 'Edit'; phrase = S.g.edit }
-    else if (ev.tool === 'Grep' || ev.tool === 'Glob') { key = 'search'; phrase = S.g.search }
-    else if (ev.tool === 'Bash') phrase = S.g.run
-    else if (ev.tool === 'WebFetch') phrase = S.g.web
-    else if (ev.tool === 'WebSearch') phrase = S.g.websearch
-    else if (ev.tool === 'Agent' || ev.tool === 'Task') phrase = S.g.agent
-    else if (ev.tool === 'Skill') phrase = S.g.skill
-    else if (ev.tool === 'AskUserQuestion') phrase = S.g.ask
-    else if (ev.tool.startsWith('mcp__')) {
-      const { server, tool } = splitMcp(ev.tool)
-      const svc = names.get(server) ?? nameServer(server, new Set([tool]))
-      const verb = verbOf(tool)
-      key = `mcp:${svc}:${verb}`
-      item = ev.what || tool.replace(/[_-]+/g, ' ')
-      phrase = items => S.g.service(svc, verb, items)
-    } else { key = `other:${ev.tool}`; item = ev.tool; phrase = S.g.other }
-    const last = out.at(-1)
-    if (last !== undefined && last.key === key && last.agent === ev.agent) { if (item !== '' && !last.items.includes(item)) last.items.push(item); continue }
-    out.push({ key, items: item !== '' ? [item] : [], tell: phrase, ...(ev.agent ? { agent: true as const } : {}) })
-  }
-  return out.map(t => (t.agent ? S.g.byAgent(t.tell(t.items)) : t.tell(t.items)))
-}
-
-// the time a request was made, as the clock on the wall reads it
-const hhmm = (at: number) => { const d = new Date(at); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
 
 const goalTab = async ($: EngineInterface, c: Ctx & { lang: Lang }) => {
   const { S, list, card, Box, Text } = c
-  const names = nameServers(list)
-  // one block per request: what was asked, what Claude did, when it ended
-  type Block = { prompt: string; at: number; end?: number; events: TrailEvent[] }
-  const blocks: Block[] = []
-  for (const ev of list) {
-    if (ev.k === 'prompt') { blocks.push({ prompt: ev.text, at: ev.at, events: [] }); continue }
-    const b = blocks.at(-1)
-    if (b === undefined) continue
-    if (ev.k === 'done') b.end = ev.at
-    else { b.events.push(ev); if (ev.k === 'act') b.end = undefined }
-  }
+  const names = nameServers(list, connected)
+  const blocks = goalBlocks(list)
   if (blocks.length === 0) return card('goal', S.goalNow, <Text size="caption" dimColor wrap="wrap">{S.noGoal}</Text>)
 
   const cur = blocks.at(-1)!
   const working = cur.end === undefined
   const plan = planNow(list)
   const doneCount = plan.filter(x => x.s === 'completed').length
-  const acts = (b: Block) => b.events.filter(ev => ev.k === 'act').length
+  const acts = (b: { events: readonly TrailEvent[] }) => b.events.filter(ev => ev.k === 'act').length
 
   return (
     <Box flexDirection="column" gap="sm">
@@ -1540,7 +1255,7 @@ const goalTab = async ($: EngineInterface, c: Ctx & { lang: Lang }) => {
         <Box flexDirection="column" gap="sm">
           {blocks.slice().reverse().map((b, bi) => {
             const live = bi === 0 && working
-            const told = tell(b.events, S, names)
+            const told = tell(b.events, S.g, names)
             return (
               <Box key={`h-${b.at}`} flexDirection="column" gap="xs">
                 <Box flexDirection="row" columnGap="sm">
@@ -1564,55 +1279,11 @@ const goalTab = async ($: EngineInterface, c: Ctx & { lang: Lang }) => {
   )
 }
 
-// ---- Coach: what to do better next time, from what this session did ----
-
-type Tip = { title: string; body: string }
-
-// what the session's own figures say, with no model call
-const coachTips = (list: TrailEvent[], b: SessionContextBreakdown | undefined, m: Meter, S: Strings): Tip[] => {
-  const tips: Tip[] = []
-  // a whole file read when a part would have done
-  const big = list.flatMap(ev => (ev.k === 'cost' && ev.tool === 'Read' && ev.tokens > 8000 ? [ev] : [])).sort((a, z) => z.tokens - a.tokens)[0]
-  if (big !== undefined) tips.push(S.tipBigRead(fileName(big.label), fmt(big.tokens)))
-  // the same note read again and again: its essentials belong in the instructions
-  const reads = new Map<string, number>()
-  for (const ev of list) if (ev.k === 'read' && !ev.agent) reads.set(ev.p, (reads.get(ev.p) ?? 0) + 1)
-  const again = [...reads].sort((a, z) => z[1] - a[1])[0]
-  if (again !== undefined && again[1] >= 3) tips.push(S.tipReread(fileName(again[0]), again[1]))
-  // many searches for one request: Claude did not know where things are
-  let searches = 0, most = 0
-  for (const ev of list) {
-    if (ev.k === 'prompt') { most = Math.max(most, searches); searches = 0 }
-    if (ev.k === 'act' && (ev.tool === 'Grep' || ev.tool === 'Glob')) searches++
-  }
-  most = Math.max(most, searches)
-  if (most >= 5) tips.push(S.tipSearch(most))
-  // a short request that took many actions: the goal was not clear enough
-  const blocks: { text: string; acts: number }[] = []
-  for (const ev of list) {
-    if (ev.k === 'prompt') blocks.push({ text: ev.text, acts: 0 })
-    else if (ev.k === 'act' && blocks.length > 0) blocks.at(-1)!.acts++
-  }
-  const vague = blocks.find(x => x.text.length < 40 && x.acts >= 8)
-  if (vague !== undefined) tips.push(S.tipShort(vague.text, vague.acts))
-  // notes chained with no link between them
-  const gaps = replay(list).gaps.length
-  if (gaps >= 3) tips.push(S.tipLinks(gaps))
-  // what is loaded before the first message
-  const mcpTokens = (b?.mcpTools ?? []).filter(t => t.isLoaded).reduce((a, t) => a + t.tokens, 0)
-  const servers = new Set((b?.mcpTools ?? []).map(t => splitMcp(t.name).server).filter(s => !isLocal(s))).size
-  const used = new Set(list.flatMap(ev => (ev.k === 'mcp' ? [ev.server] : []))).size
-  if (mcpTokens > 15000 && servers > used + 3) tips.push(S.tipMcp(servers, used, fmt(mcpTokens)))
-  const memory = (b?.memoryFiles ?? []).reduce((a, f) => a + f.tokens, 0)
-  if (memory > 12000) tips.push(S.tipMemory(fmt(memory)))
-  if ((m.percent ?? 0) >= 50) tips.push(S.tipWindow(m.percent ?? 0))
-  return tips
-}
 
 const coachTab = async ($: EngineInterface, c: Ctx & { lang: Lang; m: Meter }) => {
   const { S, list, card, Box, Text, Button, lang, m } = c
   const b = await getBreakdown($, c.now)
-  const tips = coachTips(list, b, m, S)
+  const tips = coachTips(list, b, m.percent, S, { index: I, linked, connected })
   const co = await read($, coachA)
   // the project's instructions file: AGENTS.md where there is one, else CLAUDE.md
   const root = I?.root ?? (await rootDir($))

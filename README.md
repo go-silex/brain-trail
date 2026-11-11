@@ -119,13 +119,9 @@ We help business leaders rebuild how their company works with AI. The leader bui
 
 <br>
 
-Run the tests:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks, module interfaces, SDK updates and the evidence expected for changes to the views.
 
-```bash
-claude plugin test .
-```
-
-The map is drawn as SVG under the 131,072 characters a pane accepts. `hooks/map.ts` draws it, `hooks/files.ts` decides which files a tool call touched, `hooks/register.tsx` wires the pane.
+Report vulnerabilities privately using the contact in [SECURITY.md](SECURITY.md).
 
 </details>
 

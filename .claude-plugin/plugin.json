@@ -1,6 +1,6 @@
 {
   "name": "brain-trail-v2",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "A pane beside the chat that shows what this Claude Code session puts in its context: a map of the files it moves through, the list of every file and why it is there, and a gauge that tells you when to compact or start a new session",
   "author": {
     "name": "Unkillable Companies"

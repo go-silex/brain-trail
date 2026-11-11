@@ -1,4 +1,4 @@
-import type { Lang } from '../types'
+import type { Lang } from '../types/model'
 
 // a name in quotes, and the first few of a list
 const q = (s: string | undefined) => `« ${s ?? ''} »`

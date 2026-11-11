@@ -1,0 +1,25 @@
+# Local net only. CI is the authority. One runner: lefthook.
+# Install: bun run prepare
+# Does not set core.hooksPath.
+# no_auto_install: pinned 2.2.2 otherwise reinstalls hooks on every run
+# (internal/command/run.go) and can replace a hook the installer refused.
+no_auto_install: true
+assert_lefthook_installed: true
+
+pre-commit:
+  parallel: true
+  commands:
+    sdk:
+      run: bun run check:sdk
+    release:
+      run: bun run check:release
+    lint:
+      run: bun run lint
+    format:
+      run: bun run format
+
+pre-push:
+  parallel: false
+  commands:
+    verify:
+      run: bun run verify

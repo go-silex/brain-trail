@@ -1,5 +1,5 @@
 // The session's folder as a list of files, and which of them a tool call touched.
-import type { TrailEvent } from '../types'
+import type { TrailEvent } from '../types/model'
 
 // Files that never feed the model as text: left out of the map.
 const MEDIA = /\.(png|jpe?g|gif|webp|ico|icns|bmp|tiff?|heic|mp4|mov|avi|mkv|webm|mp3|wav|m4a|ogg|flac|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|dmg|pkg|exe|dll|so|dylib|o|a|class|jar|pyc|wasm|bin|dat|db|sqlite3?|DS_Store)$/i

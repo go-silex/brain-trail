@@ -1,7 +1,8 @@
 // The brain in 3D: a page the mod writes next to its cache and opens in the browser, where WebGL can run.
 // The page is static (the folder's notes); a small data file next to it carries the session, rewritten
 // as Claude works, and the page reads it again every second and a half.
-import type { Layout, Trail } from './map'
+import type { Layout } from './map'
+import type { Trail } from '../types/model'
 
 export type Base3d = {
   title: string
