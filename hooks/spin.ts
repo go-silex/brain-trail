@@ -5,7 +5,8 @@
 // One keyframe list drives every slice, each with its own delay. Names and the notes Claude touched
 // follow their exact path with animateMotion. Nothing runs in the mod while it turns.
 import type { Trail } from '../types/model'
-import { fileName, fitTitle, kindColors, type Layout, type Palette } from './map'
+import { fileName, fitTitle, fitted, kindColors, type Layout, type Palette } from './map'
+import { fitFrame } from './pointer'
 
 export const SPIN_MS = 80_000  // one full turn
 const NB = 72                  // slices around the axis (5 degrees each)
@@ -74,9 +75,10 @@ const nearness = (phi: number) => (1 - Math.sin(phi)) / 2
 
 export type SpinView = { vx: number; vy: number; vw: number; vh: number; px: number; yaw: number; ce: number; se: number; t: number; spinning: boolean }
 
+// `aspect`: the height over the width of the box the host gives the drawing; absent, it takes its own fixed shape.
 export const drawSpin = (
   L: Layout, T: Trail, P: Palette,
-  o: { widthPx: number; now: number; cam: Cam; follow: boolean; filesWord: string; outside: number; dark: boolean },
+  o: { widthPx: number; now: number; cam: Cam; follow: boolean; filesWord: string; outside: number; dark: boolean; aspect?: number },
 ) => {
   const B = brain(L)
   const { widthPx, now, cam } = o
@@ -88,7 +90,8 @@ export const drawSpin = (
   const spinning = cam.spin && !follow
   const ang = (n: number) => (spinning ? sliceAngle(B.b[n]!) : B.a[n]!)
   const yaw = follow ? -Math.PI / 2 - ang(cur!) : yawAt(cam, now)
-  // the frame: the whole brain fits at any angle the camera can take, in a fixed shape so the pane never jumps
+  // The intrinsic frame stays unchanged without an aspect; fitted views
+  // contain a natural picture before expanding it to the available rectangle.
   const contentW = B.rMax * 1.98, contentTop = -(B.yMax * ce + B.rMax * se), contentBottom = B.rMax * se
   const aspect = 0.58
   let vw = Math.max(contentW, (contentBottom - contentTop) * 1.04 / aspect)
@@ -96,14 +99,59 @@ export const drawSpin = (
   const zoom = follow ? Math.max(1.8, cam.zoom) : Math.max(0.6, Math.min(12, cam.zoom))
   vw /= zoom
   if (follow) [cx, cy] = at(B.u[cur!]!, B.v[cur!]!, ang(cur!) + yaw, ce, se)
-  const vh = vw * aspect
+  let vh = vw * aspect
   const px = vw / widthPx
   const head = 34 * px
-  const vx = cx - vw / 2, vy = cy - vh / 2 - head
-  const H = vh + head
+  let vx = cx - vw / 2, vy = cy - vh / 2 - head
+  let H = vh + head
+  let titleX = vx, titleY = vy
+  if (o.aspect !== undefined) {
+    // Bound rotating annotations at every yaw, not just the current projection.
+    // These bounds are built at unit zoom, then zoom/follow remain deliberate crops.
+    const unit = px * zoom
+    // Any note may become current; count-dependent glows reflect the scene,
+    // while the pill allowance is independent of which note is current.
+    let glow = 0, nameLength = 0
+    for (const s of T.state.values()) {
+      if (s.k === 'read' || s.k === 'write') glow = Math.max(glow, (16 + 5 * Math.log2(s.count + 1)) * unit)
+    }
+    for (const [path] of L.files) {
+      const length = path.length - path.lastIndexOf('/') - 1 - (path.endsWith('.md') ? 3 : 0)
+      nameLength = Math.max(nameLength, Math.min(30, length))
+    }
+    const pill = (14 + nameLength * 12.5 * 0.56 + 18) * unit
+    const horizontal = Math.max(glow, pill, 30 * unit)
+    const vertical = Math.max(glow, 30 * unit, 11 * unit)
+    let left = -B.rMax - horizontal, right = B.rMax + horizontal
+    const lift = 30 + Math.hypot(2 * B.rMax, B.yMax) * 0.16
+    let top = Math.min(-(B.yMax + lift) * ce - B.rMax * se - 3 * unit, contentTop - vertical, -B.yMax * ce * 0.35 - (B.rMax * Math.max(0.3, se) * 0.9 + B.yMax * ce * 0.5))
+    let bottom = Math.max(contentBottom + vertical, -B.yMax * ce * 0.35 + (B.rMax * Math.max(0.3, se) * 0.9 + B.yMax * ce * 0.5))
+    for (let i = 0; i < B.u.length; i++) {
+      top = Math.min(top, -B.v[i]! * ce - B.u[i]! * se - vertical)
+      bottom = Math.max(bottom, -B.v[i]! * ce + B.u[i]! * se + vertical)
+    }
+    for (const l of B.labels) {
+      const fs = Math.max(9.5, Math.min(12, 9 + l.size / 90)) * unit
+      const half = l.name.length * fs * 0.65 / 2 + 3 * unit
+      const extent = l.u + half
+      left = Math.min(left, -extent); right = Math.max(right, extent)
+      top = Math.min(top, -l.v * ce - l.u * se - fs * 1.4)
+      bottom = Math.max(bottom, -l.v * ce + l.u * se + fs * 0.4)
+    }
+    const minimumWidth = vw * zoom
+    if (right - left < minimumWidth) {
+      const extra = (minimumWidth - (right - left)) / 2
+      left -= extra; right += extra
+    }
+    const centerX = (left + right) / 2, centerY = (top + bottom) / 2
+    const natural = { vx: (left - centerX) / zoom + (follow ? cx : centerX), vy: (top - centerY) / zoom + (follow ? cy : centerY) - head, vw: (right - left) / zoom, vh: (bottom - top) / zoom + head }
+    titleX = natural.vx; titleY = natural.vy
+    const fittedFrame = fitFrame(natural, o.aspect)
+    ;({ vx, vy, vw, vh: H } = fittedFrame)
+  }
   const heightPx = Math.round(widthPx * H / vw)
   const out: string[] = []
-  out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vx)} ${f(vy)} ${f(vw)} ${f(H)}" width="${FLUID}" height="${Math.round(FLUID * H / vw)}" font-family="'General Sans',ui-sans-serif,system-ui,sans-serif">`)
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vx)} ${f(vy)} ${f(vw)} ${f(H)}" ${o.aspect === undefined ? `width="${FLUID}" height="${Math.round(FLUID * H / vw)}"` : fitted} font-family="'General Sans',ui-sans-serif,system-ui,sans-serif">`)
 
   // one turn of a slice: its flat plane squeezed by the angle, slanted by the camera's height, dimmer at the back
   const tk = Math.tan(pitch)
@@ -242,9 +290,9 @@ export const drawSpin = (
   const more = o.outside > 0 ? ` · +${o.outside} outside` : ''
   const root = L.groups.find(g => g.depth === 0)
   const title = fitTitle(L.title.toUpperCase(), `${(root?.n ?? N).toLocaleString('en-US')} ${o.filesWord.toUpperCase()}${more}`, widthPx, 320)
-  if (title !== '') out.push(`<text x="${f(vx + 12 * px)}" y="${f(vy + 22 * px)}" font-size="${f(11 * px)}" font-family="ui-monospace,monospace" letter-spacing=".04em" fill="${P.dim}" stroke="${P.bg}" stroke-width="${f(4 * px)}" paint-order="stroke">${esc(title)}</text>`)
+  if (title !== '') out.push(`<text x="${f(titleX + 12 * px)}" y="${f(titleY + 22 * px)}" font-size="${f(11 * px)}" font-family="ui-monospace,monospace" letter-spacing=".04em" fill="${P.dim}" stroke="${P.bg}" stroke-width="${f(4 * px)}" paint-order="stroke">${esc(title)}</text>`)
   out.push('</svg>')
-  const view: SpinView = { vx, vy, vw, vh: H, px, yaw, ce, se, t: now, spinning }
+  const view: SpinView = { vx, vy, vw, vh: H, px: vw / widthPx, yaw, ce, se, t: now, spinning }
   return { svg: out.join(''), heightPx, view }
 }
 

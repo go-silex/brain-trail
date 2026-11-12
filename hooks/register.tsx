@@ -17,8 +17,8 @@ import { assembleCapture, needsMcpScan, needsTouch } from './acts'
 import { costStats, keepCosts, limitOf, usd, zoneOf } from './readout'
 import type { CostEntry } from './readout'
 import { appsArgv, appsIn, DEFAULT_SETTINGS, findArgv, fromFind, GIT_LS, hash, initialSettings, isShallow, openAttempts, pickFiles, vaultProbe } from './workspace'
-import { absOf, coachBusy, coachDone, coachFailed, GESTURE0, mapGesture, mapWheel, openTarget, paneWidthPx, parseGesture, plan, replayTick, STEP_MS, timerEffect } from './view-controller'
-import type { DrawnFrames, FoldFacts, Step, TabSnapshot, ViewActions, ViewChild, ViewIntent, ViewProps, ViewRuntime, ViewSnapshot, ViewTag } from '../types/view'
+import { absOf, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
+import type { Drawn2d, DrawnFrames, FoldFacts, Step, TabSnapshot, ViewActions, ViewChild, ViewIntent, ViewProps, ViewRuntime, ViewSnapshot, ViewTag } from '../types/view'
 import { renderPane, TITLE, weather } from './views'
 
 const COMMAND = 'brain-trail-v2'
@@ -286,9 +286,35 @@ const costHistoryOf = async ($: EngineInterface) => {
 // ---- the map's pointer layer ----
 
 // what the last map drawn shows, so a click or a hover can be matched to a file or a folder
-let lastMap: { view: { vx: number; vy: number; vw: number; vh: number; px: number }; L: Layout; touched: Set<number> } | undefined
+let lastMap: { view: Drawn2d['view']; L: Layout; touched: Set<number> } | undefined
 
 let gesture = GESTURE0
+// Measurements are stamped with their pane and map sizes; other surfaces cannot
+// clear them, and a late report from a previous resize cannot change the new frame.
+const hitBoxes = new Map<string, { box: string; reach: number }>()
+let mapChrome: { columns: number; chrome: Cells } | undefined
+let bodyWindow: { stamp: string; dimensions: string; paneRows: number; tab: Tab; offset: number; viewport: number; measured: number; reach: number; end: boolean } | undefined
+let bodyGeneration = 0
+let chromeGeneration = 0
+let measuredChrome: { shape: string; stamp: string; header: number; footer: number; headerReach: number; footerReach: number } | undefined
+let mapVisible = false
+const bodyLimit = () => bodyWindow === undefined ? 0 : Math.max(0, bodyWindow.measured + 1 - bodyWindow.viewport)
+// Keep the requested offset across provisional or stale measurements; only the
+// displayed window is clamped. A later measurement can reveal the saved position.
+const visibleBodyOffset = () => {
+  if (bodyWindow === undefined) return 0
+  if (bodyWindow.measured === 0 || bodyWindow.viewport === 0) return bodyWindow.offset
+  return bodyWindow.end ? bodyLimit() : Math.min(bodyWindow.offset, bodyLimit())
+}
+const moveBody = ($: EngineInterface, to: 'first' | 'previous' | 'next' | 'last' | number) => {
+  if (bodyWindow === undefined) return
+  const limit = bodyLimit()
+  const page = Math.max(1, bodyWindow.viewport)
+  const current = visibleBodyOffset()
+  bodyWindow.end = to === 'last'
+  bodyWindow.offset = Math.max(0, Math.min(limit, typeof to === 'number' ? current + to : to === 'first' ? 0 : to === 'last' ? limit : current + (to === 'next' ? page : -page)))
+  $.ui.invalidate('ui.render')
+}
 const drawnFrames = (): DrawnFrames => ({
   d2: lastMap === undefined ? undefined : { view: lastMap.view, layout: lastMap.L, touched: lastMap.touched },
   d3: lastSpin === undefined ? undefined : { view: lastSpin.view, layout: lastSpin.L, touched: lastSpin.touched },
@@ -372,14 +398,16 @@ const el = <P extends ViewProps>(tag: ViewTag<P, RenderElement>, props: P | null
   if (node === null || node === undefined || typeof node === 'string') throw new TypeError('Brain Trail: constructor returned no element')
   return node
 }
-const nativeRuntime = (ui: ElementTable): ViewRuntime<RenderElement, UiPressArgument> => ({
+const nativeRuntime = (ui: ElementTable, hitBox?: { box: string; reach: number }): ViewRuntime<RenderElement, UiPressArgument> => ({
   h: el, Box: ui.Box, Text: ui.Text, Button: ui.Button, Input: ui.Input, Link: ui.Link,
   Svg: 'Svg' in ui ? ui.Svg : undefined,
   Markdown: 'Markdown' in ui ? ui.Markdown : undefined,
   Code: 'Code' in ui ? ui.Code : undefined,
-  MapHit: 'Client' in ui ? () => <ui.Client key="map-hit" module="./hit.tsx" props={{ tip: null }} width="100%" height="100%" /> : undefined,
+  Measure: 'Client' in ui ? props => <ui.Client key={`${props.kind}-probe`} module="./measure.tsx" props={props} width={0} height="100%" /> : undefined,
+  MapHit: 'Client' in ui ? () => <ui.Client key="map-hit" module="./hit.tsx" props={{ tip: null, ...hitBox }} width="100%" height="100%" /> : undefined,
 })
 const nativeActions = ($: EngineInterface, snap: ViewSnapshot): ViewActions<UiPressArgument> => ({
+  scrollBody: to => moveBody($, to),
   intent: i => nativeIntent($, i),
   openFile: ref => openFile($, ref.p, ref.out ? true : undefined),
   openIn: (ref, app) => openWith($, absOf(I, ref), app),
@@ -524,7 +552,43 @@ export const register: Register = (on, options) => {
   // the pointer layer over the map: a name under the pointer, a click opens a file or zooms in,
   // a right click zooms out, a drag moves the map
   on('ui.message', async ($, e, next) => {
+    if (e.element === 'header-probe' || e.element === 'footer-probe') {
+      const data = e.data as { kind?: string; stamp?: string; rows?: number }
+      if (measuredChrome === undefined || data.stamp !== measuredChrome.stamp || data.kind !== e.element.replace('-probe', '') || typeof data.rows !== 'number' || !Number.isSafeInteger(data.rows) || data.rows <= 0) return {}
+      if (data.kind === 'header') {
+        measuredChrome.header = data.rows
+        if (data.rows >= measuredChrome.headerReach) measuredChrome.headerReach = Math.max(data.rows + 1, measuredChrome.headerReach * 2)
+      } else {
+        measuredChrome.footer = data.rows
+        if (data.rows >= measuredChrome.footerReach) measuredChrome.footerReach = Math.max(data.rows + 1, measuredChrome.footerReach * 2)
+      }
+      $.ui.invalidate('ui.render')
+      return {}
+    }
+    if (e.element === 'viewport-probe' || e.element === 'content-probe') {
+      const data = e.data as { kind?: string; stamp?: string; rows?: number }
+      if (bodyWindow === undefined || data.stamp !== bodyWindow.stamp || data.kind !== e.element.replace('-probe', '') || typeof data.rows !== 'number' || !Number.isFinite(data.rows) || data.rows <= 0) return {}
+      const rows = Math.floor(data.rows)
+      if (data.kind === 'viewport') bodyWindow.viewport = rows
+      else {
+        bodyWindow.measured = rows
+        if (rows >= bodyWindow.reach) bodyWindow.reach = Math.max(bodyWindow.reach * 2, rows + 1)
+      }
+      $.ui.invalidate('ui.render')
+      return {}
+    }
     if (e.element !== 'map-hit') return next(e)
+    if (e.surface === 'desktop' && !mapVisible) return {}
+    const laid = parseBox(e.data)
+    if (laid !== undefined) {
+      if (e.surface !== 'desktop' || laid.for !== hitBoxes.get(e.surface)?.box) return {}
+      const chrome = { columns: laid.pane.columns - laid.columns, rows: laid.pane.rows - laid.rows }
+      if (laid.pane.columns !== mapChrome?.columns || chrome.columns !== mapChrome?.chrome.columns || chrome.rows !== mapChrome?.chrome.rows) {
+        mapChrome = { columns: laid.pane.columns, chrome }
+        $.ui.invalidate('ui.render')
+      }
+      return {}
+    }
     const state = { view3d: await read($, view3dA), zoomed: await read($, zoomed), cam3d: await read($, cam3dA) }
     const settings = await read($, settingsA)
     const now = await $.clock.now()
@@ -532,12 +596,18 @@ export const register: Register = (on, options) => {
     gesture = result.memory
     for (const step of result.steps) await applyStep($, step)
     if (result.open !== undefined) void openFile($, result.open.p, result.open.out ? true : undefined)
-    return { props: { tip: result.tip } }
+    const hitBox = hitBoxes.get(e.surface)
+    return { props: { tip: result.tip, ...hitBox } }
   }).catch(($, e, next) => next(e))
 
   // the wheel over the map zooms it, around the pointer in 2D; elsewhere in the pane it scrolls as usual
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (e.origin.kind !== 'person' || e.pointer === undefined || gesture.hover === undefined || e.by === 0) return next(e)
+    if (e.origin.kind === 'person' && e.by !== 0 && bodyWindow !== undefined && e.contentRows === e.bodyRows && e.bodyRows === bodyWindow.paneRows && (await read($, tabA)) === bodyWindow.tab) {
+      const by = Math.abs(e.by) >= e.bodyRows ? Math.sign(e.by) * Math.max(1, bodyWindow.viewport) : e.by
+      moveBody($, by)
+      return {}
+    }
+    if (!mapVisible || e.origin.kind !== 'person' || e.pointer === undefined || gesture.hover === undefined || e.by === 0) return next(e)
     if ((await read($, tabA)) !== 'map') return next(e)
     for (const step of mapWheel(e.by, await read($, view3dA), gesture.hover, drawnFrames())) await applyStep($, step)
     return {}
@@ -579,7 +649,8 @@ export const register: Register = (on, options) => {
     const meterValue = await read($, meter)
     const list = await read($, events)
     void load($).catch(() => {})
-    const widthPx = paneWidthPx(e.props.bodyColumns ?? e.viewport?.columns ?? 48)
+    const columns = e.props.bodyColumns ?? e.viewport?.columns ?? 48
+    const widthPx = paneWidthPx(columns)
     const open = await read($, openA)
     const fold = (): FoldFacts => ({ index: I, linked, connected })
     let body: TabSnapshot
@@ -626,10 +697,41 @@ export const register: Register = (on, options) => {
       const apps = await installedApps($)
       body = { tab, settings, apps }
     }
-    const snap: ViewSnapshot = { now, widthPx, lang, assistant: 'Claude', costInfoCommand: '/cost', palette: paletteValue, meter: meterValue, events: list, open, body }
-    const out = renderPane(nativeRuntime(ui), snap, nativeActions($, snap), maps)
-    if (out.drawn?.kind === '2d') lastMap = { view: out.drawn.frame.view, L: out.drawn.frame.layout, touched: out.drawn.frame.touched }
-    else if (out.drawn?.kind === '3d') lastSpin = { view: out.drawn.frame.view, L: out.drawn.frame.layout, touched: out.drawn.frame.touched }
+    const paneCells = { columns, rows: Math.max(0, e.props.scroll.bodyRows) }
+    const chrome = mapChrome?.columns === columns ? mapChrome.chrome : guessChrome(columns)
+    const mapBox = mapCells(paneCells, chrome)
+    const mapAspect = cellAspect(mapBox)
+    const fill = e.surface === 'desktop' && e.props.placement === 'dock'
+    // The root's pane-height upper bound lets Desktop's flex holder shrink to
+    // the allocated map; scrolling maps keep their natural height instead.
+    const hitBox = fill ? { box: `${columns}x${paneCells.rows}/${mapBox.columns}x${mapBox.rows}`, reach: paneCells.rows } : undefined
+    if (hitBox === undefined) hitBoxes.delete(e.surface)
+    else hitBoxes.set(e.surface, hitBox)
+    const dimensions = `${tab}/${columns}x${paneCells.rows}`
+    if (fill && tab !== 'map') {
+      if (bodyWindow?.dimensions !== dimensions) bodyWindow = { stamp: `${dimensions}/${++bodyGeneration}`, dimensions, paneRows: paneCells.rows, tab, offset: bodyWindow?.tab === tab ? bodyWindow.offset : 0, viewport: 0, measured: 0, reach: Math.max(1, paneCells.rows), end: bodyWindow?.tab === tab && bodyWindow.end }
+    } else if (e.surface === 'desktop') bodyWindow = undefined
+    const bodyFill = !fill || bodyWindow === undefined || tab === 'map' ? undefined : { stamp: bodyWindow.stamp, offset: visibleBodyOffset(), viewport: bodyWindow.viewport, content: bodyWindow.measured, reach: bodyWindow.reach }
+    const chromeShape = JSON.stringify([columns, paneCells.rows, paneCells.rows < 24, tab, lang])
+    if (fill && measuredChrome?.shape !== chromeShape) measuredChrome = { shape: chromeShape, stamp: `${++chromeGeneration}`, header: measuredChrome?.header ?? 0, footer: measuredChrome?.footer ?? 0, headerReach: Math.max(measuredChrome?.headerReach ?? 1, paneCells.rows), footerReach: Math.max(measuredChrome?.footerReach ?? 1, paneCells.rows) }
+    const chromeFill = !fill || measuredChrome === undefined ? undefined : {
+      stamp: measuredChrome.stamp, header: measuredChrome.header, footer: measuredChrome.footer,
+      headerReach: measuredChrome.headerReach, footerReach: measuredChrome.footerReach,
+      // Each measured height is rounded up; two root gaps occupy one compact row or two normal rows.
+      notice: measuredChrome.header > 0 && measuredChrome.footer > 0
+        ? measuredChrome.header + 1 + measuredChrome.footer + 1 + (paneCells.rows < 24 ? 1 : 2) >= paneCells.rows
+        : paneCells.rows < 6,
+    }
+    const snap: ViewSnapshot = { now, widthPx, lang, assistant: 'Claude', costInfoCommand: '/cost', palette: paletteValue, meter: meterValue, events: list, open, body, ...(fill && { fill: { rows: paneCells.rows, mapAspect, body: bodyFill, chrome: chromeFill } }) }
+    const out = renderPane(nativeRuntime(ui, hitBox), snap, nativeActions($, snap), maps)
+    if (e.surface === 'desktop') {
+      mapVisible = tab === 'map' && out.drawn !== undefined && chromeFill?.notice !== true
+      if (!mapVisible) gesture = GESTURE0
+    }
+    if ('Client' in ui && 'Svg' in ui) {
+      if (out.drawn?.kind === '2d') lastMap = { view: out.drawn.frame.view, L: out.drawn.frame.layout, touched: out.drawn.frame.touched }
+      else if (out.drawn?.kind === '3d') lastSpin = { view: out.drawn.frame.view, L: out.drawn.frame.layout, touched: out.drawn.frame.touched }
+    }
     return out.node
   })
 }

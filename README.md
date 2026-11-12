@@ -98,6 +98,18 @@ The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc
 
 Follow Claude as it works, replay the session step by step, zoom with the wheel. The **3D** button turns the map into a brain; **Full screen** opens it in your browser.
 
+In a docked Claude Desktop pane, every tab stays within the available height:
+the header and footer remain fixed, and the map fits the space between them.
+Long text tabs navigate inside their body with the wheel, page keys, or the
+First, Previous, Next and Last page buttons. The host reports Home/End like
+page keys, so use First/Last to jump to the ends. Extremely short panes ask you
+to enlarge the pane; the full interface returns when space is available. Inline panes, the terminal
+and the OMP dashboard retain their content-height layout. Desktop sizing uses
+the host's cell measurements, so font and density settings affect pixel scale.
+The map's Client holder uses a pane-height bound and Desktop's flex-shrink
+behavior to match the allocated paint height.
+The map image stretches across its allocated paint area on Desktop.
+
 Inside an Obsidian vault, the map shows the whole vault, even when the session started in a sub-folder.
 
 ## The five tabs

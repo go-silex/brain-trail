@@ -217,6 +217,8 @@ export class DomRenderer {
       s.width = dimension(p.width, 'x')
       s.height = dimension(p.height, 'y')
       s.minWidth = dimension(p.minWidth, 'x')
+      s.minHeight = dimension(p.minHeight, 'y')
+      s.overflow = p.overflow ?? ''
       s.position = p.position ?? ''
       s.top = dimension(p.top, 'y')
       s.bottom = dimension(p.bottom, 'y')

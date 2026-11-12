@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { decideViewChanges } from './view-changes.mjs'
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url))
 const candidate = resolve(scriptsDir, '..')
@@ -589,5 +590,83 @@ test('release CLI classifies OMP package changes and aligns shipped versions', (
     assertOk(run(base), 'Source distribution 2.2.1 > 2.2.0')
   } finally {
     rmSync(sandbox, { recursive: true, force: true })
+  }
+})
+
+test('view change declarations preserve strict and intended parity', () => {
+  const baseline = 'a'.repeat(40)
+  const declaration = JSON.stringify({
+    baseline,
+    reason: 'Intentional layout update',
+    cases: ['one', 'two'],
+  })
+  const difference = { kind: 'difference', message: 'tree differs' }
+  const operational = { kind: 'operational', message: 'capture failed' }
+  const decide = (overrides = {}) =>
+    decideViewChanges({
+      declaration,
+      baseline,
+      names: ['one', 'two', 'three'],
+      ...overrides,
+    })
+  const result = (name, errors) => ({ name, errors })
+
+  assert.deepEqual(decide({ declaration: null }), {
+    intended: null,
+    result: null,
+  })
+  assert.equal(decide().intended.applied, true)
+  assert.deepEqual(decide({ result: result('one', [difference]) }).result, {
+    intended: true,
+    errors: [],
+  })
+  assert.match(
+    decide({ result: result('one', []) }).result.errors[0].message,
+    /declared changed but identical/,
+  )
+  assert.deepEqual(
+    decide({ result: result('one', [difference, operational]) }).result.errors,
+    [operational],
+  )
+  assert.deepEqual(
+    decide({ result: result('three', [difference]) }).result.errors,
+    [difference],
+  )
+  assert.throws(() => decide({ names: ['one'] }), /unknown cases: two/)
+  const ignored = decide({
+    baseline: 'b'.repeat(40),
+    names: [],
+    result: result('one', [difference]),
+  })
+  assert.equal(ignored.intended.applied, false)
+  assert.deepEqual(ignored.result.errors, [difference])
+  assert.equal(ignored.result.intended, false)
+  // The complete manifest, not only the selected case, validates the list.
+  assert.equal(
+    decide({ selection: 'one', result: result('one', [difference]) }).result
+      .intended,
+    true,
+  )
+})
+
+test('view change declarations reject malformed input', () => {
+  const baseline = 'a'.repeat(40)
+  const good = { baseline, reason: 'reason', cases: ['one'] }
+  const bad = [
+    '{',
+    'null',
+    JSON.stringify({ ...good, baseline: 'abc' }),
+    JSON.stringify({ ...good, reason: '  ' }),
+    JSON.stringify({ ...good, reason: 1 }),
+    JSON.stringify({ ...good, cases: 'one' }),
+    JSON.stringify({ ...good, cases: ['one', 'one'] }),
+    JSON.stringify({ ...good, cases: [3] }),
+    JSON.stringify({ ...good, cases: [''] }),
+  ]
+  for (const declaration of bad) {
+    assert.throws(
+      () => decideViewChanges({ declaration, baseline }),
+      /view changes declaration:/,
+    )
   }
 })

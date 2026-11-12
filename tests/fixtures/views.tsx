@@ -604,7 +604,6 @@ export const mountTarget = (scenario: ViewCase) =>
         requestId: 'brain-trail-v2',
         surface: scenario.surface,
         props: paneProps,
-        viewport: { columns: 60, rows: 40 },
       }
     : {
         plugin: 'brain-trail-v2',
@@ -738,6 +737,26 @@ const settleReady = async (
   return tree
 }
 
+// The test surface does not perform CSS layout. Start clients unmeasured, then
+// give the chrome probes a small modeled region; later tests may resize them.
+const layoutChrome = async (
+  scenario: ViewCase,
+  ui: {
+    find: (query: { key: string }) => Promise<unknown>
+    resize: (size: {
+      columns: number
+      rows: number
+      in: string
+    }) => Promise<void>
+  },
+) => {
+  if (scenario.component !== 'Pane' || scenario.surface !== 'desktop') return
+  if (await ui.find({ key: 'header-probe' }))
+    await ui.resize({ columns: 0, rows: 4, in: 'header-probe' })
+  if (await ui.find({ key: 'footer-probe' }))
+    await ui.resize({ columns: 0, rows: 3, in: 'footer-probe' })
+}
+
 export const captureView = async (
   $: Engine,
   on: On,
@@ -745,6 +764,7 @@ export const captureView = async (
 ) => {
   const host = installHost(on, scenario)
   const ui = await $.ui.mount(mountTarget(scenario))
+  await layoutChrome(scenario, ui)
   if (scenario.phase === 'loading') {
     const tree = await ui.drawn()
     if (!isPacking(tree))
@@ -783,6 +803,7 @@ export const captureView = async (
 export const mountReady = async ($: Engine, on: On, scenario: ViewCase) => {
   const host = installHost(on, scenario)
   const ui = await $.ui.mount(mountTarget(scenario))
+  await layoutChrome(scenario, ui)
   await settleReady(scenario, host, ui)
   return { ui, host }
 }

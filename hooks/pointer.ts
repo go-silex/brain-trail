@@ -6,6 +6,23 @@ export type MapFrame = {
   vw: number
   vh: number
   px: number
+  // The frame drawn around a unit camera square, without the whole-map title.
+  // Its inverse keeps pan/zoom anchored even when that title disappears.
+  cameraFrame?: { vx: number; vy: number; vw: number; vh: number }
+}
+
+export const fitFrame = (
+  box: { vx: number; vy: number; vw: number; vh: number },
+  aspect: number,
+) => {
+  const vw = Math.max(box.vw, box.vh / aspect)
+  const vh = vw * aspect
+  return {
+    vx: box.vx - (vw - box.vw) / 2,
+    vy: box.vy - (vh - box.vh) / 2,
+    vw,
+    vh,
+  }
 }
 
 // zooms by `f` (under 1 = closer) around (fx, fy) of the frame. null = the frame is the whole map again.
@@ -18,6 +35,16 @@ export const zoomFrame = (
 ) => {
   const X = v.vx + fx * v.vw,
     Y = v.vy + fy * v.vh
+  if (v.cameraFrame !== undefined) {
+    const c = v.cameraFrame
+    const side = Math.max(70, (v.vw * f) / c.vw)
+    if (f > 1 && side >= size * 1.02) return null
+    return {
+      x: X - (c.vx + fx * c.vw) * side,
+      y: Y - (c.vy + fy * c.vh) * side,
+      side,
+    }
+  }
   const side = Math.max(70, Math.min(v.vw, v.vh) * f)
   if (side >= size * 1.02) return null
   return { x: X - fx * side, y: Y - fy * side, side }
@@ -25,10 +52,19 @@ export const zoomFrame = (
 
 // the frame a drag started from, moved by the distance the pointer went
 export const panFrame = (
-  b: { vx: number; vy: number; vw: number; vh: number },
+  b: Pick<MapFrame, 'vx' | 'vy' | 'vw' | 'vh' | 'cameraFrame'>,
   dx: number,
   dy: number,
 ) => {
+  if (b.cameraFrame !== undefined) {
+    const c = b.cameraFrame,
+      side = b.vw / c.vw
+    return {
+      x: b.vx - dx * b.vw - c.vx * side,
+      y: b.vy - dy * b.vh - c.vy * side,
+      side,
+    }
+  }
   const side = Math.min(b.vw, b.vh)
   return {
     x: b.vx + (b.vw - side) / 2 - dx * b.vw,
