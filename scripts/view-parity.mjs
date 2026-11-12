@@ -25,6 +25,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   canonicalTree,
   decideViewChanges,
+  nativeViewEnvironment,
+  NATIVE_VIEW_TIMEZONE,
   proofFingerprint,
 } from './view-changes.mjs'
 import { probeNativeMapLayout } from './native-map-layout.mjs'
@@ -104,6 +106,7 @@ const main = async () => {
     selection: null,
     versions: {},
     clock: {
+      native: { timezoneId: NATIVE_VIEW_TIMEZONE },
       browserScene: {
         installedAt: FIXED_TIME,
         installLeadMs: INSTALL_LEAD_MS,
@@ -630,6 +633,7 @@ const runNative = async (name, dir, output, expectedTests) => {
   await mkdir(path.dirname(stdoutPath), { recursive: true })
   const run = await runProcess(process.execPath, [CLI, 'plugin', 'test', dir], {
     cwd: dir,
+    env: nativeViewEnvironment(process.env),
     stdoutPath,
     stderrPath,
     timeoutMs: (expectedTests + 1) * (TEST_TIMEOUT_MS + 5_000),
@@ -2005,7 +2009,7 @@ const runProcess = (command, args, options) =>
   new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: process.env,
+      env: options.env ?? process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const stdout = createWriteStream(options.stdoutPath)

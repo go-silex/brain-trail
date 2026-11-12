@@ -297,16 +297,18 @@ const meterOf = (scenario: ViewCase) =>
         window: 200_000,
         percent: 42,
         usd: 1.2,
+        // Historical dates avoid today's special-case while retaining the
+        // reviewed 2026 labels: the month, day and weekday are the same.
         limits: [
           {
             kind: 'five_hour',
             percentUsed: 31,
-            resetsAt: '2026-11-09T17:39:00Z',
+            resetsAt: '2020-11-09T17:39:00Z',
           },
           {
             kind: 'seven_day',
             percentUsed: 12,
-            resetsAt: '2026-11-16T20:59:00Z',
+            resetsAt: '2020-11-16T20:59:00Z',
           },
         ],
       }
