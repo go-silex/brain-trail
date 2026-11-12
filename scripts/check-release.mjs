@@ -1,11 +1,22 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 import { compare, valid } from 'semver'
 
 const ZERO = '0'.repeat(40)
 const PLUGIN = '.claude-plugin/plugin.json'
 const MARKET = '.claude-plugin/marketplace.json'
 const PLUGIN_NAME = 'brain-trail-v2'
+const PACKAGE = 'package.json'
+const RUNTIME_PACKAGE_FIELDS = [
+  'omp',
+  'files',
+  'exports',
+  'dependencies',
+  'optionalDependencies',
+  'peerDependencies',
+  'engines',
+]
 
 const arg = process.argv[2]
 if (process.argv.length > 3) {
@@ -106,7 +117,12 @@ function nonRuntime(path) {
     path === 'biome.jsonc'
   )
     return true
-  if (path === 'tsconfig.json' || path === 'tsconfig.core.json') return true
+  if (
+    path === 'tsconfig.json' ||
+    path === 'tsconfig.core.json' ||
+    /^tsconfig\.omp.*\.json$/.test(path)
+  )
+    return true
   if (
     path.startsWith('.claude-plugin/sdk/') &&
     (path.endsWith('.d.ts') || path.endsWith('tsconfig.json'))
@@ -121,15 +137,37 @@ const baseCommit = git([
   '--end-of-options',
   `${base}^{commit}`,
 ]).trim()
+const currentPackage = existsSync(PACKAGE)
+  ? readJson(readFileSync(PACKAGE, 'utf8'), PACKAGE)
+  : {}
+const basePackage = git([
+  'ls-tree',
+  '-z',
+  '--name-only',
+  baseCommit,
+  '--',
+  PACKAGE,
+])
+  ? readJson(
+      git(['show', `${baseCommit}:${PACKAGE}`]),
+      `${baseCommit}:${PACKAGE}`,
+    )
+  : {}
+const packageRuntimeChanged = RUNTIME_PACKAGE_FIELDS.some(
+  (field) => !isDeepStrictEqual(currentPackage[field], basePackage[field]),
+)
 const tracked = lines(
   git(['diff', '-z', '--name-only', '--diff-filter=ACDMRTUXB', baseCommit]),
 )
 const untracked = lines(
   git(['ls-files', '-z', '--others', '--exclude-standard']),
 )
-const runtime = [...new Set([...tracked, ...untracked])]
-  .filter((path) => !nonRuntime(path))
-  .sort()
+const runtime = [
+  ...new Set([
+    ...[...tracked, ...untracked].filter((path) => !nonRuntime(path)),
+    ...(packageRuntimeChanged ? [PACKAGE] : []),
+  ]),
+].sort()
 
 const currentPlugin = readJson(readFileSync(PLUGIN, 'utf8'), PLUGIN)
 const currentMarket = readJson(readFileSync(MARKET, 'utf8'), MARKET)
@@ -146,6 +184,16 @@ if (
   throw new Error(
     `${MARKET} version must equal ${PLUGIN} version ${currentVersion}.`,
   )
+}
+if (Object.hasOwn(currentPackage, 'omp')) {
+  if (
+    versionOf(currentPackage.version, PACKAGE) !== currentVersion ||
+    currentEntry.version !== currentVersion
+  ) {
+    throw new Error(
+      `${PACKAGE} version must equal ${PLUGIN} and ${MARKET} version ${currentVersion}.`,
+    )
+  }
 }
 
 const basePlugin = readJson(

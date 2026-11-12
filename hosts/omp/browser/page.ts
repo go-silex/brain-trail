@@ -1,0 +1,444 @@
+/// <reference lib="dom" />
+import { makeIndex, type Index } from '../../../hooks/files'
+import { createMapRenderer, DARK, LIGHT } from '../../../hooks/map'
+import {
+  GESTURE0,
+  STEP_MS,
+  VIEW_STATE0,
+  mapGesture,
+  mapWheel,
+  openTarget,
+  plan,
+  replayTick,
+  timerEffect,
+} from '../../../hooks/view-controller'
+import { renderPane } from '../../../hooks/views'
+import type { PreviewRef } from '../../../types/model'
+import type {
+  DrawnFrames,
+  GestureMemory,
+  Step,
+  TabSnapshot,
+  ViewActions,
+  ViewIntent,
+  ViewSnapshot,
+  ViewState,
+} from '../../../types/view'
+import type {
+  CommandReplies,
+  FactsWire,
+  HostCommand,
+  LayoutWire,
+  ServerEvent,
+} from '../wire'
+import { DomRenderer, runtime } from './dom'
+
+export function startPage(
+  container: HTMLElement,
+  status: HTMLElement,
+  toastElement: HTMLElement,
+) {
+  const handoffUrl = new URL(window.location.href)
+  const rawGeneration = handoffUrl.searchParams.get('generation')
+  const path = handoffUrl.searchParams.get('file')
+  const hadHandoff = rawGeneration !== null || path !== null
+  const requestedGeneration =
+    rawGeneration !== null && /^[1-9]\d*$/.test(rawGeneration)
+      ? Number(rawGeneration)
+      : 0
+  let pendingFile =
+    Number.isSafeInteger(requestedGeneration) &&
+    requestedGeneration > 0 &&
+    path !== null &&
+    path !== ''
+      ? { generation: requestedGeneration, p: path }
+      : undefined
+  if (hadHandoff) {
+    handoffUrl.searchParams.delete('generation')
+    handoffUrl.searchParams.delete('file')
+    history.replaceState(history.state, '', handoffUrl)
+  }
+  let state: ViewState = { ...VIEW_STATE0 },
+    memory: GestureMemory = { ...GESTURE0 }
+  let generation = 0,
+    revision = 0,
+    facts: FactsWire | undefined,
+    layout: LayoutWire | undefined,
+    index: Index | undefined
+  let frames: DrawnFrames = { d2: undefined, d3: undefined },
+    maps = createMapRenderer()
+  let timer: number | undefined, toastTimer: number | undefined
+  let preview: { ref: PreviewRef; text: string | undefined } | undefined,
+    previewSerial = 0,
+    ended = false
+  const theme = matchMedia('(prefers-color-scheme: light)')
+  const toast = (message: string) => {
+    toastElement.textContent = message
+    clearTimeout(toastTimer)
+    toastTimer = window.setTimeout(() => {
+      toastElement.textContent = ''
+    }, 5000)
+  }
+  if (hadHandoff && pendingFile === undefined) toast('Invalid file link')
+  const stopTimer = () => {
+    clearInterval(timer)
+    timer = undefined
+  }
+  const reset = (next: number) => {
+    generation = next
+    revision = 0
+    facts = undefined
+    layout = undefined
+    index = undefined
+    state = { ...VIEW_STATE0 }
+    memory = { ...GESTURE0 }
+    frames = { d2: undefined, d3: undefined }
+    maps = createMapRenderer()
+    preview = undefined
+    previewSerial++
+    ended = false
+    stopTimer()
+  }
+  const apply = (steps: Step[]) => {
+    for (const step of steps)
+      switch (step.key) {
+        case 'tab':
+          state = { ...state, tab: step.next(state.tab) }
+          break
+        case 'open':
+          state = { ...state, open: step.next(state.open) }
+          break
+        case 'zoomed':
+          state = { ...state, zoomed: step.next(state.zoomed) }
+          break
+        case 'camera':
+          state = { ...state, camera: step.next(state.camera) }
+          break
+        case 'play':
+          state = { ...state, play: step.next(state.play) }
+          break
+        case 'view3d':
+          state = { ...state, view3d: step.next(state.view3d) }
+          break
+        case 'cam3d':
+          state = { ...state, cam3d: step.next(state.cam3d) }
+          break
+        case 'preview':
+          state = { ...state, preview: step.next(state.preview) }
+          break
+      }
+  }
+  const command = async <C extends HostCommand>(
+    cmd: C,
+  ): Promise<CommandReplies[C['kind']] | undefined> => {
+    if (ended || generation === 0) {
+      toast('Session unavailable')
+      return undefined
+    }
+    try {
+      const response = await fetch('command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ v: 1, generation, command: cmd }),
+        referrerPolicy: 'no-referrer',
+      })
+      const result: CommandReplies[C['kind']] | { ok: false; error: string } =
+        await response.json()
+      if (!result.ok) {
+        toast(result.error)
+        return undefined
+      }
+      return result
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Command failed')
+      return undefined
+    }
+  }
+  const sameRef = (a: PreviewRef | null | undefined, b: PreviewRef) =>
+    a?.p === b.p && Boolean(a.out) === Boolean(b.out)
+  const loadPreview = async (ref: PreviewRef) => {
+    const serial = ++previewSerial,
+      currentGeneration = generation
+    preview = undefined
+    const result = await command({ kind: 'preview-read', ref })
+    if (
+      generation !== currentGeneration ||
+      serial !== previewSerial ||
+      !sameRef(state.preview, ref)
+    )
+      return
+    preview = { ref, text: result?.text ?? undefined }
+    render()
+  }
+  const intent = async (i: ViewIntent) => {
+    const effect = timerEffect(i)
+    if (effect !== 'none') stopTimer()
+    apply(plan(i, { now: Date.now(), frames }))
+    if (i.kind === 'preview') {
+      previewSerial++
+      preview = undefined
+      if (i.ref !== null) void loadPreview(i.ref)
+    }
+    if (effect === 'start' && i.kind === 'replay-play')
+      timer = window.setInterval(() => {
+        state = { ...state, play: replayTick(i.steps)(state.play) }
+        if (!state.play.playing) stopTimer()
+        render()
+      }, STEP_MS)
+    render()
+  }
+  const openFile = async (ref: PreviewRef) => {
+    if (facts === undefined) return
+    const target = openTarget(facts.settings, index, ref)
+    if (target.kind === 'preview')
+      await intent({ kind: 'preview', ref: target.ref })
+    else await command({ kind: 'open', ref, app: target.app })
+  }
+  const drainFile = () => {
+    if (
+      pendingFile === undefined ||
+      ended ||
+      facts === undefined ||
+      facts.workspace.kind !== 'ready' ||
+      layout === undefined ||
+      layout.layoutRev !== facts.workspace.layoutRev ||
+      index === undefined
+    )
+      return
+    const file = pendingFile
+    pendingFile = undefined
+    if (!index.ids.has(file.p)) {
+      toast('File is no longer in this workspace')
+      return
+    }
+    void openFile({ p: file.p })
+  }
+  const actions: ViewActions<MouseEvent> = {
+    intent,
+    openFile,
+    openIn: async (ref, app) => {
+      await command({ kind: 'open', ref, app })
+    },
+    copy: async (text) => {
+      try {
+        await navigator.clipboard.writeText(text)
+        return true
+      } catch (error) {
+        toast(error instanceof Error ? error.message : 'Clipboard unavailable')
+        return false
+      }
+    },
+    toast,
+    compact: async () =>
+      (await command({ kind: 'compact' }))?.outcome ?? { kind: 'failed' },
+    refreshMeter: async () => {
+      await command({ kind: 'refresh-meter' })
+    },
+    saveSettings: async (next) => {
+      await command({ kind: 'settings', next })
+    },
+    setLang: async (lang) => {
+      await command({ kind: 'lang', lang })
+    },
+    clearTrail: async () => {
+      const currentGeneration = generation
+      const result = await command({ kind: 'clear-trail' })
+      if (result !== undefined && generation === currentGeneration) {
+        apply(plan({ kind: 'replay-reset' }, { now: Date.now(), frames }))
+        render()
+      }
+    },
+    retryLayout: () => {
+      void command({ kind: 'retry-layout' })
+    },
+    open3d: async () => {
+      const win = window.open('./3d/', '_blank')
+      if (win === null) return false
+      win.opener = null
+      return true
+    },
+    analyseCoach: async () => {
+      await command({ kind: 'coach-analyse' })
+    },
+    applyCoach: async () =>
+      (await command({ kind: 'coach-apply' }))?.filled ?? false,
+  }
+  const dom = new DomRenderer(container, {
+    gesture: (gesture) => {
+      if (facts === undefined || state.tab !== 'map') return null
+      const result = mapGesture(gesture, state, memory, frames, {
+        now: Date.now(),
+        hoverNames: facts.settings.hover,
+      })
+      memory = result.memory
+      apply(result.steps)
+      if (result.open !== undefined) void openFile(result.open)
+      if (result.steps.length > 0) render()
+      return result.tip
+    },
+    wheel: (by, fx, fy) => {
+      if (state.tab !== 'map') return false
+      const steps = mapWheel(by, state.view3d, { fx, fy }, frames)
+      if (!steps.length) return false
+      apply(steps)
+      render()
+      return true
+    },
+  })
+  function render() {
+    if (facts === undefined || ended) return
+    const f = facts,
+      connected = new Map(f.connected.map(([k, v]) => [k, new Set(v)])),
+      fold = { index, connected, linked: new Set(f.linked) }
+    let body: TabSnapshot
+    switch (state.tab) {
+      case 'context':
+        body = {
+          tab: 'context',
+          breakdown: undefined,
+          costHistory: f.costHistory,
+          settings: f.settings,
+        }
+        break
+      case 'goal':
+        body = { tab: 'goal', connected }
+        break
+      case 'coach':
+        body = {
+          tab: 'coach',
+          breakdown: undefined,
+          fold,
+          coach: f.coach,
+          instructionFile: f.instructionFile,
+        }
+        break
+      case 'settings':
+        body = { tab: 'settings', settings: f.settings, apps: f.apps }
+        break
+      case 'files':
+        if (f.workspace.kind === 'loading') return
+        if (
+          state.preview !== null &&
+          (preview === undefined || !sameRef(state.preview, preview.ref))
+        )
+          return
+        body = {
+          tab: 'files',
+          breakdown: undefined,
+          fold,
+          preview:
+            state.preview === null || preview === undefined
+              ? null
+              : {
+                  ref: state.preview,
+                  text: preview.text,
+                  settings: f.settings,
+                  apps: f.apps,
+                },
+        }
+        break
+      case 'map':
+        if (f.workspace.kind === 'failed')
+          body = { tab: 'map', kind: 'failed', message: f.workspace.message }
+        else if (f.workspace.kind === 'loading')
+          body = {
+            tab: 'map',
+            kind: 'loading',
+            seconds: Math.max(
+              0,
+              Math.round((Date.now() - f.workspace.since) / 1000),
+            ),
+          }
+        else if (
+          layout === undefined ||
+          index === undefined ||
+          layout.layoutRev !== f.workspace.layoutRev
+        )
+          return
+        else
+          body = {
+            tab: 'map',
+            kind: 'ready',
+            layout: layout.layout,
+            shallow: f.workspace.shallow,
+            fold: { ...fold, index },
+            state,
+          }
+        break
+    }
+    const snapshot: ViewSnapshot = {
+      now: Date.now(),
+      widthPx: Math.max(
+        240,
+        Math.min(900, Math.floor(container.clientWidth) - 24),
+      ),
+      lang: f.lang,
+      assistant: f.assistant,
+      costInfoCommand: '/session info',
+      palette: theme.matches ? LIGHT : DARK,
+      meter: f.meter,
+      events: f.events,
+      open: state.open,
+      body,
+    }
+    const out = renderPane(runtime, snapshot, actions, maps)
+    if (out.drawn?.kind === '2d') frames = { ...frames, d2: out.drawn.frame }
+    else if (out.drawn?.kind === '3d')
+      frames = { ...frames, d3: out.drawn.frame }
+    dom.render(out.node)
+  }
+  const events = new EventSource('events')
+  events.onopen = () => {
+    status.textContent = ''
+  }
+  events.onerror = () => {
+    status.textContent = 'Connection lost; reconnecting…'
+  }
+  events.onmessage = (message) => {
+    let event: ServerEvent
+    try {
+      event = JSON.parse(message.data) as ServerEvent
+    } catch {
+      toast('Invalid dashboard event')
+      return
+    }
+    if (event.v !== 1 || event.generation < generation) return
+    if (
+      pendingFile !== undefined &&
+      (event.generation !== pendingFile.generation || event.kind === 'ended')
+    ) {
+      pendingFile = undefined
+      toast('Session changed; file link discarded')
+    }
+    if (event.generation > generation) reset(event.generation)
+    if (event.kind === 'ended') {
+      ended = true
+      stopTimer()
+      status.textContent = 'Session ended'
+      events.close()
+      return
+    }
+    if (event.kind === 'layout') {
+      layout = event.layout
+      index = makeIndex(layout.root, layout.paths)
+      render()
+      drainFile()
+      return
+    }
+    if (event.kind === 'snapshot' && event.revision > revision) {
+      revision = event.revision
+      facts = event.facts
+      render()
+      drainFile()
+    }
+  }
+  new ResizeObserver(render).observe(container)
+  theme.addEventListener('change', render)
+  setInterval(() => {
+    if (
+      facts?.workspace.kind === 'loading' ||
+      (state.tab === 'map' && state.view3d && state.cam3d.spin)
+    )
+      render()
+  }, 1000)
+}

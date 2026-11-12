@@ -54,6 +54,16 @@ export type TrailEvent =
 export type Totals = { steps: number; first?: number }
 
 export type Tab = 'map' | 'goal' | 'files' | 'context' | 'coach' | 'settings'
+export type Camera = { x: number; y: number; side: number } | null
+export type Play = { step: number | null; playing: boolean }
+export type PreviewRef = { p: string; out?: boolean }
+export type Coach = {
+  text: string
+  patch?: string
+  at: number
+  busy: boolean
+  error?: string
+}
 
 // What opens a file the pane links to ('default' = the system's choice), and the map's hover names.
 export type TrailSettings = {

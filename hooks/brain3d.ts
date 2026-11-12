@@ -11,6 +11,8 @@ export type Base3d = {
   files: [string, number, number, number, number][]  // path, x, y, folder index, sub-folder index (-1: none)
   groups: [number, string, number, number, number][]  // depth, name, x, y, r
   S: Record<string, string>
+  fileHrefPrefix?: string
+  baseVersion?: number
 }
 
 const STRINGS = {
@@ -26,11 +28,15 @@ const STRINGS = {
   },
 }
 
-export const base3d = (L: Layout, o: { root: string; vault: boolean; lang: 'en' | 'fr' }): Base3d => {
+export const base3d = (L: Layout, o: { root: string; vault: boolean; lang: 'en' | 'fr'; assistant?: string }): Base3d => {
   const g1 = L.groups.map((g, i) => ({ g, i })).filter(x => x.g.depth === 1)
   const g2 = L.groups.map((g, i) => ({ g, i })).filter(x => x.g.depth === 2)
   const inside = (x: number, y: number, list: typeof g1) => list.find(({ g }) => Math.hypot(g.x - x, g.y - y) <= g.r)?.i ?? -1
-  const S = { ...STRINGS[o.lang], word: o.vault ? STRINGS[o.lang].notes : STRINGS[o.lang].files }
+  const assistant = o.assistant ?? 'Claude'
+  const labels = assistant === 'Claude' ? undefined : o.lang === 'fr'
+    ? { read: `lues par ${assistant}`, follow: `Suivre ${assistant}`, following: `Suit ${assistant}`, now: `${assistant} est sur` }
+    : { read: `read by ${assistant}`, follow: `Follow ${assistant}`, following: `Following ${assistant}`, now: `${assistant} is on` }
+  const S = { ...STRINGS[o.lang], ...labels, word: o.vault ? STRINGS[o.lang].notes : STRINGS[o.lang].files }
   return {
     title: L.title,
     root: o.root,
@@ -42,7 +48,7 @@ export const base3d = (L: Layout, o: { root: string; vault: boolean; lang: 'en' 
 }
 
 // the session as the page draws it: touched notes, Claude's path, the services it called
-export const data3d = (T: Trail, o: { v: number | string; logos: Record<string, string>; prompt?: string }) => {
+export const data3d = (T: Trail, o: { v: number | string; logos: Record<string, string>; prompt?: string; baseVersion?: number }) => {
   const services = [...T.perSvc.keys()]
   const K = { link: 0, hit: 0, read: 1, write: 2 } as const
   const d = {
@@ -52,6 +58,7 @@ export const data3d = (T: Trail, o: { v: number | string; logos: Record<string, 
     services: services.map(s => [s, o.logos[s] ?? '', T.perSvc.get(s) ?? 0]),
     calls: T.calls.slice(-12).map(c => [services.indexOf(c.svc), c.from ?? -1, c.err ? 1 : 0]),
     prompt: o.prompt ?? '',
+    ...(o.baseVersion === undefined ? {} : { baseVersion: o.baseVersion }),
   }
   return `window.BT_DATA=${JSON.stringify(d).replace(/</g, '\\u003c')};`
 }
@@ -64,7 +71,7 @@ export const page3d = (B: Base3d) => [
   HUD,
   `<script>window.BT_BASE=${JSON.stringify(B).replace(/</g, '\\u003c')};</script>`,
   '<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>',
-  `<script type="module">${JS}</script>`,
+  `<script type="module">${js(B.fileHrefPrefix, B.baseVersion)}</script>`,
   '</body></html>',
 ].join('')
 
@@ -103,8 +110,8 @@ const HUD = [
   '<div class="hud br live" id="live"><i></i><span></span></div>',
 ].join('')
 
-// The page's code: no template literals in it, so it can live in this raw string.
-const JS = String.raw`
+// Only the note-opening body and optional base-version guard differ for the dashboard.
+const js = (fileHrefPrefix: string | undefined, baseVersion: number | undefined) => String.raw`
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
@@ -427,7 +434,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   const n = pickAt(e.clientX, e.clientY)
   if (n < 0) return
   clearTimeout(window.__open)
-  window.__open = setTimeout(() => { const abs = B.root + '/' + B.files[n][0]; location.href = B.vault ? 'obsidian://open?path=' + encodeURIComponent(abs.normalize('NFD')) : 'file://' + encodeURI(abs) }, 260)
+  window.__open = setTimeout(() => { ${fileHrefPrefix === undefined ? "const abs = B.root + '/' + B.files[n][0]; location.href = B.vault ? 'obsidian://open?path=' + encodeURIComponent(abs.normalize('NFD')) : 'file://' + encodeURI(abs)" : "window.open(B.fileHrefPrefix + encodeURIComponent(B.files[n][0]), '_blank', 'noopener')"} }, 260)
 })
 renderer.domElement.addEventListener('dblclick', e => {
   clearTimeout(window.__open)
@@ -442,7 +449,7 @@ const live = $('live')
 const poll = () => {
   const s = document.createElement('script')
   s.src = 'data.js?t=' + Date.now()
-  s.onload = () => { s.remove(); lastOk = Date.now(); const d = window.BT_DATA; if (d && d.v !== lastV) { lastV = d.v; apply(d) } }
+  s.onload = () => { s.remove(); lastOk = Date.now(); const d = window.BT_DATA; ${baseVersion === undefined ? '' : 'if (d && d.baseVersion !== B.baseVersion) { location.reload(); return } '}if (d && d.v !== lastV) { lastV = d.v; apply(d) } }
   s.onerror = () => s.remove()
   document.head.appendChild(s)
 }

@@ -307,7 +307,38 @@ const fr: Strings = {
   toastBad: 'Contexte au-delà de 75 %. Brain Trail : passe à une nouvelle session.',
 }
 
-export const strings = (lang: Lang): Strings => (lang === 'fr' ? fr : en)
+const cache = new Map<string, Strings>()
+export const strings = (lang: Lang, assistant = 'Claude', costInfoCommand = '/cost'): Strings => {
+  const base = lang === 'fr' ? fr : en
+  if (assistant === 'Claude' && costInfoCommand === '/cost') return base
+  const key = JSON.stringify([lang, assistant, costInfoCommand])
+  const cached = cache.get(key)
+  if (cached !== undefined) return cached
+  const rename = (text: string) => text.replaceAll('Claude', assistant)
+  const tip = (value: { title: string; body: string }) => ({ title: rename(value.title), body: rename(value.body) })
+  const result: Strings = {
+    ...base,
+    costHow: costInfoCommand === '/cost' ? base.costHow : lang === 'fr'
+      ? `Le chiffre est celui de ${costInfoCommand} : les tokens comptés par le moteur, au prix de l'API. Ta session habituelle est la médiane des sessions passées vues par Brain Trail.`
+      : `The figure is the one ${costInfoCommand} gives: tokens counted by the engine, at API prices. Your usual session is the median of the past sessions Brain Trail saw.`,
+    planUse: assistant === 'Claude' ? base.planUse : lang === 'fr' ? 'Ton abonnement IA' : 'Your AI plan',
+    planTitle: assistant === 'Claude' ? base.planTitle : lang === 'fr' ? 'Ton abonnement IA' : 'Your AI plan',
+    noGoal: rename(base.noGoal), planOfClaude: rename(base.planOfClaude), whatClaudeDid: rename(base.whatClaudeDid),
+    thinking: rename(base.thinking), noAction: rename(base.noAction), mapEmpty: rename(base.mapEmpty),
+    tipBigRead: (f, t) => { const value = base.tipBigRead(f, t); return { ...value, body: rename(value.body) } },
+    tipReread: (f, n) => { const value = base.tipReread(f, n); return { ...value, body: rename(value.body) } },
+    tipSearch: n => tip(base.tipSearch(n)),
+    tipShort: (p, n) => { const value = base.tipShort(p, n); return { ...value, title: lang === 'fr' ? `« ${p} » a laissé ${assistant} deviner` : `« ${p} » left ${assistant} guessing` } },
+    tipLinks: n => tip(base.tipLinks(n)), tipMemory: t => tip(base.tipMemory(t)), tipWindow: p => tip(base.tipWindow(p)),
+    coachWhy: rename(base.coachWhy), applyWith: f => rename(base.applyWith(f)), applyHow: rename(base.applyHow),
+    academyWhy: rename(base.academyWhy), follow: rename(base.follow), legend: rename(base.legend),
+    noStep: rename(base.noStep), gStartWhy: rename(base.gStartWhy), gReadWhy: rename(base.gReadWhy),
+    gWrittenWhy: rename(base.gWrittenWhy), gLinkedWhy: rename(base.gLinkedWhy), missingWhy: rename(base.missingWhy),
+    compactBusy: rename(base.compactBusy), startWhy: rename(base.startWhy),
+  }
+  cache.set(key, result)
+  return result
+}
 export type { Strings }
 
 export const handoffPrompt = (lang: Lang, files: string) => (lang === 'fr'
@@ -334,21 +365,21 @@ Invent nothing: if a section is empty, write "None".
 Files touched during the session:
 ${files}`)
 
-export const coachPrompt = (lang: Lang, file: string) => (lang === 'fr'
-  ? `Tu es un coach métier. Tu aides un dirigeant ou un collaborateur non technique à obtenir plus d'impact business de Claude. Relis cette conversation et réponds en Markdown, court, concret, en tutoyant, sans tiret long.
+export const coachPrompt = (lang: Lang, file: string, assistant = 'Claude') => (lang === 'fr'
+  ? `Tu es un coach métier. Tu aides un dirigeant ou un collaborateur non technique à obtenir plus d'impact business de ${assistant}. Relis cette conversation et réponds en Markdown, court, concret, en tutoyant, sans tiret long.
 Règle absolue : ne parle jamais de code, de commandes, de logiciels, de versions, de tokens, de fichiers techniques ni d'outils de développement. Si la conversation est technique, garde seulement ce qu'un dirigeant peut en retenir pour mieux travailler.
 ## Tes demandes
 2 à 3 conseils sur la façon de formuler une demande : le résultat attendu, pour qui, à partir de quels documents, sous quelle forme. Termine par la réécriture d'une de tes demandes de cette conversation, telle qu'un dirigeant l'écrirait.
-## Ce que Claude devrait savoir de ton entreprise
+## Ce que ${assistant} devrait savoir de ton entreprise
 2 à 3 conseils : les informations métier qui lui ont manqué (offres, clients, priorités, règles, vocabulaire) et qui l'ont obligé à chercher ou à deviner.
 ## À ajouter au contexte de ton entreprise
 Une phrase, puis un bloc qui commence par \`\`\`context et contient uniquement les lignes à ajouter à ${file}, rédigées comme des connaissances sur l'entreprise, jamais techniques, prêtes à coller (5 lignes au plus).
 N'invente rien qui ne vienne pas de la conversation.`
-  : `You are a business coach. You help a business leader or a non-technical colleague get more business impact from Claude. Read this conversation again and answer in Markdown, short and concrete.
+  : `You are a business coach. You help a business leader or a non-technical colleague get more business impact from ${assistant}. Read this conversation again and answer in Markdown, short and concrete.
 Absolute rule: never talk about code, commands, software, versions, tokens, technical files or development tools. If the conversation is technical, keep only what a business leader can learn from it to work better.
 ## Your requests
 2 to 3 tips on how to phrase a request: the expected result, for whom, from which documents, in what form. End with a rewrite of one of your requests from this conversation, as a business leader would write it.
-## What Claude should know about your company
+## What ${assistant} should know about your company
 2 to 3 tips: the business information it lacked (offers, clients, priorities, rules, vocabulary) and had to search for or guess.
 ## To add to your company context
 One sentence, then a block that starts with \`\`\`context and holds only the lines to add to ${file}, written as knowledge about the company, never technical, ready to paste (5 lines at most).
