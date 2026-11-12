@@ -60,6 +60,47 @@ test('3D camera remains fixed when the current note changes without follow', () 
   }
 })
 
+test('3D fitted camera and glow budget stay stable as read and write counts grow', () => {
+  const trail = (count: number): Trail => ({
+    ...geometryTrail,
+    state: new Map([
+      [0, { k: 'read', count }],
+      [1, { k: 'write', count }],
+    ]),
+  })
+  for (const zoom of [1, 2.5]) {
+    for (const aspect of [0.05, 0.2, 1, 2.4]) {
+      const options = {
+        widthPx: 480,
+        now: 1000,
+        cam: { ...CAM0, zoom },
+        follow: false,
+        filesWord: 'files',
+        outside: 0,
+        dark: true,
+        aspect,
+      }
+      const low = drawSpin(geometryLayout, trail(1), DARK, options)
+      const limit = drawSpin(geometryLayout, trail(15), DARK, options)
+      const high = drawSpin(geometryLayout, trail(1_000_000_000), DARK, options)
+      expect([high.view.vx, high.view.vy, high.view.vw, high.view.vh]).toEqual([
+        low.view.vx,
+        low.view.vy,
+        low.view.vw,
+        low.view.vh,
+      ])
+      const limitGlow = limit.svg.match(
+        /<circle r="([^"]+)" fill="url\(#g3\)"/,
+      )?.[1]
+      const highGlow = high.svg.match(
+        /<circle r="([^"]+)" fill="url\(#g3\)"/,
+      )?.[1]
+      expect(limitGlow).toBeDefined()
+      expect(highGlow).toEqual(limitGlow)
+    }
+  }
+})
+
 test('intrinsic rendering cannot restart a fitted camera animation', () => {
   const renderer = createMapRenderer()
   const options = {

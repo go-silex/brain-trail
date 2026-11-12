@@ -22,7 +22,11 @@ import { tmpdir, homedir, platform, arch } from 'node:os'
 import path from 'node:path'
 import { finished } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { decideViewChanges } from './view-changes.mjs'
+import {
+  canonicalTree,
+  decideViewChanges,
+  proofFingerprint,
+} from './view-changes.mjs'
 import { probeNativeMapLayout } from './native-map-layout.mjs'
 
 const CANDIDATE = path.resolve(
@@ -89,8 +93,8 @@ const main = async () => {
       'Browser scenes load Three 0.160.0 from jsDelivr and Inter/JetBrains Mono from Google Fonts. This is not an offline proof.',
       'SVG HTML only frames the production SVG on the fixture theme background. It is not a native UI replica and is not a desktop layout.',
       'SVG proof captures one frame: CSS animations are materialized at 1600 ms and cancelled; SMIL is paused at 1.6 seconds. It does not prove motion parity.',
-      'Primary proof is byte equality of the native tree, harvested SVG source, browser index.html, and data.js. Raster pixel mismatches are retained and diagnostic; they do not fail that proof. Capture, decode, network, and missing-artifact errors still fail it.',
-      'Numeric press.handle differences are recorded and do not fail the tree. Every other tree difference fails. Svg props.source is replaced with an ordered slot before the tree compare.',
+      'Primary proof compares native trees, SVG source and viewport, browser index.html, and data.js. Exact declared tree/SVG proofs may be approved; browser and operational failures remain strict. Raster differences are diagnostic.',
+      'Numeric press.handle values are canonicalized; presence and type remain significant. Svg props.source is replaced with an ordered slot before the tree compare.',
     ],
     baseline: null,
     intended: null,
@@ -119,9 +123,9 @@ const main = async () => {
     viewport: { scene: SCENE_VIEWPORT, svgFallback: SVG_FALLBACK },
     normalization: {
       module:
-        'A module string is rewritten to the path relative to its isolated root only when both sides resolve to that same relative path.',
+        'Each isolated-root absolute module path is independently rewritten relative to its own root.',
       pressHandle:
-        'press.handle numbers are opaque runtime handler ids. They are listed and excluded. No other field is excluded.',
+        'Existing numeric press.handle values are canonicalized to zero; presence and type remain significant.',
     },
     cases: [],
     errors: [],
@@ -333,11 +337,13 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
         result: {
           name: item.id,
           errors: item.errors.map((message, position) => ({
-            kind: differences.has(position) ? 'difference' : 'operational',
+            ...(differences.get(position) ?? { kind: 'operational' }),
             message,
           })),
         },
       }).result
+      item.observedDifferences = decision.observed
+      item.rejectedDetails = decision.rejected
       item.errors = decision.errors.map((entry) => entry.message)
       if (decision.intended) item.intended = true
       item.ok = item.errors.length === 0
@@ -805,9 +811,13 @@ const compareCase = async (
     svgCount: 0,
     browser: null,
   }
-  const differences = new Set()
-  const difference = (message) => {
-    differences.add(item.errors.length)
+  const differences = new Map()
+  const difference = (message, key, fingerprint) => {
+    differences.set(item.errors.length, {
+      kind: 'difference',
+      key,
+      fingerprint,
+    })
     item.errors.push(message)
   }
   if (!baseline || !candidate) {
@@ -835,12 +845,10 @@ const compareCase = async (
     }
   }
   item.errors.push(...identity)
-  const normalized = normalizeModules(
-    leftSlots.tree,
-    rightSlots.tree,
-    baselineRoot,
-    candidateRoot,
-  )
+  const normalized = {
+    left: canonicalTree(leftSlots.tree, baselineRoot),
+    right: canonicalTree(rightSlots.tree, candidateRoot),
+  }
   await writeFile(
     path.join(dir, 'tree.normalized.baseline.json'),
     `${JSON.stringify(normalized.left, null, 2)}\n`,
@@ -852,18 +860,22 @@ const compareCase = async (
   const diff = diffValues(normalized.left, normalized.right, '')
   await writeFile(
     path.join(dir, 'tree.diff.json'),
-    `${JSON.stringify({ differences: diff.differences, nonvisual: diff.nonvisual, modules: normalized.rewritten }, null, 2)}\n`,
+    `${JSON.stringify({ differences: diff.differences, nonvisual: diff.nonvisual }, null, 2)}\n`,
   )
   item.tree = {
     equal: diff.differences.length === 0,
     differences: diff.differences.length,
     differencePaths: diff.differences.map((entry) => entry.path),
     nonvisual: diff.nonvisual,
-    modules: normalized.rewritten,
+    fingerprint: proofFingerprint(normalized.left, normalized.right),
     diff: path.relative(output, path.join(dir, 'tree.diff.json')),
   }
   if (!item.tree.equal)
-    difference(`tree body differs at ${diff.differences.length} path(s)`)
+    difference(
+      `tree body differs at ${diff.differences.length} path(s)`,
+      'tree',
+      item.tree.fingerprint,
+    )
 
   item.svgCount = Math.max(leftSlots.slots.length, rightSlots.slots.length)
   if (item.svgCount) {
@@ -883,10 +895,25 @@ const compareCase = async (
       )
       item.svgs.push(svgItem)
       if (svgItem.source && !svgItem.source.equal)
-        difference(`svg ${svgIndex} source bytes differ`)
+        difference(
+          `svg ${svgIndex} source bytes differ`,
+          `svg:${svgIndex}:source`,
+          proofFingerprint(
+            svgItem.source.sha256.baseline,
+            svgItem.source.sha256.candidate,
+          ),
+        )
       if (svgItem.error) {
         const message = `svg ${svgIndex} ${svgItem.error}`
-        if (viewportDifference) difference(message)
+        if (viewportDifference)
+          difference(
+            message,
+            `svg:${svgIndex}:viewport`,
+            proofFingerprint(
+              svgItem.viewport.baseline,
+              svgItem.viewport.candidate,
+            ),
+          )
         else item.errors.push(message)
       }
     }
@@ -914,9 +941,9 @@ const compareCase = async (
       output,
     )
     if (item.browser.html && !item.browser.html.equal)
-      difference('browser index.html bytes differ')
+      item.errors.push('browser index.html bytes differ')
     if (item.browser.data && !item.browser.data.equal)
-      difference('browser data.js bytes differ')
+      item.errors.push('browser data.js bytes differ')
     if (item.browser.error)
       item.errors.push(`browser scene ${item.browser.error}`)
   }
@@ -971,53 +998,6 @@ const sideIdentity = (side, captured, slotted) => {
       errors.push(`${side} svg ${index} alt is not the drawn Svg props.alt`)
   }
   return errors
-}
-
-const normalizeModules = (left, right, leftRoot, rightRoot) => {
-  const rewritten = []
-  const visit = (a, b, pointer) => {
-    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return
-    if (Array.isArray(a) || Array.isArray(b)) {
-      if (Array.isArray(a) && Array.isArray(b)) {
-        const count = Math.min(a.length, b.length)
-        for (let index = 0; index < count; index += 1)
-          visit(a[index], b[index], `${pointer}/${index}`)
-      }
-      return
-    }
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)])
-    for (const key of keys) {
-      const next = `${pointer}/${key}`
-      if (
-        key === 'module' &&
-        typeof a[key] === 'string' &&
-        typeof b[key] === 'string'
-      ) {
-        const relA = moduleRelative(a[key], leftRoot)
-        const relB = moduleRelative(b[key], rightRoot)
-        if (relA && relA === relB) {
-          rewritten.push({ path: next, relative: relA })
-          a[key] = relA
-          b[key] = relB
-          continue
-        }
-      }
-      visit(a[key], b[key], next)
-    }
-  }
-  visit(left, right, '')
-  return { left, right, rewritten }
-}
-
-const moduleRelative = (value, root) => {
-  if (value.startsWith('./') || value.startsWith('../')) return null
-  const abs = path.isAbsolute(value) ? path.normalize(value) : null
-  if (!abs) return null
-  const base = path.normalize(root)
-  if (abs !== base && !abs.startsWith(`${base}${path.sep}`)) return null
-  const rel = path.relative(base, abs)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
-  return rel.split(path.sep).join('/')
 }
 
 const diffValues = (left, right, pointer) => {
@@ -1111,11 +1091,7 @@ const compareSvg = async (
   const leftSize = svgSize(leftSlot, leftHarvest.source)
   const rightSize = svgSize(rightSlot, rightHarvest.source)
   item.viewport = { baseline: leftSize, candidate: rightSize }
-  if (
-    leftSize.width !== rightSize.width ||
-    leftSize.height !== rightSize.height ||
-    leftSize.fallback !== rightSize.fallback
-  ) {
+  if (stable(leftSize) !== stable(rightSize)) {
     item.error = `svg viewport differs ${JSON.stringify(leftSize)} vs ${JSON.stringify(rightSize)}`
     viewportDifference = true
   }

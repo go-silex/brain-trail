@@ -17,7 +17,7 @@ import { assembleCapture, needsMcpScan, needsTouch } from './acts'
 import { costStats, keepCosts, limitOf, usd, zoneOf } from './readout'
 import type { CostEntry } from './readout'
 import { appsArgv, appsIn, DEFAULT_SETTINGS, findArgv, fromFind, GIT_LS, hash, initialSettings, isShallow, openAttempts, pickFiles, vaultProbe } from './workspace'
-import { absOf, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
+import { absOf, cameraDuringGesture, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
 import type { Drawn2d, DrawnFrames, FoldFacts, Step, TabSnapshot, ViewActions, ViewChild, ViewIntent, ViewProps, ViewRuntime, ViewSnapshot, ViewTag } from '../types/view'
 import { renderPane, TITLE, weather } from './views'
 
@@ -332,6 +332,7 @@ const applyStep = async ($: EngineInterface, step: Step) => {
   }
 }
 const nativeIntent = async ($: EngineInterface, intent: ViewIntent) => {
+  if (intent.kind === 'toggle-3d') gesture = GESTURE0
   const stop = () => { playTimer?.cancel(); playTimer = undefined }
   const effect = timerEffect(intent)
   if (effect !== 'none') stop()
@@ -682,7 +683,7 @@ export const register: Register = (on, options) => {
         await getBreakdown($, now)
         const view3d = await read($, view3dA)
         const cam3d = await read($, cam3dA)
-        body = { tab, kind: 'ready', layout: L, shallow, fold: { index, linked, connected }, state: { zoomed: isZoomed, camera, play, view3d, cam3d } }
+        body = { tab, kind: 'ready', layout: L, shallow, fold: { index, linked, connected }, state: { zoomed: isZoomed, camera, play, view3d, cam3d: e.surface === 'desktop' ? cameraDuringGesture(cam3d, gesture) : cam3d } }
       }
     } else if (tab === 'goal') {
       body = { tab, connected }

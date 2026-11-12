@@ -255,3 +255,102 @@ test('wheel over the enlargement notice cannot zoom the hidden map', async ($, o
   expect(viewBoxOf(await mapSource(ui))).toEqual(before)
   await ui.unmount()
 })
+
+// The SDK test host needs explicit redraws to expose each visible transition.
+for (const hide of ['notice', 'tab'] as const) {
+  for (const spinning of [true, false]) {
+    test(`hiding a dragged 3D map by ${hide} restores ${spinning ? 'running' : 'paused'} spin`, async ($, on: On) => {
+      const { ui } = await mountReady($, on, {
+        ...DESKTOP,
+        id: `drag-${hide}-${spinning}`,
+        view3d: true,
+      })
+      try {
+        if (!spinning) {
+          await ui.press({ key: 'spin' })
+          await ui.redraw()
+        }
+        await ui.press({ key: 'zoom-in' })
+        await ui.redraw()
+        await ui.resize({ columns: 36, rows: 16, in: 'map-hit' })
+        await ui.pointer({
+          type: 'down',
+          x: 4,
+          y: 4,
+          button: 'left',
+          in: 'map-hit',
+        })
+        await ui.pointer({
+          type: 'move',
+          x: 12,
+          y: 6,
+          button: 'left',
+          in: 'map-hit',
+        })
+        await ui.redraw()
+        expect((await ui.find({ key: 'spin' }))?.text).toBe('▶')
+        const dragged = await mapSource(ui)
+        if (hide === 'notice') {
+          await ui.resize({ columns: 0, rows: 20, in: 'header-probe' })
+          await ui.resize({ columns: 0, rows: 20, in: 'footer-probe' })
+          expect(await ui.find({ text: /Enlarge the pane/ })).toBeDefined()
+          await ui.resize({ columns: 0, rows: 4, in: 'header-probe' })
+          await ui.resize({ columns: 0, rows: 3, in: 'footer-probe' })
+        } else {
+          await ui.press({ key: 't-goal' })
+          await ui.redraw()
+          expect(await ui.find({ key: 'spin' })).toBeUndefined()
+          await ui.press({ key: 't-map' })
+          await ui.redraw()
+        }
+        expect((await ui.find({ key: 'spin' }))?.text).toBe(
+          spinning ? '❚❚' : '▶',
+        )
+        // Pausing again lets the SVG compare the final yaw, pitch and zoom directly.
+        if (spinning) {
+          await ui.press({ key: 'spin' })
+          await ui.redraw()
+        }
+        expect(await mapSource(ui)).toBe(dragged)
+      } finally {
+        await ui.unmount()
+      }
+    })
+  }
+}
+
+test('switching to 2D during a 3D drag clears the transient pause', async ($, on: On) => {
+  const { ui } = await mountReady($, on, {
+    ...DESKTOP,
+    id: 'drag-mode',
+    view3d: true,
+  })
+  try {
+    await ui.resize({ columns: 36, rows: 16, in: 'map-hit' })
+    await ui.pointer({
+      type: 'down',
+      x: 4,
+      y: 4,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 12,
+      y: 6,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    expect((await ui.find({ key: 'spin' }))?.text).toBe('▶')
+    await ui.press({ key: 'view-3d' })
+    await ui.redraw()
+    expect((await ui.find({ key: 'view-3d' }))?.text).toBe('3D')
+    await ui.pointer({ type: 'up', x: 12, y: 6, button: 'left', in: 'map-hit' })
+    await ui.press({ key: 'view-3d' })
+    await ui.redraw()
+    expect((await ui.find({ key: 'spin' }))?.text).toBe('❚❚')
+  } finally {
+    await ui.unmount()
+  }
+})

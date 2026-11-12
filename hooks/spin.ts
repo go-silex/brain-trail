@@ -12,6 +12,8 @@ export const SPIN_MS = 80_000  // one full turn
 const NB = 72                  // slices around the axis (5 degrees each)
 const KF = 36                  // keyframes per turn
 const FLUID = 2400
+// Fitted annotations must stay inside a stable camera envelope as counts grow.
+const FIT_GLOW_LOG_MAX = 4
 const TAU = Math.PI * 2
 
 export type Cam = { yaw: number; pitch: number; zoom: number; spin: boolean; at: number }
@@ -109,12 +111,9 @@ export const drawSpin = (
     // Bound rotating annotations at every yaw, not just the current projection.
     // These bounds are built at unit zoom, then zoom/follow remain deliberate crops.
     const unit = px * zoom
-    // Any note may become current; count-dependent glows reflect the scene,
-    // while the pill allowance is independent of which note is current.
-    let glow = 0, nameLength = 0
-    for (const s of T.state.values()) {
-      if (s.k === 'read' || s.k === 'write') glow = Math.max(glow, (16 + 5 * Math.log2(s.count + 1)) * unit)
-    }
+    // Any note may become current; fitted glows have a fixed maximum radius.
+    let nameLength = 0
+    const glow = (16 + 5 * FIT_GLOW_LOG_MAX) * unit
     for (const [path] of L.files) {
       const length = path.length - path.lastIndexOf('/') - 1 - (path.endsWith('.md') ? 3 : 0)
       nameLength = Math.max(nameLength, Math.min(30, length))
@@ -268,7 +267,9 @@ export const drawSpin = (
     const s = T.state.get(n)!
     if (s.k !== 'read' && s.k !== 'write') continue
     const w = follows(B.u[n]!, B.v[n]!, ang(n), true)
-    const r = (3.4 + Math.log2(s.count + 1)) * px, g = (16 + 5 * Math.log2(s.count + 1)) * px
+    const intensity = Math.log2(s.count + 1)
+    const r = (o.aspect === undefined ? 3.4 + intensity : Math.min(3.4 + intensity, 32)) * px
+    const g = (16 + 5 * (o.aspect === undefined ? intensity : Math.min(intensity, FIT_GLOW_LOG_MAX))) * px
     out.push(`${w.open}<circle r="${f(g)}" fill="url(#g3)"><animate attributeName="opacity" values=".55;1;.55" dur="3.6s" repeatCount="indefinite"/></circle>`
       + `<circle r="${f(r)}" fill="${K[s.k]}" stroke="${P.bg}" stroke-width="${f(px)}"/>`
       + (s.k === 'write' ? `<circle r="${f(r + 3 * px)}" fill="none" stroke="${K.write}" stroke-width="${f(px)}"/>` : '')

@@ -37,10 +37,16 @@ The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline com
 Only opaque numeric press handles and verified temporary module locations are treated as nonvisual. SVG source bytes are the SVG proof. The raster is a diagnostic of the materialized frame, not a substitute for the source comparison.
 
 To land intentional view changes, add `tests/fixtures/view-changes.json` with
-the full baseline commit SHA, a non-empty reason, and the exact changed case
-names, for example `{"baseline":"<40-hex SHA>","reason":"...","cases":["..."]}`.
-The declaration applies only against that baseline; listed cases that are
-identical fail, and all other cases and operational errors remain strict.
+the full baseline commit SHA, a non-empty reason, and per-case exact proof
+fingerprints, for example:
+`{"baseline":"<40-hex SHA>","reason":"...","cases":{"case-name":{"tree":"<64-hex SHA>","svg:1:source":"<64-hex SHA>"}}}`.
+Only `tree`, `svg:<index>:source`, and `svg:<index>:viewport` are authorizable.
+Review the failed receipt's `observedDifferences` alongside the raw and normalized
+tree and SVG artifacts before copying each fingerprint into the declaration.
+Fingerprints bind both baseline and candidate: the canonical tree pair, the SVG
+source SHA-256 pair, or the complete viewport pair respectively. Unused or
+mismatched approvals fail. Declarations apply only to their exact baseline;
+browser HTML/data differences and operational failures cannot be approved.
 
 These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.1.322's test runner also drops the pointer's `fine` field before the real Client handler receives it: resized cell-centre gestures are exercised, but sub-cell precision is not established by those tests.
 

@@ -18,7 +18,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { decideViewChanges } from './view-changes.mjs'
+import {
+  canonicalTree,
+  decideViewChanges,
+  proofFingerprint,
+} from './view-changes.mjs'
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url))
 const candidate = resolve(scriptsDir, '..')
@@ -593,80 +597,174 @@ test('release CLI classifies OMP package changes and aligns shipped versions', (
   }
 })
 
-test('view change declarations preserve strict and intended parity', () => {
+test('view approvals bind exact proof units and never hide unrelated failures', () => {
   const baseline = 'a'.repeat(40)
+  const original = { children: [{ type: 'Text', children: ['empty notice'] }] }
+  const layout = {
+    children: [
+      { type: 'Text', children: ['empty notice'], props: { height: 0 } },
+    ],
+  }
+  const removed = { children: [] }
+  const tree = proofFingerprint(original, layout)
+  const source = proofFingerprint('baseline SVG sha', 'candidate SVG sha')
   const declaration = JSON.stringify({
     baseline,
-    reason: 'Intentional layout update',
-    cases: ['one', 'two'],
+    reason: 'Intentional layout',
+    cases: { one: { tree, 'svg:1:source': source }, two: { tree } },
   })
-  const difference = { kind: 'difference', message: 'tree differs' }
-  const operational = { kind: 'operational', message: 'capture failed' }
-  const decide = (overrides = {}) =>
+  const difference = (key, fingerprint) => ({
+    kind: 'difference',
+    key,
+    fingerprint,
+    message: `${key} differs`,
+  })
+  const treeDiff = difference('tree', tree)
+  const svgDiff = difference('svg:1:source', source)
+  const decide = (errors, options = {}) =>
     decideViewChanges({
       declaration,
       baseline,
       names: ['one', 'two', 'three'],
-      ...overrides,
-    })
-  const result = (name, errors) => ({ name, errors })
-
-  assert.deepEqual(decide({ declaration: null }), {
-    intended: null,
-    result: null,
-  })
-  assert.equal(decide().intended.applied, true)
-  assert.deepEqual(decide({ result: result('one', [difference]) }).result, {
-    intended: true,
-    errors: [],
-  })
+      result: { name: 'one', errors },
+      ...options,
+    }).result
+  assert.deepEqual(decide([treeDiff, svgDiff]).errors, [])
+  assert.deepEqual(decide([treeDiff, svgDiff]).observed, [treeDiff, svgDiff])
+  for (const message of [
+    'browser index.html bytes differ',
+    'browser data.js bytes differ',
+    'capture failed',
+  ]) {
+    const strict = { kind: 'operational', message }
+    assert.deepEqual(decide([treeDiff, svgDiff, strict]).errors, [strict])
+  }
+  const changedSvg = difference(
+    'svg:1:source',
+    proofFingerprint('baseline SVG sha', 'altered SVG sha'),
+  )
+  const svgRejected = decide([treeDiff, changedSvg])
+  assert.ok(svgRejected.errors.includes(changedSvg))
   assert.match(
-    decide({ result: result('one', []) }).result.errors[0].message,
-    /declared changed but identical/,
+    svgRejected.errors.at(-1).message,
+    /unused or mismatched.*svg:1:source/,
   )
-  assert.deepEqual(
-    decide({ result: result('one', [difference, operational]) }).result.errors,
-    [operational],
+  const removedTree = difference('tree', proofFingerprint(original, removed))
+  assert.ok(decide([removedTree, svgDiff]).errors.includes(removedTree))
+  const viewport = difference(
+    'svg:1:viewport',
+    proofFingerprint({ width: 1 }, { width: 2 }),
   )
-  assert.deepEqual(
-    decide({ result: result('three', [difference]) }).result.errors,
-    [difference],
+  assert.ok(decide([treeDiff, svgDiff, viewport]).errors.includes(viewport))
+  const unapprovedCase = decideViewChanges({
+    declaration,
+    baseline,
+    names: ['one', 'two', 'three'],
+    result: { name: 'three', errors: [treeDiff] },
+  }).result
+  assert.deepEqual(unapprovedCase.errors, [treeDiff])
+  for (const fingerprint of [undefined, null, '', 'bad', 'A'.repeat(64)]) {
+    const missingOrMalformed = difference('tree', fingerprint)
+    assert.ok(
+      decide([missingOrMalformed, svgDiff]).errors.includes(missingOrMalformed),
+    )
+    const noApproval = decideViewChanges({
+      declaration,
+      baseline,
+      names: ['one', 'two', 'three'],
+      result: { name: 'three', errors: [missingOrMalformed] },
+    }).result
+    assert.deepEqual(noApproval.errors, [missingOrMalformed])
+  }
+  assert.match(
+    decide([treeDiff]).errors[0].message,
+    /unused or mismatched.*svg:1:source/,
   )
-  assert.throws(() => decide({ names: ['one'] }), /unknown cases: two/)
-  const ignored = decide({
-    baseline: 'b'.repeat(40),
-    names: [],
-    result: result('one', [difference]),
-  })
-  assert.equal(ignored.intended.applied, false)
-  assert.deepEqual(ignored.result.errors, [difference])
-  assert.equal(ignored.result.intended, false)
-  // The complete manifest, not only the selected case, validates the list.
+  assert.equal(decide([], { baseline: 'b'.repeat(40) }).intended, false)
+  assert.deepEqual(decide([treeDiff], { baseline: 'b'.repeat(40) }).errors, [
+    treeDiff,
+  ])
+  assert.throws(() => decide([], { names: ['one'] }), /unknown cases: two/)
   assert.equal(
-    decide({ selection: 'one', result: result('one', [difference]) }).result
-      .intended,
-    true,
+    decideViewChanges({ declaration: null, baseline }).intended,
+    null,
   )
 })
 
-test('view change declarations reject malformed input', () => {
+test('canonical tree proof retains structure and normalizes moved native clients independently', () => {
+  const baseline = {
+    children: [
+      { press: { handle: 31 }, props: { module: '/tmp/base/hooks/a.ts' } },
+    ],
+  }
+  const candidate = {
+    children: [
+      { press: { handle: 72 }, props: { module: '/tmp/candidate/hooks/a.ts' } },
+    ],
+  }
+  assert.deepEqual(
+    canonicalTree(baseline, '/tmp/base'),
+    canonicalTree(candidate, '/tmp/candidate'),
+  )
+  const added = {
+    children: [{ props: { module: '/tmp/candidate/hooks/a.ts' } }],
+  }
+  assert.equal(
+    canonicalTree(added, '/tmp/candidate').children[0].props.module,
+    'hooks/a.ts',
+  )
+  assert.notEqual(
+    proofFingerprint(
+      canonicalTree(baseline, '/tmp/base'),
+      canonicalTree(candidate, '/tmp/candidate'),
+    ),
+    proofFingerprint(
+      canonicalTree(baseline, '/tmp/base'),
+      canonicalTree(added, '/tmp/candidate'),
+    ),
+  )
+  assert.notDeepEqual(
+    canonicalTree({ press: { handle: '31' } }, '/tmp/base'),
+    canonicalTree({ press: { handle: 31 } }, '/tmp/base'),
+  )
+  assert.notDeepEqual(
+    canonicalTree({ press: {} }, '/tmp/base'),
+    canonicalTree({ press: { handle: 31 } }, '/tmp/base'),
+  )
+  assert.notDeepEqual(
+    canonicalTree({ module: '/tmp/elsewhere/a.ts' }, '/tmp/base'),
+    canonicalTree({ module: 'a.ts' }, '/tmp/base'),
+  )
+})
+
+test('view change declarations reject malformed and blanket approvals', () => {
   const baseline = 'a'.repeat(40)
-  const good = { baseline, reason: 'reason', cases: ['one'] }
+  const good = {
+    baseline,
+    reason: 'reason',
+    cases: { one: { tree: 'a'.repeat(64) } },
+  }
   const bad = [
     '{',
     'null',
     JSON.stringify({ ...good, baseline: 'abc' }),
     JSON.stringify({ ...good, reason: '  ' }),
     JSON.stringify({ ...good, reason: 1 }),
-    JSON.stringify({ ...good, cases: 'one' }),
-    JSON.stringify({ ...good, cases: ['one', 'one'] }),
-    JSON.stringify({ ...good, cases: [3] }),
-    JSON.stringify({ ...good, cases: [''] }),
+    JSON.stringify({ ...good, cases: ['one'] }),
+    JSON.stringify({ ...good, cases: { one: {} } }),
+    JSON.stringify({ ...good, cases: { one: { tree: 'bad' } } }),
+    JSON.stringify({
+      ...good,
+      cases: { one: { 'browser:html': 'a'.repeat(64) } },
+    }),
+    JSON.stringify({
+      ...good,
+      cases: { one: { 'svg:01:source': 'a'.repeat(64) } },
+    }),
   ]
-  for (const declaration of bad) {
+  for (const declaration of bad)
     assert.throws(
       () => decideViewChanges({ declaration, baseline }),
       /view changes declaration:/,
     )
-  }
 })

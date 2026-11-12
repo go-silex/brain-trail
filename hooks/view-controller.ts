@@ -277,6 +277,12 @@ export const parseGesture = (data: unknown): MapGesture | undefined => {
     return { kind: 'drag', fx: d.fx, fy: d.fy, sfx: d.sfx, sfy: d.sfy }
   return undefined
 }
+// Spin intent lives in the camera; a drag pauses only its rendered projection.
+export const cameraDuringGesture = (
+  camera: ViewState['cam3d'],
+  memory: GestureMemory,
+): ViewState['cam3d'] =>
+  memory.drag3d === undefined ? camera : { ...camera, spin: false }
 export const mapGesture = (
   g: MapGesture | undefined,
   s: Pick<ViewState, 'view3d' | 'zoomed' | 'cam3d'>,
@@ -300,10 +306,7 @@ export const mapGesture = (
         const base = memory.drag3d
         memory = { ...memory, drag3d: undefined }
         if (base !== undefined)
-          steps.push({
-            key: 'cam3d',
-            next: (k) => ({ ...k, spin: base.spin, at: c.now }),
-          })
+          steps.push({ key: 'cam3d', next: (k) => ({ ...k, at: c.now }) })
       } else if (g.kind === 'hover') {
         const n = c.hoverNames
           ? pickSpin(frame.layout, frame.view, c.now, g.fx, g.fy, frame.touched)
@@ -316,7 +319,6 @@ export const mapGesture = (
           base = {
             yaw: frame.view.yaw,
             pitch: s.cam3d.pitch,
-            spin: s.cam3d.spin,
           }
           memory = { ...memory, drag3d: base }
           if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
@@ -330,7 +332,6 @@ export const mapGesture = (
             ...k,
             yaw: b.yaw + dx * Math.PI * 1.3,
             pitch: Math.max(PITCH_MIN, Math.min(PITCH_MAX, b.pitch + dy * 1.4)),
-            spin: false,
             at: c.now,
           }),
         })

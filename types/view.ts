@@ -286,7 +286,7 @@ export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
 export type GestureMemory = {
   hover: { fx: number; fy: number } | undefined
   drag2d: MapFrame | undefined
-  drag3d: { yaw: number; pitch: number; spin: boolean } | undefined
+  drag3d: { yaw: number; pitch: number } | undefined
 }
 export type GestureResult = {
   memory: GestureMemory
