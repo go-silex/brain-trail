@@ -272,9 +272,19 @@ export const parseGesture = (data: unknown): MapGesture | undefined => {
   if (
     d.kind === 'drag' &&
     typeof d.sfx === 'number' &&
-    typeof d.sfy === 'number'
+    typeof d.sfy === 'number' &&
+    typeof d.press === 'number' &&
+    Number.isSafeInteger(d.press) &&
+    d.press > 0
   )
-    return { kind: 'drag', fx: d.fx, fy: d.fy, sfx: d.sfx, sfy: d.sfy }
+    return {
+      kind: 'drag',
+      press: d.press,
+      fx: d.fx,
+      fy: d.fy,
+      sfx: d.sfx,
+      sfy: d.sfy,
+    }
   return undefined
 }
 // Spin intent lives in the camera; a drag pauses only its rendered projection.
@@ -297,17 +307,30 @@ export const mapGesture = (
         ? { ...m, hover: { fx: g.fx, fy: g.fy } }
         : m
   const steps: Step[] = []
+  if (
+    g?.kind === 'dragend' ||
+    g?.kind === 'hover' ||
+    g?.kind === 'click' ||
+    g?.kind === 'leave'
+  )
+    memory = { ...memory, drag2d: undefined }
   let tip: GestureResult['tip'] = null
   let open: PreviewRef | undefined
   if (s.view3d) {
+    // A later non-drag message can replace an undelivered dragend in the client transport.
+    if (
+      memory.drag3d !== undefined &&
+      (g?.kind === 'dragend' ||
+        g?.kind === 'hover' ||
+        g?.kind === 'click' ||
+        g?.kind === 'leave')
+    ) {
+      memory = { ...memory, drag3d: undefined }
+      steps.push({ key: 'cam3d', next: (k) => ({ ...k, at: c.now }) })
+    }
     const frame = frames.d3
     if (frame !== undefined && g !== undefined) {
-      if (g.kind === 'dragend') {
-        const base = memory.drag3d
-        memory = { ...memory, drag3d: undefined }
-        if (base !== undefined)
-          steps.push({ key: 'cam3d', next: (k) => ({ ...k, at: c.now }) })
-      } else if (g.kind === 'hover') {
+      if (g.kind === 'hover') {
         const n = c.hoverNames
           ? pickSpin(frame.layout, frame.view, c.now, g.fx, g.fy, frame.touched)
           : undefined
@@ -315,8 +338,9 @@ export const mapGesture = (
           tip = { text: fileName(frame.layout.files[n]![0]), x: g.x, y: g.y }
       } else if (g.kind === 'drag') {
         let base = memory.drag3d
-        if (base === undefined) {
+        if (base === undefined || base.press !== g.press) {
           base = {
+            press: g.press,
             yaw: frame.view.yaw,
             pitch: s.cam3d.pitch,
           }
@@ -355,8 +379,7 @@ export const mapGesture = (
   } else {
     const frame = frames.d2
     if (frame !== undefined && g !== undefined) {
-      if (g.kind === 'dragend') memory = { ...memory, drag2d: undefined }
-      else if (g.kind === 'hover' || g.kind === 'click') {
+      if (g.kind === 'hover' || g.kind === 'click') {
         const tilted = tilt(frame.layout),
           hit = pickAt(
             tilted.files,
@@ -382,8 +405,11 @@ export const mapGesture = (
               zoomFrame(frame.view, g.fx, g.fy, g.right ? 1.8 : 1 / 1.8, SIZE),
           })
       } else if (g.kind === 'drag') {
-        const base = memory.drag2d ?? { ...frame.view }
-        memory = { ...memory, drag2d: base }
+        const base =
+          memory.drag2d?.press === g.press
+            ? memory.drag2d.view
+            : { ...frame.view }
+        memory = { ...memory, drag2d: { press: g.press, view: base } }
         steps.push({
           key: 'camera',
           next: () => panFrame(base, g.fx - g.sfx, g.fy - g.sfy),

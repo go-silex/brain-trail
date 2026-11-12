@@ -274,7 +274,14 @@ export type MapGesture =
   | { kind: 'hover'; fx: number; fy: number; x: number; y: number }
   | { kind: 'leave' }
   | { kind: 'click'; fx: number; fy: number; right: boolean }
-  | { kind: 'drag'; fx: number; fy: number; sfx: number; sfy: number }
+  | {
+      kind: 'drag'
+      press: number
+      fx: number
+      fy: number
+      sfx: number
+      sfy: number
+    }
   | { kind: 'dragend' }
 export type MapTip = { text: string; x: number; y: number }
 export type Drawn2d = { view: MapFrame; layout: Layout; touched: Set<number> }
@@ -285,8 +292,8 @@ export type DrawnMap =
 export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
 export type GestureMemory = {
   hover: { fx: number; fy: number } | undefined
-  drag2d: MapFrame | undefined
-  drag3d: { yaw: number; pitch: number } | undefined
+  drag2d: { press: number; view: MapFrame } | undefined
+  drag3d: { press: number; yaw: number; pitch: number } | undefined
 }
 export type GestureResult = {
   memory: GestureMemory
