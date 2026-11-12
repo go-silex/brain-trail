@@ -21,7 +21,6 @@ import { fileURLToPath } from 'node:url'
 import {
   canonicalTree,
   decideViewChanges,
-  nativeViewEnvironment,
   proofFingerprint,
 } from './view-changes.mjs'
 
@@ -595,22 +594,6 @@ test('release CLI classifies OMP package changes and aligns shipped versions', (
     assertOk(run(base), 'Source distribution 2.2.1 > 2.2.0')
   } finally {
     rmSync(sandbox, { recursive: true, force: true })
-  }
-})
-
-test('native view subprocess renders reviewed local times across host timezones', () => {
-  const code = `console.log(JSON.stringify([
-    new Date(1000).getHours(),
-    new Date('2020-11-09T17:39:00Z').getHours(),
-    new Date('2020-11-16T20:59:00Z').getHours(),
-  ]))`
-  for (const TZ of ['UTC', 'America/Los_Angeles']) {
-    const run = spawnSync(process.execPath, ['-e', code], {
-      encoding: 'utf8',
-      env: nativeViewEnvironment({ ...process.env, TZ }),
-    })
-    assert.equal(run.status, 0, run.stderr)
-    assert.deepEqual(JSON.parse(run.stdout), [1, 18, 21])
   }
 })
 

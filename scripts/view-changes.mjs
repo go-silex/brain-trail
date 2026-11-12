@@ -1,13 +1,6 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
-// Native proof captures use the timezone of the reviewed corpus.
-export const NATIVE_VIEW_TIMEZONE = 'Europe/Paris'
-export const nativeViewEnvironment = (env) => ({
-  ...env,
-  TZ: NATIVE_VIEW_TIMEZONE,
-})
-
 // Canonical JSON is shared by the declaration producer and the parity gate.
 export const canonicalJson = (value) =>
   JSON.stringify(value, (_, nested) => {

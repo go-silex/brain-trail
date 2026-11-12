@@ -36,9 +36,11 @@ The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline com
 
 Only opaque numeric press handles and verified temporary module locations are treated as nonvisual. SVG source bytes are the SVG proof. The raster is a diagnostic of the materialized frame, not a substitute for the source comparison.
 
-Native manifest and tree captures run with `TZ=Europe/Paris`, the timezone of
-the reviewed proof corpus; rendered times remain part of the exact proof.
-The separate browser scene uses the UTC timezone recorded in the receipt.
+The Claude Code 2.1.322 native runtime uses the OS timezone, not `TZ`. The
+manifest observes that timezone for both isolated roots and fails before case
+captures unless it is `Europe/Paris`, the reviewed proof corpus timezone.
+CI configures its disposable runner; local checks do not change the OS timezone.
+Rendered times remain part of the exact proof. Browser scenes use UTC.
 
 To land intentional view changes, add `tests/fixtures/view-changes.json` with
 the full baseline commit SHA, a non-empty reason, and per-case exact proof

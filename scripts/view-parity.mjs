@@ -25,8 +25,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   canonicalTree,
   decideViewChanges,
-  nativeViewEnvironment,
-  NATIVE_VIEW_TIMEZONE,
   proofFingerprint,
 } from './view-changes.mjs'
 import { probeNativeMapLayout } from './native-map-layout.mjs'
@@ -43,6 +41,7 @@ const FIXTURE = path.join('tests', 'fixtures', 'views.tsx')
 const MARK_MANIFEST = 'BT_VIEW_MANIFEST:'
 const MARK_CASE = 'BT_VIEW_CASE:'
 const OWNER_FILE = '.view-parity-owner'
+const NATIVE_VIEW_TIMEZONE = 'Europe/Paris'
 const OWNER_TEXT = 'view-parity\n'
 const TEST_TIMEOUT_MS = 120_000
 const FIXED_TIME = '2026-11-11T12:00:00.000Z'
@@ -106,7 +105,7 @@ const main = async () => {
     selection: null,
     versions: {},
     clock: {
-      native: { timezoneId: NATIVE_VIEW_TIMEZONE },
+      native: null,
       browserScene: {
         installedAt: FIXED_TIME,
         installLeadMs: INSTALL_LEAD_MS,
@@ -260,7 +259,12 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
   }
   await writeFile(path.join(output, 'input.sha256'), production.canonical)
 
-  const discovered = await discoverManifest(baselineRoot, candidateRoot, output)
+  const discovered = await discoverManifest(
+    baselineRoot,
+    candidateRoot,
+    output,
+    receipt,
+  )
   receipt.fixture.cases = discovered.map((item) => ({
     id: item.id,
     ...scenarioOf(item),
@@ -518,7 +522,12 @@ const installFixtures = async (baselineRoot, candidateRoot, root) => {
   }
 }
 
-const discoverManifest = async (baselineRoot, candidateRoot, output) => {
+const discoverManifest = async (
+  baselineRoot,
+  candidateRoot,
+  output,
+  receipt,
+) => {
   const source = manifestWrapper()
   for (const isolated of [baselineRoot, candidateRoot]) {
     const file = path.join(isolated, 'tests', 'parity-manifest.test.tsx')
@@ -539,7 +548,21 @@ const discoverManifest = async (baselineRoot, candidateRoot, output) => {
   }
   const baseline = oneManifest(left, 'baseline')
   const candidate = oneManifest(right, 'candidate')
-  if (stable(baseline) !== stable(candidate)) {
+  receipt.clock.native = {
+    baselineTimezoneId: baseline.timezoneId,
+    candidateTimezoneId: candidate.timezoneId,
+    requiredTimezoneId: NATIVE_VIEW_TIMEZONE,
+  }
+  for (const [side, manifest] of [
+    ['baseline', baseline],
+    ['candidate', candidate],
+  ]) {
+    if (manifest.timezoneId !== NATIVE_VIEW_TIMEZONE)
+      throw new Error(
+        `${side} native SDK timezone ${JSON.stringify(manifest.timezoneId)}; expected ${NATIVE_VIEW_TIMEZONE}. Configure the OS timezone before running view parity (TZ alone is ineffective).`,
+      )
+  }
+  if (stable(baseline.cases) !== stable(candidate.cases)) {
     await writeFile(
       path.join(output, 'manifest.baseline.json'),
       `${JSON.stringify(baseline, null, 2)}\n`,
@@ -552,12 +575,12 @@ const discoverManifest = async (baselineRoot, candidateRoot, output) => {
       'fixture manifest differs between isolated roots; see manifest.*.json',
     )
   }
-  validateManifest(baseline)
+  validateManifest(baseline.cases)
   await writeFile(
     path.join(output, 'manifest.json'),
-    `${JSON.stringify(baseline, null, 2)}\n`,
+    `${JSON.stringify(baseline.cases, null, 2)}\n`,
   )
-  return baseline
+  return baseline.cases
 }
 
 const oneManifest = (run, side) => {
@@ -574,8 +597,17 @@ const oneManifest = (run, side) => {
       `${side} manifest JSON is malformed: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-  if (!Array.isArray(parsed))
-    throw new Error(`${side} manifest is not an array`)
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    !Array.isArray(parsed.cases) ||
+    typeof parsed.timezoneId !== 'string' ||
+    !parsed.timezoneId
+  )
+    throw new Error(
+      `${side} manifest needs cases and an observed native timezone`,
+    )
   return parsed
 }
 
@@ -610,7 +642,10 @@ const manifestWrapper = () => `import { test } from 'claude-code/testing'
 import { viewCases } from './fixtures/views'
 
 test('view-parity manifest', { timeoutMs: ${TEST_TIMEOUT_MS} }, () => {
-  console.log(${JSON.stringify(MARK_MANIFEST)} + JSON.stringify(viewCases))
+  console.log(${JSON.stringify(MARK_MANIFEST)} + JSON.stringify({
+    cases: viewCases,
+    timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }))
 })
 `
 
@@ -633,7 +668,6 @@ const runNative = async (name, dir, output, expectedTests) => {
   await mkdir(path.dirname(stdoutPath), { recursive: true })
   const run = await runProcess(process.execPath, [CLI, 'plugin', 'test', dir], {
     cwd: dir,
-    env: nativeViewEnvironment(process.env),
     stdoutPath,
     stderrPath,
     timeoutMs: (expectedTests + 1) * (TEST_TIMEOUT_MS + 5_000),
@@ -2009,7 +2043,7 @@ const runProcess = (command, args, options) =>
   new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: options.env ?? process.env,
+      env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const stdout = createWriteStream(options.stdoutPath)
