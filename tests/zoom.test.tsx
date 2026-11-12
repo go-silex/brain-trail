@@ -1,45 +1,76 @@
+import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-const PANE = {
-  plugin: 'brain-trail-v2',
+import { mapSource, viewBoxOf } from './fixtures/mounted'
+import { mountReady, type ViewCase } from './fixtures/views'
+
+const MAP: ViewCase = {
+  id: 'zoom',
   component: 'Pane',
-  requestId: 'brain-trail-v2',
-  props: { title: 'Brain Trail', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
-} as const
-
-// The engine, with the map tab open; every other value goes to the kit's own state, so writes are read back.
-const engine = (on: any) => {
-  on('state.get', (_: unknown, e: { key: string }, next: (e: unknown) => unknown) => (e.key === 'tab' ? { value: { value: 'map', version: 1 } } : next(e)))
-  on('clock.now', () => ({ value: 10_000 }))
-  on('config.list', () => ({ value: [{ key: 'theme', value: 'dark' }] }))
-  on('session.cwd', () => ({ value: '/work/demo' }))
-  on('session.id', () => ({ value: 's' }))
-  on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: { window: 200000 } } }))
-  on('process.run', (_: unknown, e: { argv: string[] }) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'git' ? 'CLAUDE.md\nsrc/app.ts\nnotes/a.md\nnotes/b.md\n' : '/Users/me', stderr: '', isStdoutTruncated: false } }))
-  on('fs.read', () => ({ value: '' }))
-  on('fs.exists', () => ({ value: false }))
-  on('fs.write', () => ({ value: undefined }))
-  on('ui.invalidate', () => ({ value: undefined }))
-  on('store.get', () => ({ value: undefined }))
-  on('store.set', () => ({ value: undefined }))
+  surface: 'desktop',
+  theme: 'dark',
+  lang: 'en',
+  tab: 'map',
+  phase: 'ready',
+  view3d: false,
+  browser3d: false,
+  transition: 'none',
 }
+const mapBox = async (ui: {
+  findAll: (q: {
+    type: 'Svg'
+  }) => Promise<{ props: { alt?: unknown; source?: unknown } }[]>
+}) => viewBoxOf(await mapSource(ui))
 
-const viewBox = async (ui: any) => {
-  const svgs = await ui.findAll({ type: 'Svg' })
-  const map = svgs.find((s: any) => String(s.props?.alt ?? '').includes('files touched'))
-  return /viewBox="([^"]+)"/.exec(String(map?.props?.source ?? ''))?.[1]
-}
-
-test('the + button zooms the map in', async ($, on) => {
-  engine(on)
-  const first = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await first.unmount()
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  const before = await viewBox(ui)
+test('zoom-in shrinks around the centre, zoom-out grows, reset restores, and the wheel keeps the cell centre', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  const before = await mapBox(ui)
   expect(before).toBeDefined()
   await ui.press({ key: 'zoom-in' })
-  const after = await viewBox(ui)
-  expect(after).toBeDefined()
-  expect(after).not.toBe(before)
+  const closer = await mapBox(ui)
+  expect(closer).toBeDefined()
+  expect(closer!.w).toBeLessThan(before!.w * 0.7)
+  expect(closer!.w).toBeGreaterThan(before!.w * 0.45)
+  expect(
+    Math.abs(closer!.x + closer!.w / 2 - (before!.x + before!.w / 2)),
+  ).toBeLessThan(1.5)
+  await ui.press({ key: 'zoom-out' })
+  const wider = await mapBox(ui)
+  expect(wider!.w).toBeGreaterThan(closer!.w)
+  await ui.press({ key: 'zoom-in' })
+  await ui.press({ key: 'whole' })
+  expect(await mapBox(ui)).toEqual(before)
+
+  const columns = 40
+  const rows = 16
+  const x = 8
+  const y = 3
+  // The kit drops fine before the handler, so the anchor is the cell centre hit.tsx falls back to.
+  const fx = (x + 0.5) / columns
+  await ui.resize({ columns, rows, in: 'map-hit' })
+  await ui.pointer({
+    type: 'move',
+    x,
+    y,
+    fine: { x: x + 0.5, y: y + 0.5 },
+    in: 'map-hit',
+  })
+  const hovered = await mapBox(ui)
+  await $.ui.scroll({
+    component: 'Pane',
+    requestId: 'brain-trail-v2',
+    offset: 0,
+    by: -1,
+    bodyRows: 40,
+    contentRows: 80,
+    origin: { kind: 'person' },
+    pointer: { column: 1, row: 1 },
+  })
+  const wheeled = await mapBox(ui)
+  expect(wheeled).toBeDefined()
+  expect(wheeled!.w).toBeLessThan(hovered!.w)
+  expect(
+    Math.abs(wheeled!.x + fx * wheeled!.w - (hovered!.x + fx * hovered!.w)),
+  ).toBeLessThan(1.5)
   await ui.unmount()
 })

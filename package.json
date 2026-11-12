@@ -1,0 +1,28 @@
+{
+  "name": "brain-trail-quality",
+  "private": true,
+  "packageManager": "bun@1.4.4",
+  "trustedDependencies": [],
+  "scripts": {
+    "check:sdk": "node scripts/check-sdk.mjs",
+    "check:release": "node scripts/check-release.mjs",
+    "check:views": "node scripts/view-parity.mjs --base ${VIEW_BASE:-${RELEASE_BASE:-origin/main}}",
+    "lint": "biome lint --error-on-warnings hooks tests scripts types",
+    "format": "biome ci --formatter-enabled=true --linter-enabled=false --assist-enabled=false --enforce-assist=false scripts package.json biome.jsonc tsconfig.json tsconfig.core.json types/model.ts types/contracts.ts hooks/acts.ts hooks/fold.ts hooks/readout.ts hooks/pointer.ts tests",
+    "typecheck": "tsc --noEmit",
+    "typecheck:core": "tsc --project tsconfig.core.json",
+    "test": "node node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs plugin test .",
+    "validate": "node node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs plugin validate --strict .",
+    "prepare": "node scripts/install-lefthook.mjs",
+    "test:tooling": "node --test scripts/quality.test.mjs",
+    "verify": "bun run check:sdk && bun run check:release && bun run test:tooling && bun run validate && bun run test && bun run lint && bun run format && bun run typecheck:core && bun run typecheck && bun run check:views"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.322",
+    "@biomejs/biome": "2.2.4",
+    "typescript": "5.9.3",
+    "playwright": "1.65.0",
+    "lefthook": "2.2.2",
+    "semver": "7.8.6"
+  }
+}

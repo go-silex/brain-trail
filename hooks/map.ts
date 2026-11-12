@@ -3,6 +3,7 @@ import hierarchy from './vendor/d3-hierarchy/hierarchy/index.js'
 import pack from './vendor/d3-hierarchy/pack/index.js'
 import { LOGOS } from './logos'
 import { svcColor } from './mcp'
+import { rank, type Kind, type Trail } from '../types/model'
 
 export const SIZE = 1800
 const ARC_MS = 900, CALL_MS = 800, VIEW_MS = 600
@@ -20,18 +21,7 @@ const fluid = (w: number, h: number) => `width="${FLUID}" height="${Math.round((
 
 export type Group = { depth: number; name: string; path: string; x: number; y: number; r: number; n: number }
 export type Layout = { size: number; dot: number; leaf?: number; files: [string, number, number][]; groups: Group[]; title: string }
-export type Kind = 'read' | 'write' | 'hit' | 'link'
-export type Move = { n: number; gap: boolean; at: number; i: number }
-export type Call = { svc: string; tool: string; label?: string; err: boolean; from?: number; at: number }
 export type Palette = { bg: string; fg: string; dot: string; ring: string; dim: string; line: string; card: string }
-export type Trail = {
-  state: Map<number, { k: Kind; count: number }>
-  moves: Move[]
-  calls: Call[]
-  perSvc: Map<string, number>
-  // pairs of files joined by a link, as the notes the session read declare them
-  links?: [number, number][]
-}
 
 // Unkillable Companies: lines, not fills; one electric blue accent, only on markers under 12 px (here: the file Claude is on).
 export const ACCENT = '#35b0ff'
@@ -65,8 +55,6 @@ export const dotPath = (pts: [number, number][], cell: number) => {
   return parts.join('')
 }
 
-const RANK: Record<Kind, number> = { link: 0, hit: 1, read: 2, write: 3 }
-export const rank = RANK
 
 // the dark surface of unkillablecompanies.com, and the light one of the deck
 export const DARK: Palette = { bg: '#0b0e10', fg: '#ededed', dot: 'rgba(237,237,237,.28)', ring: '#ededed', dim: 'rgba(237,237,237,.48)', line: 'rgba(255,255,255,.14)', card: 'transparent' }
@@ -185,7 +173,6 @@ export const draw = (
   L: Layout, T: Trail, P: Palette, opts: { zoomed: boolean; widthPx: number; now: number; outside: number; filesWord: string; services: string[]; box?: { x: number; y: number; side: number } },
 ) => {
   const { widthPx, now } = opts
-  const zoomed = opts.zoomed || opts.box !== undefined
   const TL = tilt(L)
   const xy = (n: number) => TL.files[n]!
   const disc = TL.groups.find(g => g.depth === 0)
@@ -350,7 +337,7 @@ export const draw = (
   // the files read and written: a glow on the last ones, a solid dot, a ring on a write
   const lastSeen = new Map<number, number>()
   T.moves.forEach((m, j) => lastSeen.set(m.n, T.moves.length - 1 - j))
-  const solid = [...T.state.entries()].filter(([, s]) => s.k === 'read' || s.k === 'write').sort((a, z) => RANK[a[1].k] - RANK[z[1].k])
+  const solid = [...T.state.entries()].filter(([, s]) => s.k === 'read' || s.k === 'write').sort((a, z) => rank[a[1].k] - rank[z[1].k])
   for (const [n, s] of solid) {
     const age = lastSeen.get(n) ?? 99
     if (age >= 14) continue

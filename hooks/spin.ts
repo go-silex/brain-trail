@@ -4,7 +4,8 @@
 // and a plane seen from a camera that turns around the axis is just a moving 2D transform.
 // One keyframe list drives every slice, each with its own delay. Names and the notes Claude touched
 // follow their exact path with animateMotion. Nothing runs in the mod while it turns.
-import { fileName, fitTitle, kindColors, type Layout, type Palette, type Trail } from './map'
+import type { Trail } from '../types/model'
+import { fileName, fitTitle, kindColors, type Layout, type Palette } from './map'
 
 export const SPIN_MS = 80_000  // one full turn
 const NB = 72                  // slices around the axis (5 degrees each)

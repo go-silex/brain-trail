@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "types": []
+  },
+  "files": [
+    "types/model.ts",
+    "hooks/acts.ts",
+    "hooks/files.ts",
+    "hooks/fold.ts",
+    "hooks/mcp.ts",
+    "hooks/pointer.ts",
+    "hooks/readout.ts"
+  ]
+}

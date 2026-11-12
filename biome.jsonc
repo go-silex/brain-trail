@@ -1,0 +1,134 @@
+// Host JSX is the Claude element table (Box, Text, Button, Svg), compiled with
+// jsxFactory h and jsxFragmentFactory Fragment from .claude-plugin/sdk/tsconfig.json.
+// Those names are not imports. Declaring them as globals is the noUndeclaredVariables
+// exception. The react and test domains are off: React hook/a11y rules and
+// Jest/Vitest rules do not apply to this host or its native runner.
+// Recommended bug rules are listed below. Style rules and noEmptyBlockStatements
+// stay off for the original pane: they would rewrite Pierre's rendering, and the
+// adapter uses empty catch callbacks for best-effort host calls. scripts/ uses
+// recommended: true. Formatter stays off for Pierre's hooks/** and types/index.d.ts.
+// It is on for the new pure modules listed below and for tests/** except the two unchanged Pierre files.
+// hooks/vendor is third-party d3 (uses ==). hooks/logos.ts is embedded data URIs.
+{
+  "$schema": "https://biomejs.dev/schemas/2.2.4/schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!hooks/vendor/**",
+      "!hooks/logos.ts",
+      "!.claude-plugin/sdk/**",
+      "!node_modules/**",
+      "!.artifacts/**"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "javascript": {
+    "globals": ["h", "Fragment"],
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded"
+    }
+  },
+  "linter": {
+    "domains": {
+      "react": "none",
+      "test": "none"
+    },
+    "rules": {
+      "recommended": false,
+      "correctness": {
+        "noConstAssign": "error",
+        "noConstantCondition": "error",
+        "noEmptyCharacterClassInRegex": "error",
+        "noEmptyPattern": "error",
+        "noGlobalObjectCalls": "error",
+        "noInvalidBuiltinInstantiation": "error",
+        "noInvalidConstructorSuper": "error",
+        "noNonoctalDecimalEscape": "error",
+        "noPrecisionLoss": "error",
+        "noSelfAssign": "error",
+        "noSetterReturn": "error",
+        "noSwitchDeclarations": "error",
+        "noUndeclaredVariables": "error",
+        "noUnreachable": "error",
+        "noUnreachableSuper": "error",
+        "noUnsafeFinally": "error",
+        "noUnsafeOptionalChaining": "error",
+        "noUnusedImports": "error",
+        "noUnusedLabels": "error",
+        "noUnusedVariables": "error",
+        "useIsNan": "error",
+        "useValidForDirection": "error",
+        "useYield": "error"
+      },
+      "suspicious": {
+        "noAssignInExpressions": "error",
+        "noAsyncPromiseExecutor": "error",
+        "noCatchAssign": "error",
+        "noClassAssign": "error",
+        "noCompareNegZero": "error",
+        "noControlCharactersInRegex": "error",
+        "noDebugger": "error",
+        "noDoubleEquals": "error",
+        "noExplicitAny": "error",
+        "noDuplicateCase": "error",
+        "noDuplicateClassMembers": "error",
+        "noDuplicateElseIf": "error",
+        "noDuplicateObjectKeys": "error",
+        "noDuplicateParameters": "error",
+        "noExtraNonNullAssertion": "error",
+        "noFallthroughSwitchClause": "error",
+        "noFunctionAssign": "error",
+        "noGlobalAssign": "error",
+        "noImportAssign": "error",
+        "noMisleadingCharacterClass": "error",
+        "noPrototypeBuiltins": "error",
+        "noRedeclare": "error",
+        "noShadowRestrictedNames": "error",
+        "noSparseArray": "error",
+        "noUnsafeNegation": "error",
+        "noWith": "error",
+        "useGetterReturn": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["scripts/**"],
+      "linter": {
+        "rules": {
+          "recommended": true
+        }
+      }
+    },
+    {
+      "includes": ["hooks/**", "types/**"],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
+      "includes": [
+        "types/model.ts",
+        "types/contracts.ts",
+        "hooks/acts.ts",
+        "hooks/fold.ts",
+        "hooks/readout.ts",
+        "hooks/pointer.ts"
+      ],
+      "formatter": {
+        "enabled": true
+      }
+    },
+    {
+      "includes": ["tests/files.test.ts", "tests/mcp.test.ts"],
+      "formatter": {
+        "enabled": false
+      }
+    }
+  ]
+}
