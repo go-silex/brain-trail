@@ -107,9 +107,6 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 export const fileName = (p: string) => p.split('/').pop() ?? p
 const f = (v: number) => Math.round(v * 10) / 10
 
-// The trail view keeps its frame while the files stay inside it, so the camera moves only when the trail leaves it.
-let trailBox: { vx: number; vy: number; side: number } | undefined
-let lastView: { from: string; to: string; at: number } | undefined
 
 const shortTool = (t: string) => t.replace(/^(slack_|notion-)/, '')
 
@@ -169,9 +166,12 @@ export const tilt = (L: Layout): Tilted => {
   return t
 }
 
-export const draw = (
-  L: Layout, T: Trail, P: Palette, opts: { zoomed: boolean; widthPx: number; now: number; outside: number; filesWord: string; services: string[]; box?: { x: number; y: number; side: number } },
-) => {
+export type DrawOptions = { zoomed: boolean; widthPx: number; now: number; outside: number; filesWord: string; services: string[]; box?: { x: number; y: number; side: number } }
+export type MapRenderer = { draw: (L: Layout, T: Trail, P: Palette, opts: DrawOptions) => { svg: string; heightPx: number; view: { vx: number; vy: number; vw: number; vh: number; px: number } } }
+export const createMapRenderer = () => {
+  let trailBox: { vx: number; vy: number; side: number } | undefined
+  let lastView: { from: string; to: string; at: number } | undefined
+  const draw = (L: Layout, T: Trail, P: Palette, opts: DrawOptions) => {
   const { widthPx, now } = opts
   const TL = tilt(L)
   const xy = (n: number) => TL.files[n]!
@@ -428,6 +428,8 @@ export const draw = (
   out.push(stationSvg(withLogo))
   out.push('</svg>')
   return { svg: unscale(out.join(''), px), heightPx, view: { vx, vy, vw, vh, px } }
+}
+  return { draw }
 }
 
 // The context gauge: a fine track, the fill in ink, the accent dot where the session stands,

@@ -10,7 +10,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not
 
 ## Development checks
 
-The plugin is distributed as source: users do not need a build or runtime package installation. Development tools are pinned in `package.json`; the quality workflow uses Bun 1.4.4 and Node 22.22.0.
+The Claude plugin is distributed as source. The OMP package includes committed browser assets; users do not need to build them. Development tools are pinned in `package.json`; the quality workflow uses Bun 1.4.4 and Node 22.22.0.
 
 ```bash
 bun install --frozen-lockfile --ignore-scripts
@@ -18,11 +18,13 @@ bunx playwright install chromium
 bun run verify
 ```
 
-`verify` checks the pinned SDK, source-distribution version, tooling regressions, native plugin validation and tests, correctness lint, incremental formatting, both typechecks, and view parity. The tests make no model call. Formatting covers new or changed quality code, not Pierre's original renderers.
+`verify` checks browser-bundle freshness, the pinned Claude SDK, source-distribution version, tooling regressions, native plugin validation and tests, the OMP SDK journey, correctness lint, incremental formatting, four TypeScript boundaries (shared core, Claude, OMP host and browser), and view parity. Formatting covers new handwritten code, not Pierre's original renderers.
+
+After changing OMP browser sources, run `bun run build:omp` and commit the resulting assets in `hosts/omp/browser/dist/`. `bun run check:omp-build` rebuilds to temporary output and compares bytes against the committed bundle.
 
 Install the optional local Lefthook checks with `bun run prepare`. The guarded installer never changes `core.hooksPath`. Git worktrees share their canonical hooks directory; existing hooks are accepted only when their exact bytes match this project's installation receipt. Unowned or modified hooks are left untouched.
 
-Runtime source changes require a newer plugin version and a matching marketplace entry. The baseline is `VIEW_BASE`, then `RELEASE_BASE`, then `origin/main`. CI supplies the event's baseline; an all-zero default-branch baseline is refused rather than compared to the candidate itself.
+Runtime source changes require a newer plugin version and a matching marketplace entry. With an OMP manifest, the root package version must match them. Changes to root `omp`, `files`, `exports`, `dependencies`, `optionalDependencies`, `peerDependencies` or `engines` count as runtime changes; scripts and dev dependencies alone do not. The baseline is `VIEW_BASE`, then `RELEASE_BASE`, then `origin/main`. CI supplies the event's baseline; an all-zero default-branch baseline is refused rather than compared to the candidate itself.
 
 The quality workflow also validates and tests a complete source copy without `.git` or `node_modules`, exercising the marketplace's root source rather than a separate development entry point.
 
@@ -40,13 +42,17 @@ These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.
 
 | Files | Interface and responsibility |
 | --- | --- |
-| `types/model.ts` | Session events, figures and visualization data without a host SDK. |
+| `types/model.ts`, `types/view.ts` | Host-free session data and the shared view contract. |
+| `hooks/views.ts`, `hooks/view-*.ts`, `hooks/view-controller.ts`, `hooks/workspace.ts` | Shared tab views, transitions and workspace logic, without Claude, Bun or DOM globals. |
 | `hooks/fold.ts`, `hooks/readout.ts`, `hooks/pointer.ts` | Replay, context and file projections, and pointer geometry without host calls. |
 | `hooks/acts.ts`, `hooks/files.ts`, `hooks/mcp.ts` | Current tool names, file detection and connector interpretation. Host-free does not mean host-neutral. |
-| `hooks/register.tsx` | Claude SDK calls, state, lifecycle, queues, timers, storage and the pane's JSX. |
+| `hooks/register.tsx` | Claude SDK calls, state, lifecycle, queues, timers, storage and native view adapter. |
 | `hooks/map.ts`, `hooks/spin.ts`, `hooks/brain3d.ts` | SVG and browser rendering. The pane's SVG budget is 131,072 characters. |
+| `hosts/omp/` | Genuine OMP capture and lifecycle adapter, local server, file authority, persistence and browser renderer. |
 
-OMP and ChatGPT adapters are not implemented. They should normalize their own host events into the application model and reuse calculations, rather than import the Claude SDK into those modules or assume Claude tool names are universal.
+ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT host adapter.
+
+`bun run test:omp` runs `scripts/omp-journey.ts` in an isolated agent directory against the genuine pinned OMP 18.18.9 SDK and extension lifecycle. It uses the SDK's mock model transport, not a mock host: the journey exercises real session and tool behavior without a model call. Keep SDK-specific event normalization in the adapter rather than assuming Claude tool names are universal.
 
 ## Native contract and SDK
 

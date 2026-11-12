@@ -11,11 +11,17 @@
   },
   "files": [
     "types/model.ts",
+    "types/view.ts",
     "hooks/acts.ts",
     "hooks/files.ts",
     "hooks/fold.ts",
+    "hooks/i18n.ts",
+    "hooks/map.ts",
     "hooks/mcp.ts",
     "hooks/pointer.ts",
-    "hooks/readout.ts"
+    "hooks/readout.ts",
+    "hooks/views.ts",
+    "hooks/view-controller.ts",
+    "hooks/workspace.ts"
   ]
 }

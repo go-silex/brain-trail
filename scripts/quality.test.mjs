@@ -484,3 +484,110 @@ test('linked worktree install owns only receipt-matched canonical hooks', () => 
     rmSync(sandbox, { recursive: true, force: true })
   }
 })
+
+test('release CLI classifies OMP package changes and aligns shipped versions', () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'quality-omp-release-'))
+  const gitconfig = join(sandbox, 'gitconfig')
+  writeFileSync(gitconfig, '')
+  const env = isolatedEnv(gitconfig)
+  const dir = join(sandbox, 'plugin')
+  const packagePath = join(dir, 'package.json')
+  const runtimePath = join(dir, 'hosts', 'omp', 'index.ts')
+  const basePackage = {
+    name: 'synthetic-extension',
+    version: '2.2.0',
+    omp: { extensions: ['./hosts/omp/index.ts'] },
+    files: ['hosts'],
+    exports: { '.': './hosts/omp/index.ts' },
+    dependencies: { example: '1.0.0', other: '1.0.0' },
+    optionalDependencies: { optional: '1.0.0' },
+    peerDependencies: { peer: '^1.0.0' },
+    engines: { node: '>=20' },
+    scripts: { check: 'node check.mjs' },
+    devDependencies: { tooling: '1.0.0' },
+  }
+  const writePackage = (value) =>
+    writeFileSync(packagePath, `${JSON.stringify(value, null, 2)}\n`)
+
+  try {
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(dir, 'hosts', 'omp'), { recursive: true })
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    cpSync(
+      join(scriptsDir, 'check-release.mjs'),
+      join(dir, 'scripts', 'check-release.mjs'),
+    )
+    writeFileSync(join(dir, '.gitignore'), 'node_modules\n')
+    writeFileSync(runtimePath, 'export const factory = 1\n')
+    writeFileSync(
+      join(dir, 'hosts', 'omp', 'other.ts'),
+      'export const factory = 2\n',
+    )
+    writeManifests(dir, '2.2.0')
+    writePackage({
+      name: 'legacy-quality',
+      version: '9.0.0',
+      scripts: { check: 'node check.mjs' },
+      devDependencies: { tooling: '1.0.0' },
+    })
+    git(dir, ['init', '-q', '-b', 'main'], env)
+    symlinkSync(nodeModules, join(dir, 'node_modules'), 'dir')
+    git(dir, ['add', '--', '.'], env)
+    git(dir, ['commit', '-q', '-m', 'legacy package'], env)
+    const script = join(dir, 'scripts', 'check-release.mjs')
+    const run = (base) => runNode(script, [base], dir, env)
+    const legacy = git(dir, ['rev-parse', 'HEAD'], env)
+    assertOk(run(legacy), `runtime unchanged vs ${legacy}; plugin 2.2.0`)
+
+    writePackage(basePackage)
+    git(dir, ['add', '--', 'package.json'], env)
+    git(dir, ['commit', '-q', '-m', 'publish OMP package'], env)
+    const base = git(dir, ['rev-parse', 'HEAD'], env)
+
+    writePackage({
+      ...basePackage,
+      scripts: { check: 'node changed-check.mjs' },
+      devDependencies: { tooling: '2.0.0' },
+      dependencies: { other: '1.0.0', example: '1.0.0' },
+    })
+    assertOk(run(base), `runtime unchanged vs ${base}; plugin 2.2.0`)
+
+    const runtimeChanges = [
+      { omp: { extensions: ['./hosts/omp/other.ts'] } },
+      { files: ['hosts', 'assets'] },
+      { exports: { '.': './hosts/omp/other.ts' } },
+      { dependencies: { example: '2.0.0', other: '1.0.0' } },
+      { optionalDependencies: { optional: '2.0.0' } },
+      { peerDependencies: { peer: '^2.0.0' } },
+      { engines: { node: '>=22' } },
+    ]
+    for (const change of runtimeChanges) {
+      writePackage({ ...basePackage, ...change })
+      const rejected = run(base)
+      assertFailed(rejected, 'did not increase from 2.2.0')
+      assert.match(rejected.stderr, /package\.json/)
+    }
+
+    writePackage({
+      ...basePackage,
+      omp: { extensions: ['./hosts/omp/other.ts'] },
+    })
+    writeFileSync(runtimePath, 'export const factory = 2\n')
+    writeManifests(dir, '2.2.1')
+    const mismatched = run(base)
+    assert.equal(mismatched.status, 1, mismatched.stderr)
+    assert.match(mismatched.stderr, /package\.json.*version/i)
+    assert.match(mismatched.stderr, /2\.2\.1/)
+    assert.doesNotMatch(mismatched.stderr, /did not increase/)
+
+    writePackage({
+      ...basePackage,
+      version: '2.2.1',
+      omp: { extensions: ['./hosts/omp/other.ts'] },
+      dependencies: { example: '2.0.0', other: '1.0.0' },
+    })
+    assertOk(run(base), 'Source distribution 2.2.1 > 2.2.0')
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true })
+  }
+})

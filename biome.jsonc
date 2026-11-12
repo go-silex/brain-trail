@@ -18,7 +18,8 @@
       "!hooks/logos.ts",
       "!.claude-plugin/sdk/**",
       "!node_modules/**",
-      "!.artifacts/**"
+      "!.artifacts/**",
+      "!hosts/omp/browser/dist/**"
     ]
   },
   "formatter": {
@@ -118,7 +119,11 @@
         "hooks/acts.ts",
         "hooks/fold.ts",
         "hooks/readout.ts",
-        "hooks/pointer.ts"
+        "hooks/pointer.ts",
+        "types/view.ts",
+        "hooks/views.ts",
+        "hooks/view-*.ts",
+        "hooks/workspace.ts"
       ],
       "formatter": {
         "enabled": true

@@ -68,6 +68,20 @@ The pane opens by itself beside the chat, whatever the folder: a code project, a
 
 The map is drawn in the desktop app. The terminal shows the text tabs only.
 
+### Oh My Pi
+
+With Oh My Pi 18.18.9, install a local checkout and start a new session:
+
+```bash
+omp install /path/to/brain-trail
+```
+
+Type `/brain-trail` to open the full dashboard in your browser. The OMP dashboard uses the same shared views as the Claude pane. Its browser assets are committed; you do not need to build them. An optional context and cost band appears above the input; you can turn it on or off in Settings.
+
+Protected file previews and Coach instruction-file reads require Linux; they are unsupported on other operating systems.
+
+ChatGPT is not supported yet.
+
 ## What the map shows
 
 Your folder as one disc: one circle per folder, one dot per file. Every file that entered the context lights up.
@@ -98,9 +112,9 @@ English and French.
 
 ## Privacy
 
-Everything stays on your machine. Brain Trail writes only in its own folder, `~/.claude/brain-trail-v2`, never in your files. No account, no tracking.
+For Claude Code, Brain Trail keeps its local state in `~/.claude/brain-trail-v2`. For Oh My Pi, it stores settings, costs and captured tool-call data in its own SQLite database under the active agent profile's `brain-trail` directory, not in the host's authentication database. Captured inputs and results may contain session content; the same directory also holds workspace layout caches. Clearing the trail resets what is shown, not the stored data. No Brain Trail account or tracking.
 
-The one exception is the Coach's analysis: when you ask for it, Claude reads the session, on your own plan.
+When you ask for Coach analysis, the assistant analyzes the session on your own plan. The 3D view loads its existing Three.js and font dependencies from public CDNs. See [SECURITY.md](SECURITY.md) for the OMP dashboard's local access and file boundaries.
 
 ## How it measures
 

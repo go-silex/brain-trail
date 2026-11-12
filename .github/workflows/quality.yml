@@ -27,6 +27,8 @@ jobs:
       - run: bun install --frozen-lockfile --ignore-scripts
       - name: Install pinned Chromium
         run: bunx playwright install --with-deps chromium
+      - name: Check committed OMP browser bundle
+        run: bun run check:omp-build
       - run: bun run verify
       - name: Test installed-source layout
         run: |

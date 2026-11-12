@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 import { mapSource, viewBoxOf } from './fixtures/mounted'
-import { mountReady, type ViewCase } from './fixtures/views'
+import { CWD, mountReady, NOTE_BODY, type ViewCase } from './fixtures/views'
 
 const MAP: ViewCase = {
   id: 'replay',
@@ -43,5 +43,49 @@ test('replay changes the drawn map, not only the step counter', async ($, on: On
   expect(second).not.toBe(first)
   await ui.press({ key: 'live' })
   expect(viewBoxOf(await scene(ui))).toEqual(viewBoxOf(live))
+  await ui.unmount()
+})
+
+test('clearing a paused replay returns new recorded steps to live', async ($, on: On) => {
+  const recorded = new Promise<void>((resolve) => {
+    on(
+      'state.set',
+      { plugin: 'brain-trail-v2', key: 'events' },
+      async (_$, e, next) => {
+        const applied = await next(e)
+        if (
+          applied.value?.isSet &&
+          e.value.value.some(
+            (ev) => ev.k === 'read' && ev.p === 'notes/a.md',
+          ) &&
+          e.value.value.some((ev) => ev.k === 'read' && ev.p === 'notes/b.md')
+        )
+          resolve()
+        return applied
+      },
+    )
+  })
+  on('tool.call', () => ({ result: NOTE_BODY, text: NOTE_BODY }))
+  const { ui } = await mountReady($, on, MAP)
+  await ui.press({ key: 'play' })
+  await ui.redraw()
+  await ui.press({ key: 'pause' })
+  await ui.redraw()
+  await ui.press({ key: 'settings' })
+  await ui.redraw()
+  await ui.press({ key: 'clear' })
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/notes/a.md` })
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/notes/b.md` })
+  await recorded
+  await ui.press({ key: 't-map' })
+  await ui.redraw()
+  expect(await ui.find({ key: 'play' })).toBeDefined()
+  expect(await ui.find({ key: 'live' })).toBeUndefined()
+  const map = (await ui.findAll({ type: 'Svg' })).find(
+    (el) =>
+      typeof el.props.alt === 'string' &&
+      el.props.alt.includes('files touched'),
+  )
+  expect(map?.props.alt).toContain('2 files touched')
   await ui.unmount()
 })
