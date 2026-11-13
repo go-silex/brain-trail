@@ -61,7 +61,10 @@ func diagnostic(err error) string {
 	}
 	var errno syscall.Errno
 	var netErr net.Error
+	var serviceCode serviceExitCode
 	switch {
+	case errors.As(err, &serviceCode) && (serviceCode == 1001 || serviceCode == 1002 || serviceCode == 1003):
+		names = append(names, fmt.Sprintf("service-%d", serviceCode))
 	case errors.As(err, &errno):
 		names = append(names, fmt.Sprintf("os-%d", uint32(errno)))
 	case errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
@@ -78,6 +81,10 @@ func diagnostic(err error) string {
 	}
 	return strings.Join(names[:len(names)-1], "-") + "/" + names[len(names)-1]
 }
+
+type serviceExitCode uint32
+
+func (serviceExitCode) Error() string { return "service report failure" }
 
 type remoteDiagnostic struct{ value string }
 

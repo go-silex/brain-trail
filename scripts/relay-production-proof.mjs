@@ -351,7 +351,15 @@ try {
         ),
       ]
         .slice(0, 5)
-        .map((match) => ({ phase: match[1], errorClass: match[2] }))
+        .map((match) => ({
+          phase: match[1],
+          errorClass:
+            /^(?:os-[0-9]{1,10}|service-100[123]|permission|not-found|timeout|other)$/.test(
+              match[2],
+            )
+              ? match[2]
+              : 'unknown',
+        }))
       console.error(
         JSON.stringify({
           operation:

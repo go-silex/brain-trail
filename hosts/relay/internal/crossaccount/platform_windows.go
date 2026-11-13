@@ -188,11 +188,19 @@ func execute(stage string, r request) (result error) {
 			return phase("scm-query", queryErr)
 		}
 		if status.State == svc.Stopped {
-			code := status.Win32ExitCode
-			if status.ServiceSpecificExitCode != 0 {
-				code = status.ServiceSpecificExitCode
+			switch status.ServiceSpecificExitCode {
+			case 1001:
+				return phase("service-report-marshal", serviceExitCode(1001))
+			case 1002:
+				return phase("service-report-write", serviceExitCode(1002))
+			case 1003:
+				return phase("service-report-rename", serviceExitCode(1003))
+			case 0:
+				if status.Win32ExitCode != 0 {
+					return phase("service-exited", syscall.Errno(status.Win32ExitCode))
+				}
 			}
-			return phase("service-exited", syscall.Errno(code))
+			return phase("service-exited", errors.New("service stopped without a recognized exit code"))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
