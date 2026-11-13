@@ -9,7 +9,7 @@ import type {
   ViewState,
 } from '../types/view'
 import type { Strings } from './i18n'
-import { fileName, SIZE, tilt } from './map'
+import { BANNER_ASPECT, BANNER_MAX, fileName, SIZE, tilt } from './map'
 import { panFrame, pickAt, zoomFrame } from './pointer'
 import { CAM0, PITCH_MAX, PITCH_MIN, pickSpin, yawAt } from './spin'
 
@@ -29,8 +29,33 @@ export const GESTURE0: GestureMemory = {
   drag2d: undefined,
   drag3d: undefined,
 }
-export const paneWidthPx = (columns: number) =>
-  Math.max(240, Math.min(900, columns * 8 - 24))
+// A drawing follows the pane: one of its pixels is one pixel of the screen, at any width.
+export const paneWidthPx = (columns: number) => Math.max(240, columns * 8 - 24)
+
+// A docked pane's rows are a frame: the header on top, the footer at the bottom, the map in what
+// they leave. Hosts count that room in cells; a row is this many times as tall as a column is wide
+// (the desktop's line height over its cell advance, the same at both of its densities).
+export const CELL_RATIO = 2.46
+export type Cells = { columns: number; rows: number }
+// What the header and the footer take around the map, until the host measures it: the banner (it
+// grows with the pane up to its cap), then the meter, the tabs, the legend and the credit. Guessed
+// generously, so the map is first drawn for a box no taller than the one it gets.
+export const guessChrome = (columns: number): Cells => ({
+  columns: 0,
+  rows:
+    Math.round(
+      (Math.min(paneWidthPx(columns), BANNER_MAX) * BANNER_ASPECT) /
+        (8 * CELL_RATIO),
+    ) + 10,
+})
+export const mapCells = (pane: Cells, chrome: Cells): Cells => ({
+  columns: Math.max(0, pane.columns - chrome.columns),
+  rows: Math.max(0, pane.rows - chrome.rows),
+})
+// Measurements are rounded down to cells; use a half-cell estimate, including at zero.
+export const cellAspect = (box: Cells) =>
+  ((Math.max(0, box.rows) + 0.5) * CELL_RATIO) /
+  (Math.max(0, box.columns) + 0.5)
 export const absOf = (index: { root: string } | undefined, ref: PreviewRef) =>
   ref.out || index === undefined ? ref.p : `${index.root}/${ref.p}`
 export type OpenTarget =
@@ -193,6 +218,42 @@ export const replayTick =
       ? { step: steps - 1, playing: false }
       : { step: next, playing: true }
   }
+// A measurement carries the exact pane/map stamp it was drawn for.
+export const parseBox = (
+  data: unknown,
+): (Cells & { for: string; pane: Cells }) | undefined => {
+  if (typeof data !== 'object' || data === null) return undefined
+  const d: Record<string, unknown> = Object.fromEntries(Object.entries(data))
+  if (
+    d.kind !== 'box' ||
+    typeof d.for !== 'string' ||
+    typeof d.columns !== 'number' ||
+    typeof d.rows !== 'number' ||
+    !Number.isSafeInteger(d.columns) ||
+    !Number.isSafeInteger(d.rows) ||
+    d.columns <= 0 ||
+    d.rows < 0
+  )
+    return undefined
+  const stamp = /^(\d+)x(\d+)\/(\d+)x(\d+)$/.exec(d.for)
+  if (!stamp) return undefined
+  const [columns, rows, mapColumns, mapRows] = stamp.slice(1).map(Number)
+  if (
+    ![columns, rows].every(
+      (n) => n !== undefined && Number.isSafeInteger(n) && n > 0,
+    ) ||
+    ![mapColumns, mapRows].every(
+      (n) => n !== undefined && Number.isSafeInteger(n) && n >= 0,
+    )
+  )
+    return undefined
+  return {
+    columns: d.columns,
+    rows: d.rows,
+    for: d.for,
+    pane: { columns: columns!, rows: rows! },
+  }
+}
 export const parseGesture = (data: unknown): MapGesture | undefined => {
   if (typeof data !== 'object' || data === null) return undefined
   const d: Record<string, unknown> = Object.fromEntries(Object.entries(data))
@@ -211,11 +272,27 @@ export const parseGesture = (data: unknown): MapGesture | undefined => {
   if (
     d.kind === 'drag' &&
     typeof d.sfx === 'number' &&
-    typeof d.sfy === 'number'
+    typeof d.sfy === 'number' &&
+    typeof d.press === 'number' &&
+    Number.isSafeInteger(d.press) &&
+    d.press > 0
   )
-    return { kind: 'drag', fx: d.fx, fy: d.fy, sfx: d.sfx, sfy: d.sfy }
+    return {
+      kind: 'drag',
+      press: d.press,
+      fx: d.fx,
+      fy: d.fy,
+      sfx: d.sfx,
+      sfy: d.sfy,
+    }
   return undefined
 }
+// Spin intent lives in the camera; a drag pauses only its rendered projection.
+export const cameraDuringGesture = (
+  camera: ViewState['cam3d'],
+  memory: GestureMemory,
+): ViewState['cam3d'] =>
+  memory.drag3d === undefined ? camera : { ...camera, spin: false }
 export const mapGesture = (
   g: MapGesture | undefined,
   s: Pick<ViewState, 'view3d' | 'zoomed' | 'cam3d'>,
@@ -230,20 +307,30 @@ export const mapGesture = (
         ? { ...m, hover: { fx: g.fx, fy: g.fy } }
         : m
   const steps: Step[] = []
+  if (
+    g?.kind === 'dragend' ||
+    g?.kind === 'hover' ||
+    g?.kind === 'click' ||
+    g?.kind === 'leave'
+  )
+    memory = { ...memory, drag2d: undefined }
   let tip: GestureResult['tip'] = null
   let open: PreviewRef | undefined
   if (s.view3d) {
+    // A later non-drag message can replace an undelivered dragend in the client transport.
+    if (
+      memory.drag3d !== undefined &&
+      (g?.kind === 'dragend' ||
+        g?.kind === 'hover' ||
+        g?.kind === 'click' ||
+        g?.kind === 'leave')
+    ) {
+      memory = { ...memory, drag3d: undefined }
+      steps.push({ key: 'cam3d', next: (k) => ({ ...k, at: c.now }) })
+    }
     const frame = frames.d3
     if (frame !== undefined && g !== undefined) {
-      if (g.kind === 'dragend') {
-        const base = memory.drag3d
-        memory = { ...memory, drag3d: undefined }
-        if (base !== undefined)
-          steps.push({
-            key: 'cam3d',
-            next: (k) => ({ ...k, spin: base.spin, at: c.now }),
-          })
-      } else if (g.kind === 'hover') {
+      if (g.kind === 'hover') {
         const n = c.hoverNames
           ? pickSpin(frame.layout, frame.view, c.now, g.fx, g.fy, frame.touched)
           : undefined
@@ -251,11 +338,11 @@ export const mapGesture = (
           tip = { text: fileName(frame.layout.files[n]![0]), x: g.x, y: g.y }
       } else if (g.kind === 'drag') {
         let base = memory.drag3d
-        if (base === undefined) {
+        if (base === undefined || base.press !== g.press) {
           base = {
+            press: g.press,
             yaw: frame.view.yaw,
             pitch: s.cam3d.pitch,
-            spin: s.cam3d.spin,
           }
           memory = { ...memory, drag3d: base }
           if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
@@ -269,7 +356,6 @@ export const mapGesture = (
             ...k,
             yaw: b.yaw + dx * Math.PI * 1.3,
             pitch: Math.max(PITCH_MIN, Math.min(PITCH_MAX, b.pitch + dy * 1.4)),
-            spin: false,
             at: c.now,
           }),
         })
@@ -293,8 +379,7 @@ export const mapGesture = (
   } else {
     const frame = frames.d2
     if (frame !== undefined && g !== undefined) {
-      if (g.kind === 'dragend') memory = { ...memory, drag2d: undefined }
-      else if (g.kind === 'hover' || g.kind === 'click') {
+      if (g.kind === 'hover' || g.kind === 'click') {
         const tilted = tilt(frame.layout),
           hit = pickAt(
             tilted.files,
@@ -320,8 +405,11 @@ export const mapGesture = (
               zoomFrame(frame.view, g.fx, g.fy, g.right ? 1.8 : 1 / 1.8, SIZE),
           })
       } else if (g.kind === 'drag') {
-        const base = memory.drag2d ?? { ...frame.view }
-        memory = { ...memory, drag2d: base }
+        const base =
+          memory.drag2d?.press === g.press
+            ? memory.drag2d.view
+            : { ...frame.view }
+        memory = { ...memory, drag2d: { press: g.press, view: base } }
         steps.push({
           key: 'camera',
           next: () => panFrame(base, g.fx - g.sfx, g.fy - g.sfy),

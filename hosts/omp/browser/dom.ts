@@ -130,6 +130,7 @@ const language = (p: ViewCodeProps) => {
 
 export class DomRenderer {
   private root: Slot | undefined
+  private mapPressSequence = 0
   constructor(
     private readonly container: HTMLElement,
     private readonly map: MapHandlers,
@@ -217,6 +218,8 @@ export class DomRenderer {
       s.width = dimension(p.width, 'x')
       s.height = dimension(p.height, 'y')
       s.minWidth = dimension(p.minWidth, 'x')
+      s.minHeight = dimension(p.minHeight, 'y')
+      s.overflow = p.overflow ?? ''
       s.position = p.position ?? ''
       s.top = dimension(p.top, 'y')
       s.bottom = dimension(p.bottom, 'y')
@@ -364,7 +367,14 @@ export class DomRenderer {
     tip.hidden = true
     el.appendChild(tip)
     let down:
-        | { x: number; y: number; fx: number; fy: number; right: boolean }
+        | {
+            x: number
+            y: number
+            fx: number
+            fy: number
+            right: boolean
+            press: number
+          }
         | undefined,
       dragging = false
     const point = (e: PointerEvent | WheelEvent) => {
@@ -387,7 +397,11 @@ export class DomRenderer {
     el.oncontextmenu = (event) => event.preventDefault()
     el.onpointerdown = (event) => {
       const p = point(event)
-      down = { ...p, right: event.button === 2 }
+      this.mapPressSequence =
+        this.mapPressSequence >= Number.MAX_SAFE_INTEGER
+          ? 1
+          : this.mapPressSequence + 1
+      down = { ...p, right: event.button === 2, press: this.mapPressSequence }
       dragging = false
       el.setPointerCapture(event.pointerId)
     }
@@ -403,6 +417,7 @@ export class DomRenderer {
           show(
             this.map.gesture({
               kind: 'drag',
+              press: down.press,
               fx: p.fx,
               fy: p.fy,
               sfx: down.fx,

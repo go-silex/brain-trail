@@ -12,13 +12,15 @@ import type { MapRenderer } from './map'
 import type { FigureId } from './readout'
 import { drawSpin } from './spin'
 
+// In a framed pane (`s.fill`) the map takes the whole box the header and the footer leave, and its
+// legend is handed back as `footer` for the pane to seat at the bottom.
 export const renderMap = <N, Press>(
   R: ViewRuntime<N, Press>,
   s: ViewSnapshot,
   b: Extract<TabSnapshot, { tab: 'map' }>,
   act: ViewActions<Press>,
   maps: MapRenderer,
-): { node: N; drawn: DrawnMap | undefined } => {
+): { node: N; drawn: DrawnMap | undefined; header?: N; footer?: N } => {
   const S = strings(s.lang, s.assistant)
   const { h, Box, Text, Button } = R
   if (b.kind === 'failed')
@@ -40,10 +42,16 @@ export const renderMap = <N, Press>(
       node: h(Text, { dimColor: true }, S.packing(b.seconds)),
       drawn: undefined,
     }
+  if (!R.Svg)
+    return {
+      node: h(Text, { dimColor: true }, S.mapOnlyDesktop),
+      drawn: undefined,
+    }
 
   const L = b.layout,
     P = s.palette
   const { zoomed: isTrail, camera, play, view3d: in3d, cam3d: cam } = b.state
+  const fill = s.fill
   const sliced = sliceToStep(s.events, play.step, s.now)
   const { steps, at } = sliced
   const folded = replay(
@@ -70,6 +78,7 @@ export const renderMap = <N, Press>(
       filesWord: vault ? S.notes : S.files,
       outside: folded.outside,
       dark: P.bg === DARK.bg,
+      ...(fill !== undefined && { aspect: fill.mapAspect }),
     })
     svg = result.svg
     drawn = { kind: '3d', frame: { view: result.view, layout: L, touched } }
@@ -82,6 +91,7 @@ export const renderMap = <N, Press>(
       filesWord: vault ? S.notes : S.files,
       services,
       box: camera ?? undefined,
+      ...(fill !== undefined && { aspect: fill.mapAspect }),
     })
     svg = result.svg
     drawn = { kind: '2d', frame: { view: result.view, layout: L, touched } }
@@ -251,13 +261,80 @@ export const renderMap = <N, Press>(
         `${T.calls.length} ${S.figCalls}`,
       ),
   )
-  if (!R.Svg)
-    return { node: h(Text, { dimColor: true }, S.mapOnlyDesktop), drawn }
+  const top = group('follow', [
+    h(Button, {
+      key: 'view-3d',
+      label: in3d ? '2D' : '3D',
+      onPress: () => act.intent({ kind: 'toggle-3d' }),
+    }),
+    ...(in3d
+      ? [
+          h(Button, {
+            key: 'open-3d',
+            label: S.open3dBig,
+            onPress: () =>
+              act
+                .open3d()
+                .catch(() => false)
+                .then((ok) => {
+                  if (!ok) act.toast(S.open3dFailed)
+                }),
+          }),
+        ]
+      : []),
+    h(Button, {
+      key: 'follow',
+      label: following ? S.unfollow : S.follow,
+      variant: following ? 'primary' : undefined,
+      onPress: () => act.intent({ kind: 'follow', following }),
+    }),
+  ])
+  const bottom = h(
+    Box,
+    {
+      key: 'bottom-bar',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      justifyContent: 'space-between',
+      alignItems: 'flex-end',
+    },
+    playControls.length > 0
+      ? group('play', playControls)
+      : h(Box, { key: 'play-none' }),
+    group('zoom', zoomControls),
+  )
+  const empty =
+    T.state.size === 0 && T.calls.length === 0
+      ? h(
+          Text,
+          { key: 'map-empty', size: 'caption', dimColor: true },
+          S.mapEmpty,
+        )
+      : undefined
   return {
     drawn,
+    ...(fill !== undefined && {
+      header: h(Box, { flexDirection: 'column', flexShrink: 0 }, top, empty),
+      footer: h(
+        Box,
+        { flexDirection: 'column', flexShrink: 0 },
+        bottom,
+        legend,
+      ),
+    }),
     node: h(
       Box,
-      { key: 'map-col', flexDirection: 'column', gap: 'xs' },
+      fill === undefined
+        ? { key: 'map-col', flexDirection: 'column', gap: 'xs' }
+        : {
+            key: 'map-col',
+            flexDirection: 'column',
+            gap: 'xs',
+            flexGrow: 1,
+            height: 0,
+            minHeight: 0,
+            overflow: 'hidden',
+          },
       b.shallow &&
         h(
           Text,
@@ -266,7 +343,20 @@ export const renderMap = <N, Press>(
         ),
       h(
         Box,
-        { key: 'map-wrap', position: 'relative', flexDirection: 'column' },
+        // Explicit stretch avoids Desktop's row-image auto-centering, which otherwise
+        // leaves a fitted SVG at its tiny intrinsic height instead of filling the paint.
+        fill === undefined
+          ? { key: 'map-wrap', position: 'relative', flexDirection: 'column' }
+          : {
+              key: 'map-wrap',
+              position: 'relative',
+              flexDirection: 'row',
+              alignItems: 'stretch',
+              flexGrow: 1,
+              height: 0,
+              minHeight: 0,
+              overflow: 'hidden',
+            },
         h(R.Svg, {
           key: 'map',
           source: svg,
@@ -285,7 +375,8 @@ export const renderMap = <N, Press>(
             },
             h(R.MapHit, { key: 'map-hit' }),
           ),
-        T.state.size === 0 &&
+        fill === undefined &&
+          T.state.size === 0 &&
           T.calls.length === 0 &&
           h(
             Box,
@@ -304,64 +395,39 @@ export const renderMap = <N, Press>(
               h(Text, { size: 'caption', dimColor: true }, S.mapEmpty),
             ),
           ),
-        h(
-          Box,
-          {
-            key: 'top-bar',
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            flexDirection: 'row',
-          },
-          group('follow', [
-            h(Button, {
-              key: 'view-3d',
-              label: in3d ? '2D' : '3D',
-              onPress: () => act.intent({ kind: 'toggle-3d' }),
-            }),
-            ...(in3d
-              ? [
-                  h(Button, {
-                    key: 'open-3d',
-                    label: S.open3dBig,
-                    onPress: () =>
-                      act
-                        .open3d()
-                        .catch(() => false)
-                        .then((ok) => {
-                          if (!ok) act.toast(S.open3dFailed)
-                        }),
-                  }),
-                ]
-              : []),
-            h(Button, {
-              key: 'follow',
-              label: following ? S.unfollow : S.follow,
-              variant: following ? 'primary' : undefined,
-              onPress: () => act.intent({ kind: 'follow', following }),
-            }),
-          ]),
-        ),
-        h(
-          Box,
-          {
-            key: 'bottom-bar',
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            flexDirection: 'row',
-            flexWrap: 'nowrap',
-            justifyContent: 'space-between',
-            alignItems: 'flex-end',
-          },
-          playControls.length > 0
-            ? group('play', playControls)
-            : h(Box, { key: 'play-none' }),
-          group('zoom', zoomControls),
-        ),
+        fill === undefined &&
+          h(
+            Box,
+            {
+              key: 'top-bar',
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              flexDirection: 'row',
+            },
+            top,
+          ),
+        fill === undefined &&
+          h(
+            Box,
+            {
+              key: 'bottom-bar',
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              flexDirection: 'row',
+              flexWrap: 'nowrap',
+              justifyContent: 'space-between',
+              alignItems: 'flex-end',
+            },
+            playControls.length > 0
+              ? group('play', playControls)
+              : h(Box, { key: 'play-none' }),
+            group('zoom', zoomControls),
+          ),
       ),
-      legend,
+      fill === undefined && legend,
     ),
   }
 }

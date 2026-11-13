@@ -22,6 +22,12 @@ import { tmpdir, homedir, platform, arch } from 'node:os'
 import path from 'node:path'
 import { finished } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  canonicalTree,
+  decideViewChanges,
+  proofFingerprint,
+} from './view-changes.mjs'
+import { probeNativeMapLayout } from './native-map-layout.mjs'
 
 const CANDIDATE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -35,6 +41,7 @@ const FIXTURE = path.join('tests', 'fixtures', 'views.tsx')
 const MARK_MANIFEST = 'BT_VIEW_MANIFEST:'
 const MARK_CASE = 'BT_VIEW_CASE:'
 const OWNER_FILE = '.view-parity-owner'
+const NATIVE_VIEW_TIMEZONE = 'Europe/Paris'
 const OWNER_TEXT = 'view-parity\n'
 const TEST_TIMEOUT_MS = 120_000
 const FIXED_TIME = '2026-11-11T12:00:00.000Z'
@@ -53,6 +60,10 @@ const THEME_BG = { dark: '#0b0e10', light: '#eef2f4' }
 const THREE_PREFIX = 'https://cdn.jsdelivr.net/npm/three@0.160.0/'
 const THREE_MODULE = `${THREE_PREFIX}build/three.module.js`
 
+const NATIVE_LAYOUT_CASES = new Set([
+  'pane-map-desktop-dark-en',
+  'inline3d-desktop-dark-en',
+])
 const LIMIT =
   'Complete SDK descriptions plus SVG and browser proof is not actual native Claude Desktop pixel capture on Linux.'
 const temps = []
@@ -83,16 +94,18 @@ const main = async () => {
       'Browser scenes load Three 0.160.0 from jsDelivr and Inter/JetBrains Mono from Google Fonts. This is not an offline proof.',
       'SVG HTML only frames the production SVG on the fixture theme background. It is not a native UI replica and is not a desktop layout.',
       'SVG proof captures one frame: CSS animations are materialized at 1600 ms and cancelled; SMIL is paused at 1.6 seconds. It does not prove motion parity.',
-      'Primary proof is byte equality of the native tree, harvested SVG source, browser index.html, and data.js. Raster pixel mismatches are retained and diagnostic; they do not fail that proof. Capture, decode, network, and missing-artifact errors still fail it.',
-      'Numeric press.handle differences are recorded and do not fail the tree. Every other tree difference fails. Svg props.source is replaced with an ordered slot before the tree compare.',
+      'Primary proof compares native trees, SVG source and viewport, browser index.html, and data.js. Exact declared tree/SVG proofs may be approved; browser and operational failures remain strict. Raster differences are diagnostic.',
+      'Numeric press.handle values are canonicalized; presence and type remain significant. Svg props.source is replaced with an ordered slot before the tree compare.',
     ],
     baseline: null,
+    intended: null,
     candidate: null,
     fixture: null,
     counts: { native: 0, svg: 0, browserScenes: 0 },
     selection: null,
     versions: {},
     clock: {
+      native: null,
       browserScene: {
         installedAt: FIXED_TIME,
         installLeadMs: INSTALL_LEAD_MS,
@@ -112,9 +125,9 @@ const main = async () => {
     viewport: { scene: SCENE_VIEWPORT, svgFallback: SVG_FALLBACK },
     normalization: {
       module:
-        'A module string is rewritten to the path relative to its isolated root only when both sides resolve to that same relative path.',
+        'Each isolated-root absolute module path is independently rewritten relative to its own root.',
       pressHandle:
-        'press.handle numbers are opaque runtime handler ids. They are listed and excluded. No other field is excluded.',
+        'Existing numeric press.handle values are canonicalized to zero; presence and type remain significant.',
     },
     cases: [],
     errors: [],
@@ -169,8 +182,12 @@ const main = async () => {
   const scope = receipt.selection
     ? ` [${receipt.selection} of ${receipt.fixture?.discovered ?? '?'}]`
     : ''
+  const intendedCount = receipt.cases.filter((item) => item.intended).length
+  const equality = intendedCount
+    ? `${intendedCount} intended changes, others equal`
+    : 'sources equal'
   const line = receipt.ok
-    ? `view-parity: ok ${receipt.counts.native} cases${scope}, sources equal, raster diagnostic ${receipt.rasterDifferent} — ${shown(path.join(output, 'receipt.json'))}`
+    ? `view-parity: ok ${receipt.counts.native} cases${scope}, ${equality}, raster diagnostic ${receipt.rasterDifferent} — ${shown(path.join(output, 'receipt.json'))}`
     : `view-parity: fail ${failed || receipt.errors.length}${scope}, raster diagnostic ${receipt.rasterDifferent} — ${shown(path.join(output, 'receipt.json'))}`
   process.stdout.write(`${line}\n`)
   process.exitCode = exitCode
@@ -218,6 +235,19 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
   await materializeBaseline(commit, baselineRoot)
   await snapshotCandidate(candidateRoot, output)
   await assertRootCopied(CANDIDATE, candidateRoot, output)
+  let declaration = null
+  try {
+    declaration = await readFile(
+      path.join(candidateRoot, 'tests/fixtures/view-changes.json'),
+      'utf8',
+    )
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  receipt.intended = decideViewChanges({
+    declaration,
+    baseline: commit,
+  }).intended
   const fixtureHash = await installFixtures(baselineRoot, candidateRoot, root)
   receipt.fixture = fixtureHash
   const production = await hashTree(candidateRoot)
@@ -229,7 +259,12 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
   }
   await writeFile(path.join(output, 'input.sha256'), production.canonical)
 
-  const discovered = await discoverManifest(baselineRoot, candidateRoot, output)
+  const discovered = await discoverManifest(
+    baselineRoot,
+    candidateRoot,
+    output,
+    receipt,
+  )
   receipt.fixture.cases = discovered.map((item) => ({
     id: item.id,
     ...scenarioOf(item),
@@ -237,6 +272,11 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
   receipt.fixture.discovered = discovered.length
   if (discovered.length === 0)
     throw new Error('native manifest exported zero cases')
+  decideViewChanges({
+    declaration,
+    baseline: commit,
+    names: discovered.map((item) => item.id),
+  })
   const manifest = onlyCase
     ? discovered.filter((item) => item.id === onlyCase)
     : discovered
@@ -276,6 +316,7 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
     const left = baselineCases.get(item.id)
     const right = candidateCases.get(item.id)
     return (
+      NATIVE_LAYOUT_CASES.has(item.id) ||
       left?.svgs.length ||
       right?.svgs.length ||
       browserArtifacts(left) ||
@@ -287,7 +328,7 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
   try {
     for (let index = 0; index < manifest.length; index += 1) {
       const scenario = manifest[index]
-      const item = await compareCase(
+      const { item, differences } = await compareCase(
         scenario,
         index,
         baselineCases.get(scenario.id),
@@ -297,6 +338,22 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
         output,
         browser,
       )
+      const decision = decideViewChanges({
+        declaration,
+        baseline: commit,
+        result: {
+          name: item.id,
+          errors: item.errors.map((message, position) => ({
+            ...(differences.get(position) ?? { kind: 'operational' }),
+            message,
+          })),
+        },
+      }).result
+      item.observedDifferences = decision.observed
+      item.rejectedDetails = decision.rejected
+      item.errors = decision.errors.map((entry) => entry.message)
+      if (decision.intended) item.intended = true
+      item.ok = item.errors.length === 0
       receipt.cases.push(item)
       receipt.counts.svg += item.svgCount
       if (item.browser) receipt.counts.browserScenes += 1
@@ -465,7 +522,12 @@ const installFixtures = async (baselineRoot, candidateRoot, root) => {
   }
 }
 
-const discoverManifest = async (baselineRoot, candidateRoot, output) => {
+const discoverManifest = async (
+  baselineRoot,
+  candidateRoot,
+  output,
+  receipt,
+) => {
   const source = manifestWrapper()
   for (const isolated of [baselineRoot, candidateRoot]) {
     const file = path.join(isolated, 'tests', 'parity-manifest.test.tsx')
@@ -486,7 +548,21 @@ const discoverManifest = async (baselineRoot, candidateRoot, output) => {
   }
   const baseline = oneManifest(left, 'baseline')
   const candidate = oneManifest(right, 'candidate')
-  if (stable(baseline) !== stable(candidate)) {
+  receipt.clock.native = {
+    baselineTimezoneId: baseline.timezoneId,
+    candidateTimezoneId: candidate.timezoneId,
+    requiredTimezoneId: NATIVE_VIEW_TIMEZONE,
+  }
+  for (const [side, manifest] of [
+    ['baseline', baseline],
+    ['candidate', candidate],
+  ]) {
+    if (manifest.timezoneId !== NATIVE_VIEW_TIMEZONE)
+      throw new Error(
+        `${side} native SDK timezone ${JSON.stringify(manifest.timezoneId)}; expected ${NATIVE_VIEW_TIMEZONE}. Configure the OS timezone before running view parity (TZ alone is ineffective).`,
+      )
+  }
+  if (stable(baseline.cases) !== stable(candidate.cases)) {
     await writeFile(
       path.join(output, 'manifest.baseline.json'),
       `${JSON.stringify(baseline, null, 2)}\n`,
@@ -499,12 +575,12 @@ const discoverManifest = async (baselineRoot, candidateRoot, output) => {
       'fixture manifest differs between isolated roots; see manifest.*.json',
     )
   }
-  validateManifest(baseline)
+  validateManifest(baseline.cases)
   await writeFile(
     path.join(output, 'manifest.json'),
-    `${JSON.stringify(baseline, null, 2)}\n`,
+    `${JSON.stringify(baseline.cases, null, 2)}\n`,
   )
-  return baseline
+  return baseline.cases
 }
 
 const oneManifest = (run, side) => {
@@ -521,8 +597,17 @@ const oneManifest = (run, side) => {
       `${side} manifest JSON is malformed: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-  if (!Array.isArray(parsed))
-    throw new Error(`${side} manifest is not an array`)
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    !Array.isArray(parsed.cases) ||
+    typeof parsed.timezoneId !== 'string' ||
+    !parsed.timezoneId
+  )
+    throw new Error(
+      `${side} manifest needs cases and an observed native timezone`,
+    )
   return parsed
 }
 
@@ -557,7 +642,10 @@ const manifestWrapper = () => `import { test } from 'claude-code/testing'
 import { viewCases } from './fixtures/views'
 
 test('view-parity manifest', { timeoutMs: ${TEST_TIMEOUT_MS} }, () => {
-  console.log(${JSON.stringify(MARK_MANIFEST)} + JSON.stringify(viewCases))
+  console.log(${JSON.stringify(MARK_MANIFEST)} + JSON.stringify({
+    cases: viewCases,
+    timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }))
 })
 `
 
@@ -761,9 +849,18 @@ const compareCase = async (
     svgCount: 0,
     browser: null,
   }
+  const differences = new Map()
+  const difference = (message, key, fingerprint) => {
+    differences.set(item.errors.length, {
+      kind: 'difference',
+      key,
+      fingerprint,
+    })
+    item.errors.push(message)
+  }
   if (!baseline || !candidate) {
     item.errors.push('missing native capture')
-    return item
+    return { item, differences }
   }
   await writeFile(
     path.join(dir, 'tree.baseline.json'),
@@ -776,13 +873,20 @@ const compareCase = async (
   const leftSlots = slotSvgs(baseline.tree)
   const rightSlots = slotSvgs(candidate.tree)
   const identity = identityErrors(baseline, leftSlots, candidate, rightSlots)
+  if (NATIVE_LAYOUT_CASES.has(id)) {
+    try {
+      item.nativeMapLayout = await probeNativeMapLayout(browser, candidate.tree)
+    } catch (error) {
+      item.errors.push(
+        `candidate native map layout: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
   item.errors.push(...identity)
-  const normalized = normalizeModules(
-    leftSlots.tree,
-    rightSlots.tree,
-    baselineRoot,
-    candidateRoot,
-  )
+  const normalized = {
+    left: canonicalTree(leftSlots.tree, baselineRoot),
+    right: canonicalTree(rightSlots.tree, candidateRoot),
+  }
   await writeFile(
     path.join(dir, 'tree.normalized.baseline.json'),
     `${JSON.stringify(normalized.left, null, 2)}\n`,
@@ -794,25 +898,29 @@ const compareCase = async (
   const diff = diffValues(normalized.left, normalized.right, '')
   await writeFile(
     path.join(dir, 'tree.diff.json'),
-    `${JSON.stringify({ differences: diff.differences, nonvisual: diff.nonvisual, modules: normalized.rewritten }, null, 2)}\n`,
+    `${JSON.stringify({ differences: diff.differences, nonvisual: diff.nonvisual }, null, 2)}\n`,
   )
   item.tree = {
     equal: diff.differences.length === 0,
     differences: diff.differences.length,
     differencePaths: diff.differences.map((entry) => entry.path),
     nonvisual: diff.nonvisual,
-    modules: normalized.rewritten,
+    fingerprint: proofFingerprint(normalized.left, normalized.right),
     diff: path.relative(output, path.join(dir, 'tree.diff.json')),
   }
   if (!item.tree.equal)
-    item.errors.push(`tree body differs at ${diff.differences.length} path(s)`)
+    difference(
+      `tree body differs at ${diff.differences.length} path(s)`,
+      'tree',
+      item.tree.fingerprint,
+    )
 
   item.svgCount = Math.max(leftSlots.slots.length, rightSlots.slots.length)
   if (item.svgCount) {
     const theme = themeBackground(scenario)
     if (theme.error) item.errors.push(theme.error)
     for (let svgIndex = 0; svgIndex < item.svgCount; svgIndex += 1) {
-      const svgItem = await compareSvg(
+      const { item: svgItem, viewportDifference } = await compareSvg(
         dir,
         svgIndex,
         leftSlots.slots[svgIndex],
@@ -825,8 +933,27 @@ const compareCase = async (
       )
       item.svgs.push(svgItem)
       if (svgItem.source && !svgItem.source.equal)
-        item.errors.push(`svg ${svgIndex} source bytes differ`)
-      if (svgItem.error) item.errors.push(`svg ${svgIndex} ${svgItem.error}`)
+        difference(
+          `svg ${svgIndex} source bytes differ`,
+          `svg:${svgIndex}:source`,
+          proofFingerprint(
+            svgItem.source.sha256.baseline,
+            svgItem.source.sha256.candidate,
+          ),
+        )
+      if (svgItem.error) {
+        const message = `svg ${svgIndex} ${svgItem.error}`
+        if (viewportDifference)
+          difference(
+            message,
+            `svg:${svgIndex}:viewport`,
+            proofFingerprint(
+              svgItem.viewport.baseline,
+              svgItem.viewport.candidate,
+            ),
+          )
+        else item.errors.push(message)
+      }
     }
   }
   const leftBrowser = browserPair(baseline)
@@ -858,8 +985,7 @@ const compareCase = async (
     if (item.browser.error)
       item.errors.push(`browser scene ${item.browser.error}`)
   }
-  item.ok = item.errors.length === 0
-  return item
+  return { item, differences }
 }
 
 const slotSvgs = (tree) => {
@@ -910,53 +1036,6 @@ const sideIdentity = (side, captured, slotted) => {
       errors.push(`${side} svg ${index} alt is not the drawn Svg props.alt`)
   }
   return errors
-}
-
-const normalizeModules = (left, right, leftRoot, rightRoot) => {
-  const rewritten = []
-  const visit = (a, b, pointer) => {
-    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return
-    if (Array.isArray(a) || Array.isArray(b)) {
-      if (Array.isArray(a) && Array.isArray(b)) {
-        const count = Math.min(a.length, b.length)
-        for (let index = 0; index < count; index += 1)
-          visit(a[index], b[index], `${pointer}/${index}`)
-      }
-      return
-    }
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)])
-    for (const key of keys) {
-      const next = `${pointer}/${key}`
-      if (
-        key === 'module' &&
-        typeof a[key] === 'string' &&
-        typeof b[key] === 'string'
-      ) {
-        const relA = moduleRelative(a[key], leftRoot)
-        const relB = moduleRelative(b[key], rightRoot)
-        if (relA && relA === relB) {
-          rewritten.push({ path: next, relative: relA })
-          a[key] = relA
-          b[key] = relB
-          continue
-        }
-      }
-      visit(a[key], b[key], next)
-    }
-  }
-  visit(left, right, '')
-  return { left, right, rewritten }
-}
-
-const moduleRelative = (value, root) => {
-  if (value.startsWith('./') || value.startsWith('../')) return null
-  const abs = path.isAbsolute(value) ? path.normalize(value) : null
-  if (!abs) return null
-  const base = path.normalize(root)
-  if (abs !== base && !abs.startsWith(`${base}${path.sep}`)) return null
-  const rel = path.relative(base, abs)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
-  return rel.split(path.sep).join('/')
 }
 
 const diffValues = (left, right, pointer) => {
@@ -1035,30 +1114,29 @@ const compareSvg = async (
     raster: null,
     error: null,
   }
+  let viewportDifference = false
   if (!leftSlot || !rightSlot || !leftHarvest || !rightHarvest) {
     item.error = 'missing svg on one side'
-    return item
+    return { item, viewportDifference }
   }
   item.source = byteProof(leftHarvest.source, rightHarvest.source)
   await writeFile(path.join(svgDir, 'baseline.svg'), leftHarvest.source)
   await writeFile(path.join(svgDir, 'candidate.svg'), rightHarvest.source)
   if (!background) {
     item.error = 'no theme background'
-    return item
+    return { item, viewportDifference }
   }
   const leftSize = svgSize(leftSlot, leftHarvest.source)
   const rightSize = svgSize(rightSlot, rightHarvest.source)
   item.viewport = { baseline: leftSize, candidate: rightSize }
-  if (
-    leftSize.width !== rightSize.width ||
-    leftSize.height !== rightSize.height ||
-    leftSize.fallback !== rightSize.fallback
-  ) {
+  if (stable(leftSize) !== stable(rightSize)) {
     item.error = `svg viewport differs ${JSON.stringify(leftSize)} vs ${JSON.stringify(rightSize)}`
+    viewportDifference = true
   }
   if (!browser) {
     item.error = item.error ?? 'playwright unavailable for SVG raster'
-    return item
+    viewportDifference = false
+    return { item, viewportDifference }
   }
   try {
     const leftShot = await rasterSvg(
@@ -1084,9 +1162,10 @@ const compareSvg = async (
     )
     recordRaster(item, pixels, output)
   } catch (error) {
+    viewportDifference = false
     item.error = error instanceof Error ? error.message : String(error)
   }
-  return item
+  return { item, viewportDifference }
 }
 
 const svgSize = (slot, source) => {

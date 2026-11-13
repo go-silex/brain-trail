@@ -2,6 +2,7 @@
 import { makeIndex, type Index } from '../../../hooks/files'
 import { createMapRenderer, DARK, LIGHT } from '../../../hooks/map'
 import {
+  cameraDuringGesture,
   GESTURE0,
   STEP_MS,
   VIEW_STATE0,
@@ -174,6 +175,7 @@ export function startPage(
     const effect = timerEffect(i)
     if (effect !== 'none') stopTimer()
     apply(plan(i, { now: Date.now(), frames }))
+    if (state.tab !== 'map' || i.kind === 'toggle-3d') memory = GESTURE0
     if (i.kind === 'preview') {
       previewSerial++
       preview = undefined
@@ -355,15 +357,17 @@ export function startPage(
           layout.layoutRev !== f.workspace.layoutRev
         )
           return
-        else
+        else {
+          const cam3d = cameraDuringGesture(state.cam3d, memory)
           body = {
             tab: 'map',
             kind: 'ready',
             layout: layout.layout,
             shallow: f.workspace.shallow,
             fold: { ...fold, index },
-            state,
+            state: cam3d === state.cam3d ? state : { ...state, cam3d },
           }
+        }
         break
     }
     const snapshot: ViewSnapshot = {

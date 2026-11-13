@@ -103,6 +103,28 @@ export type ViewSnapshot = {
   events: TrailEvent[]
   open: readonly string[]
   body: TabSnapshot
+  // A host that docks the pane in a frame of `rows` gets a header, a body and a footer over them:
+  // the map fills what the two others leave, a box `mapAspect` times as tall as it is wide.
+  // Absent, the pane takes the height of what it shows.
+  fill?: {
+    rows: number
+    mapAspect: number
+    body?: {
+      stamp: string
+      offset: number
+      viewport: number
+      content: number
+      reach: number
+    }
+    chrome?: {
+      stamp: string
+      header: number
+      footer: number
+      headerReach: number
+      footerReach: number
+      notice: boolean
+    }
+  }
 }
 
 export type ViewChild<N> =
@@ -124,7 +146,7 @@ export type ViewBoxProps = Keyed & {
   flexWrap?: 'wrap' | 'nowrap'
   flexGrow?: number
   flexShrink?: number
-  alignItems?: 'center' | 'flex-end'
+  alignItems?: 'center' | 'flex-end' | 'stretch'
   justifyContent?: 'center' | 'flex-end' | 'space-between'
   gap?: ViewSpace
   columnGap?: ViewSpace
@@ -136,9 +158,11 @@ export type ViewBoxProps = Keyed & {
   minWidth?: number | string
   width?: number | string
   height?: number | string
+  minHeight?: number | string
   borderStyle?: 'single'
   borderColor?: string
   position?: 'relative' | 'absolute'
+  overflow?: 'hidden'
   top?: number
   left?: number
   right?: number
@@ -195,6 +219,15 @@ export type ViewRuntime<N, Press> = {
   Markdown: ViewTag<ViewMarkdownProps, N> | undefined
   Code: ViewTag<ViewCodeProps, N> | undefined
   MapHit: ViewTag<Keyed, N> | undefined
+  Measure?: ViewTag<
+    Keyed & {
+      stamp: string
+      expectedRows: number
+      reach: number
+      kind: 'viewport' | 'content' | 'header' | 'footer'
+    },
+    N
+  >
 }
 
 export type ViewIntent =
@@ -220,6 +253,7 @@ export type CompactOutcome =
   | { kind: 'skipped'; reason: string }
   | { kind: 'failed' }
 export type ViewActions<Press> = {
+  scrollBody?: (to: 'first' | 'previous' | 'next' | 'last') => void
   intent: (i: ViewIntent) => Promise<void>
   openFile: (ref: PreviewRef) => Promise<void>
   openIn: (ref: PreviewRef, app: string) => Promise<void>
@@ -240,7 +274,14 @@ export type MapGesture =
   | { kind: 'hover'; fx: number; fy: number; x: number; y: number }
   | { kind: 'leave' }
   | { kind: 'click'; fx: number; fy: number; right: boolean }
-  | { kind: 'drag'; fx: number; fy: number; sfx: number; sfy: number }
+  | {
+      kind: 'drag'
+      press: number
+      fx: number
+      fy: number
+      sfx: number
+      sfy: number
+    }
   | { kind: 'dragend' }
 export type MapTip = { text: string; x: number; y: number }
 export type Drawn2d = { view: MapFrame; layout: Layout; touched: Set<number> }
@@ -251,8 +292,8 @@ export type DrawnMap =
 export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
 export type GestureMemory = {
   hover: { fx: number; fy: number } | undefined
-  drag2d: MapFrame | undefined
-  drag3d: { yaw: number; pitch: number; spin: boolean } | undefined
+  drag2d: { press: number; view: MapFrame } | undefined
+  drag3d: { press: number; yaw: number; pitch: number } | undefined
 }
 export type GestureResult = {
   memory: GestureMemory

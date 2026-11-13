@@ -4,6 +4,7 @@ import pack from './vendor/d3-hierarchy/pack/index.js'
 import { LOGOS } from './logos'
 import { svcColor } from './mcp'
 import { rank, type Kind, type Trail } from '../types/model'
+import { fitFrame, type MapFrame } from './pointer'
 
 export const SIZE = 1800
 const ARC_MS = 900, CALL_MS = 800, VIEW_MS = 600
@@ -18,6 +19,9 @@ const unscale = (svg: string, px: number) => svg.replace(/<[^>]*vector-effect="n
   return t.replace(/stroke-dasharray="([\d.]+) ([\d.]+)"/, (_, a: string, b: string) => `stroke-dasharray="${f(Number(a) * px)} ${f(Number(b) * px)}"`)
 })
 const fluid = (w: number, h: number) => `width="${FLUID}" height="${Math.round((FLUID * h) / w)}"`
+// In the native row wrapper the image stretches vertically and clamps to the full width.
+// A one-pixel intrinsic height keeps that width clamp even before the first size report.
+export const fitted = `width="${FLUID}" height="1" preserveAspectRatio="none"`
 
 export type Group = { depth: number; name: string; path: string; x: number; y: number; r: number; n: number }
 export type Layout = { size: number; dot: number; leaf?: number; files: [string, number, number][]; groups: Group[]; title: string }
@@ -166,11 +170,14 @@ export const tilt = (L: Layout): Tilted => {
   return t
 }
 
-export type DrawOptions = { zoomed: boolean; widthPx: number; now: number; outside: number; filesWord: string; services: string[]; box?: { x: number; y: number; side: number } }
-export type MapRenderer = { draw: (L: Layout, T: Trail, P: Palette, opts: DrawOptions) => { svg: string; heightPx: number; view: { vx: number; vy: number; vw: number; vh: number; px: number } } }
+// `aspect`: the height over the width of the box the host gives the map; absent, the map takes its own height.
+export type DrawOptions = { zoomed: boolean; widthPx: number; now: number; outside: number; filesWord: string; services: string[]; box?: { x: number; y: number; side: number }; aspect?: number }
+export type MapRenderer = { draw: (L: Layout, T: Trail, P: Palette, opts: DrawOptions) => { svg: string; heightPx: number; view: MapFrame } }
 export const createMapRenderer = () => {
   let trailBox: { vx: number; vy: number; side: number } | undefined
-  let lastView: { from: string; to: string; at: number } | undefined
+  type ViewHistory = { from: string; to: string; at: number; aspect?: number }
+  let intrinsicView: ViewHistory | undefined
+  let fittedView: ViewHistory | undefined
   const draw = (L: Layout, T: Trail, P: Palette, opts: DrawOptions) => {
   const { widthPx, now } = opts
   const TL = tilt(L)
@@ -195,7 +202,6 @@ export const createMapRenderer = () => {
     if (!inside) trailBox = { vx: cx - side / 2, vy: cy - side / 2, side }
     ;[vx, vy, vw, vh] = [trailBox!.vx, trailBox!.vy, trailBox!.side, trailBox!.side]
   } else trailBox = undefined
-  const px = vw / widthPx
   // the whole disc: its title sits on the top row, left, beside the Follow button, with no empty band above
   const whole = opts.box === undefined && trailBox === undefined
   const head = whole ? 40 : 0
@@ -204,19 +210,30 @@ export const createMapRenderer = () => {
   const svcs = opts.services.filter(s => (T.perSvc.get(s) ?? 0) > 0)
   const cols = svcs.length > 6 ? Math.ceil(svcs.length / 2) : Math.max(svcs.length, 1)
   const rows = svcs.length === 0 ? 0 : svcs.length > 6 ? 2 : 1
-  vy -= (head + rows * 78) * px; vh += (head + rows * 78) * px
-  const SR = 17 * px, gapX = Math.min(vw / Math.max(cols, 1), 120 * px)
+  const band = head + rows * 78, mapTop = vy, fit = opts.aspect
+  // Glyphs belong to the natural camera, not the expanded letterbox.
+  const naturalX = vx, naturalWidth = vw, px = vw / widthPx
+  const bandTop = mapTop - band * px
+  vy = bandTop
+  vh += band * px
+  if (fit !== undefined) {
+    ;({ vx, vy, vw, vh } = fitFrame({ vx, vy, vw, vh }, fit))
+  }
+  const SR = 17 * px, gapX = Math.min(naturalWidth / Math.max(cols, 1), 120 * px)
   const station = new Map(svcs.map((s, i) => {
     const c = i % cols, r = Math.floor(i / cols), inRow = Math.min(cols, svcs.length - r * cols)
-    return [s, { x: vx + vw / 2 + (c - (inRow - 1) / 2) * gapX, y: vy + (head + 40 + r * 78) * px }]
+    return [s, { x: naturalX + naturalWidth / 2 + (c - (inRow - 1) / 2) * gapX, y: bandTop + (head + 40 + r * 78) * px }]
   }))
   const heightPx = Math.round(widthPx * vh / vw)
   const box = `${f(vx)} ${f(vy)} ${f(vw)} ${f(vh)}`
-  if (lastView === undefined) lastView = { from: box, to: box, at: 0 }
-  else if (lastView.to !== box) lastView = { from: lastView.to, to: box, at: now }
+  let lastView = fit === undefined ? intrinsicView : fittedView
+  if (lastView === undefined || (fit !== undefined && lastView.aspect !== fit)) lastView = { from: box, to: box, at: 0, aspect: fit }
+  else if (lastView.to !== box) lastView = { from: lastView.to, to: box, at: now, aspect: fit }
+  if (fit === undefined) intrinsicView = lastView
+  else fittedView = lastView
   const viewAge = now - lastView.at
   const out: string[] = []
-  out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${box}" ${fluid(vw, vh)} font-family="'General Sans',ui-sans-serif,system-ui,sans-serif">`)
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${box}" ${fit === undefined ? fluid(vw, vh) : fitted} font-family="'General Sans',ui-sans-serif,system-ui,sans-serif">`)
   if (viewAge < VIEW_MS && lastView.from !== box) {
     out.push(`<animate attributeName="viewBox" from="${lastView.from}" to="${box}" begin="${-viewAge}ms" dur="${VIEW_MS}ms" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".4 0 .2 1"/>`)
   }
@@ -242,7 +259,7 @@ export const createMapRenderer = () => {
       const more = opts.outside > 0 ? ` · +${opts.outside} outside` : ''
       const title = esc(fitTitle(L.title.toUpperCase(), `${g.n.toLocaleString('en-US')} ${opts.filesWord.toUpperCase()}${more}`, widthPx, whole ? 210 : 0))
       // zoomed in, the title would land among the services: it shows on the whole map only
-      if (whole) out.push(`<text class="l" x="${f(vx + 12 * px)}" y="${f(vy + 24 * px)}" font-size="${f(11 * px)}">${title}</text>`)
+      if (whole) out.push(`<text class="l" x="${f(naturalX + 12 * px)}" y="${f(bandTop + 24 * px)}" font-size="${f(11 * px)}">${title}</text>`)
       continue
     }
     const name = g.depth === 1 ? g.name.toUpperCase() : g.name
@@ -427,7 +444,12 @@ export const createMapRenderer = () => {
   out.splice(linksAt, 0, ...under)
   out.push(stationSvg(withLogo))
   out.push('</svg>')
-  return { svg: unscale(out.join(''), px), heightPx, view: { vx, vy, vw, vh, px } }
+  const view: MapFrame = { vx, vy, vw, vh, px: vw / widthPx }
+  if (fit !== undefined) {
+    const cameraBand = rows * 78 / widthPx
+    view.cameraFrame = fitFrame({ vx: 0, vy: -cameraBand, vw: 1, vh: 1 + cameraBand }, fit)
+  }
+  return { svg: unscale(out.join(''), px), heightPx, view }
 }
   return { draw }
 }
@@ -456,9 +478,11 @@ export const gauge = (P: Palette, widthPx: number, percent: number, compactAt: n
 
 // The brand band: crop marks at the corners, the two-line wordmark, the product name as an eyebrow with the
 // one accent dot. No fill of its own: it lies on the pane's background, like the rest of the mod.
-export const banner = (product: string, line: string, P: Palette = DARK) => {
-  // drawn at 480 by 76 and scaled to the pane, like a cover
-  const w = 480, h = 76, ink = P.fg
+// Drawn at 480 by 76 and scaled to the pane, like a cover, up to BANNER_MAX pixels. Past that width its marks
+// keep that size and the band only gets wider: it never takes the height the body needs.
+export const BANNER_MAX = 900, BANNER_ASPECT = 76 / 480
+export const banner = (product: string, line: string, P: Palette = DARK, widthPx = 0) => {
+  const w = Math.round(480 * Math.max(1, widthPx / BANNER_MAX)), h = 76, ink = P.fg
   const corner = (x: number, y: number, dx: number, dy: number) =>
     `<path d="M${x + dx * 5} ${y}h${dx * 12}M${x} ${y + dy * 5}v${dy * 12}" stroke="${ink}" stroke-opacity=".45" stroke-width="1.2" fill="none"/>`
   return [
