@@ -192,6 +192,31 @@ try {
           `Isolated Git fixture setup failed: ${result.stderr || result.error || result.status}`,
         )
     }
+    const metadataArgv = [
+      'powershell.exe',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      '[PSCustomObject]@{version=$PSVersionTable.PSVersion.ToString(); outputCodePage=[Console]::OutputEncoding.CodePage; inputCodePage=[Console]::InputEncoding.CodePage; outputEncoding=$OutputEncoding.WebName} | ConvertTo-Json -Compress',
+    ]
+    writeFileSync(
+      join(plugin, 'metadata-argv.json'),
+      JSON.stringify(metadataArgv),
+    )
+    const nodeMetadata = spawnSync(metadataArgv[0], metadataArgv.slice(1), {
+      cwd: gitWork,
+      env,
+      encoding: 'utf8',
+      timeout: 20000,
+      windowsHide: true,
+    })
+    summary.nodePowerShellMetadata = {
+      exit: nodeMetadata.status,
+      signal: nodeMetadata.signal,
+      stdout: nodeMetadata.stdout,
+      stderr: nodeMetadata.stderr,
+      error: nodeMetadata.error?.message,
+    }
   }
   if (override) {
     const actual = spawnSync(claude, ['--version'], {

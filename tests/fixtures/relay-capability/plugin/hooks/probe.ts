@@ -85,12 +85,38 @@ export const register: Register = (on) => {
       const windows =
         (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
       if (windows) {
+        const evidence: Record<string, unknown> = { stage: 'local-env' }
+        gitEncoding = evidence
+        let snapshots = Promise.resolve()
+        let snapshotFailure = ''
+        const persist = () => {
+          const snapshot = JSON.stringify({
+            phase: 'diagnosing',
+            gitEncoding: evidence,
+          })
+          snapshots = snapshots
+            .then(() => $.fs.write(`${cwd}/probe-report.json`, snapshot))
+            .catch((error) => {
+              snapshotFailure = String(error)
+            })
+          return snapshots
+        }
+        await persist()
+        if (snapshotFailure)
+          throw new Error(`Diagnostic snapshot failed: ${snapshotFailure}`)
         const gitCwd = `${cwd}/git-unicode`
         const gitLs = gitInventoryArgv(true)
         const localVars = await $.process.run(
           ['git', 'rev-parse', '--local-env-vars'],
           { cwd: gitCwd, timeoutMs: 20000 },
         )
+        evidence.localEnvExit = localVars.exitCode
+        evidence.localEnvStdout = localVars.stdout
+        evidence.localEnvStderr = localVars.stderr
+        evidence.stage = 'local-env-completed'
+        await persist()
+        if (snapshotFailure)
+          throw new Error(`Diagnostic snapshot failed: ${snapshotFailure}`)
         const names =
           localVars.exitCode === 0 ? localVars.stdout.trim().split(/\r?\n/) : []
         if (
@@ -98,25 +124,11 @@ export const register: Register = (on) => {
           !names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name))
         )
           throw new Error('Git local environment discovery failed')
-        const metadata = await $.process.run(
-          [
-            'powershell.exe',
-            '-NoProfile',
-            '-NonInteractive',
-            '-Command',
-            '[PSCustomObject]@{version=$PSVersionTable.PSVersion.ToString(); outputCodePage=[Console]::OutputEncoding.CodePage; inputCodePage=[Console]::InputEncoding.CodePage; outputEncoding=$OutputEncoding.WebName} | ConvertTo-Json -Compress',
-          ],
-          { cwd: gitCwd, timeoutMs: 20000 },
-        )
-        const direct = await $.process.run(gitLs, {
-          cwd: gitCwd,
-          timeoutMs: 20000,
-        })
+        evidence.localEnvNames = names
+        const metadataArgv = JSON.parse(
+          await $.fs.read(`${$.plugin.root}/metadata-argv.json`),
+        ) as string[]
         const wrappedArgv = nativeGitInventoryArgv(true, names)
-        const wrapped = await $.process.run(wrappedArgv, {
-          cwd: gitCwd,
-          timeoutMs: 20000,
-        })
         // This explores explicit transcription, not policy-enforced transcription.
         const transcriptPath = `${$.plugin.root}/git-transcript.txt`.replace(
           /'/g,
@@ -124,15 +136,46 @@ export const register: Register = (on) => {
         )
         const transcriptArgv = [...wrappedArgv]
         transcriptArgv[4] = `try { Start-Transcript -Path '${transcriptPath}' -ErrorAction Stop | Out-Null } catch { exit 97 }; ${wrappedArgv[4]}`
-        const transcribed = await $.process.run(transcriptArgv, {
-          cwd: gitCwd,
-          timeoutMs: 20000,
-        })
+        await persist()
+        if (snapshotFailure)
+          throw new Error(`Diagnostic snapshot failed: ${snapshotFailure}`)
+        evidence.stage = 'collecting-independent-calls'
+        const execute = async (stage: string, argv: string[]) => {
+          evidence[stage] = { status: 'running', argv }
+          await persist()
+          if (snapshotFailure) return undefined
+          try {
+            const result = await $.process.run(argv, {
+              cwd: gitCwd,
+              timeoutMs: 20000,
+            })
+            evidence[stage] = { status: 'completed', argv, ...result }
+            await persist()
+            if (snapshotFailure) return undefined
+            return result
+          } catch (error) {
+            evidence[stage] = { status: 'error', argv, error: String(error) }
+            await persist()
+            return undefined
+          }
+        }
+        const [metadata, direct, wrapped, transcribed] = await Promise.all([
+          execute('powershell-metadata', metadataArgv),
+          execute('direct-git', gitLs),
+          execute('production-wrapper', wrappedArgv),
+          execute('explicit-transcript', transcriptArgv),
+        ])
+        if (!metadata || !direct || !wrapped || !transcribed)
+          throw new Error(
+            'Windows Git discriminator process call failed; see stages',
+          )
         let transcribedProductPaths: string[] | undefined
         try {
           transcribedProductPaths = pickFiles(transcribed.stdout, false, gitCwd)
         } catch {}
         gitEncoding = {
+          ...evidence,
+          stage: 'complete',
           metadata: metadata.stdout.trim(),
           metadataExit: metadata.exitCode,
           directExit: direct.exitCode,

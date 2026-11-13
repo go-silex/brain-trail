@@ -41,7 +41,38 @@ const readJson = (path) => {
 const assert = (condition, message) => {
   if (!condition) throw new Error(message)
 }
+const nativeProcess = (mode, ...args) => {
+  const executable = process.env.RELAY_CROSS_ACCOUNT_BINARY
+  if (!executable) throw new Error('native process observer is not configured')
+  const result = spawnSync(executable, [mode, ...args], {
+    encoding: 'utf8',
+    timeout: 10000,
+    maxBuffer: 65536,
+    windowsHide: true,
+  })
+  let reply
+  try {
+    reply = JSON.parse(result.stdout || '')
+  } catch {}
+  if (result.status !== 0 || reply?.ok !== true) {
+    const phase =
+      typeof reply?.phase === 'string' && /^[a-z0-9-]{1,64}$/.test(reply.phase)
+        ? reply.phase
+        : 'unknown'
+    const code = Number.isSafeInteger(reply?.code) ? reply.code : null
+    throw new Error(
+      `native process observer failed: ${JSON.stringify({ mode, phase, code, status: result.status, signal: result.signal, errorCode: result.error?.code || null })}`,
+    )
+  }
+  return reply
+}
 const alive = (pid) => {
+  if (process.platform === 'win32') {
+    const reply = nativeProcess('--process-alive', String(pid), binary)
+    if (typeof reply.alive !== 'boolean')
+      throw new Error('invalid native process liveness response')
+    return reply.alive
+  }
   try {
     process.kill(pid, 0)
     return true
@@ -51,77 +82,29 @@ const alive = (pid) => {
 }
 let pidDiagnostic = {}
 const relayPid = (binary) => {
-  let result
   if (process.platform === 'win32') {
-    const literal = binary.replaceAll("'", "''")
-    result = spawnSync(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq '${literal}' } | ForEach-Object { $_.ProcessId }`,
-      ],
-      { encoding: 'utf8', timeout: 10000, windowsHide: true },
-    )
-  } else {
-    result = spawnSync('ps', ['-axo', 'pid=,command='], {
-      encoding: 'utf8',
-      timeout: 10000,
-    })
-    if (result.status === 0)
-      result.stdout = result.stdout
-        .split('\n')
-        .filter((line) => line.includes(binary))
-        .map((line) => line.trim().split(/\s+/, 1)[0])
-        .join('\n')
+    const reply = nativeProcess('--process-inspect', binary)
+    if (!Number.isSafeInteger(reply.pid) || reply.pid <= 0)
+      throw new Error('invalid native process identity response')
+    return reply.pid
   }
-  const pids = (result.stdout || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(Number)
+  const result = spawnSync('ps', ['-axo', 'pid=,command='], {
+    encoding: 'utf8',
+    timeout: 10000,
+  })
+  const pids =
+    result.status === 0
+      ? result.stdout
+          .split('\n')
+          .filter((line) => line.includes(binary))
+          .map((line) => Number(line.trim().split(/\s+/, 1)[0]))
+      : []
   pidDiagnostic = {
     status: result.status,
     signal: result.signal,
     errorCode: result.error?.code || null,
     matches: pids.length,
     validPid: pids.length === 1 && Number.isSafeInteger(pids[0]) && pids[0] > 0,
-  }
-  if (process.platform === 'win32' && !pidDiagnostic.validPid) {
-    const literal = binary.replaceAll("'", "''")
-    const details = spawnSync(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'brain-trail-relay-*' }); $p | ForEach-Object { [PSCustomObject]@{ name=$_.Name; hasPath=[bool]$_.ExecutablePath; expected=($_.ExecutablePath -eq '${literal}') } } | ConvertTo-Json -Compress`,
-      ],
-      { encoding: 'utf8', timeout: 10000, maxBuffer: 65536, windowsHide: true },
-    )
-    let candidates = []
-    try {
-      const value = JSON.parse(details.stdout || '[]')
-      candidates = (Array.isArray(value) ? value : [value])
-        .filter(
-          (item) =>
-            typeof item?.name === 'string' &&
-            /^brain-trail-relay-[a-z0-9.-]+$/i.test(item.name),
-        )
-        .slice(0, 8)
-        .map((item) => ({
-          name: item.name,
-          hasPath: item.hasPath === true,
-          expected: item.expected === true,
-        }))
-    } catch {}
-    pidDiagnostic = {
-      ...pidDiagnostic,
-      candidateStatus: details.status,
-      candidateErrorCode: details.error?.code || null,
-      candidates,
-    }
   }
   return result.status === 0 && pidDiagnostic.validPid ? pids[0] : 0
 }
@@ -522,19 +505,24 @@ try {
     }
     await pause(500)
   }
-  if (binary && pid && alive(pid) && relayPid(binary) === pid) {
-    if (process.platform === 'win32')
-      spawnSync('taskkill', ['/PID', String(pid), '/F'], {
-        timeout: 10000,
-        stdio: 'ignore',
-        windowsHide: true,
-      })
-    else {
-      try {
-        process.kill(pid, 'SIGKILL')
-      } catch {}
+  try {
+    if (binary && pid && alive(pid) && relayPid(binary) === pid) {
+      if (process.platform === 'win32')
+        spawnSync('taskkill', ['/PID', String(pid), '/F'], {
+          timeout: 10000,
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+      else {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {}
+      }
+      await pause(500)
     }
-    await pause(500)
+  } catch (error) {
+    console.error(`relay cleanup observation failed: ${error.message}`)
+    process.exitCode = 1
   }
   if (gateway) await new Promise((ok) => gateway.close(ok))
   rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })

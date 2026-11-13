@@ -106,6 +106,9 @@ func hosted() bool {
 }
 
 func main() {
+	if processEntry() {
+		return
+	}
 	if hosted() && len(os.Args) == 4 && os.Args[1] == "--owner" {
 		if !filepath.IsAbs(os.Args[2]) || filepath.Clean(filepath.Dir(os.Args[3])) != filepath.Clean(os.Args[2]) || filepath.Base(os.Args[3]) != "relay.sock" {
 			os.Exit(1)
@@ -194,7 +197,27 @@ func run(dir, socket string) (result error) {
 	}
 	defer func() {
 		if err := os.RemoveAll(stage); err != nil && result == nil {
-			result = phase("stage-remove", err)
+			resource := "other"
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				switch filepath.Clean(pathErr.Path) {
+				case filepath.Clean(stage):
+					resource = "directory"
+				case filepath.Join(stage, "probe.exe"):
+					resource = "executable"
+				case filepath.Join(stage, "probe"):
+					resource = "executable"
+				case filepath.Join(stage, "control"):
+					resource = "control-file"
+				case filepath.Join(stage, "s"):
+					resource = "control-socket"
+				case filepath.Join(stage, "report.json"):
+					resource = "report"
+				case filepath.Join(stage, "report.json.tmp"):
+					resource = "report-temp"
+				}
+			}
+			result = phase("stage-remove-"+resource, err)
 		}
 	}()
 	if err = prepareStage(stage); err != nil {

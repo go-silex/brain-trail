@@ -17,6 +17,7 @@ import (
 	"time"
 )
 
+func processEntry() bool { return false }
 func serviceEntry() bool { return false }
 func managerGuard() error {
 	if os.Geteuid() != 0 {
