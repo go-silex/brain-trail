@@ -78,7 +78,7 @@ export const register: Register = (on) => {
       launch = await client.prepareBrowser()
       await $.fs.write(
         `${cwd}/relay-production.json`,
-        JSON.stringify({ phase: 'ready', launch, socket }),
+        JSON.stringify({ phase: 'ready', launch, socket, binary }),
       )
       await Promise.race([
         done,
@@ -91,7 +91,12 @@ export const register: Register = (on) => {
       passed = (await $.store.get('relay-production-value')) === 'é😀'
       await $.fs.write(
         `${cwd}/relay-production.json`,
-        JSON.stringify({ phase: passed ? 'passed' : 'failed', launch, socket }),
+        JSON.stringify({
+          phase: passed ? 'passed' : 'failed',
+          launch,
+          socket,
+          binary,
+        }),
       )
       // Keep the real stream alive until the SDK tears down the session.
       return { text: passed ? 'passed' : 'failed' }

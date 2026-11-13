@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,70 @@ type request struct {
 type report struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+type phaseError struct {
+	phase string
+	err   error
+}
+
+func (e *phaseError) Error() string { return e.phase }
+func (e *phaseError) Unwrap() error { return e.err }
+func phase(name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &phaseError{phase: name, err: err}
+}
+
+// Diagnostics contain only fixed phase labels and numeric OS errors, not paths or nonces.
+func diagnostic(err error) string {
+	var names []string
+	for {
+		p, ok := err.(*phaseError)
+		if !ok {
+			break
+		}
+		names = append(names, p.phase)
+		err = p.err
+	}
+	var remote *remoteDiagnostic
+	if errors.As(err, &remote) {
+		names = append(names, remote.value)
+		return strings.Join(names, "-")
+	}
+	var errno syscall.Errno
+	var netErr net.Error
+	switch {
+	case errors.As(err, &errno):
+		names = append(names, fmt.Sprintf("os-%d", uint32(errno)))
+	case errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		names = append(names, "timeout")
+	case errors.Is(err, os.ErrPermission):
+		names = append(names, "permission")
+	case errors.Is(err, os.ErrNotExist):
+		names = append(names, "not-found")
+	default:
+		names = append(names, "other")
+	}
+	if len(names) == 1 {
+		return "unknown/" + names[0]
+	}
+	return strings.Join(names[:len(names)-1], "-") + "/" + names[len(names)-1]
+}
+
+type remoteDiagnostic struct{ value string }
+
+func (e *remoteDiagnostic) Error() string { return "service probe failed" }
+func safeRemote(s string) bool {
+	if len(s) == 0 || len(s) > 256 || strings.Count(s, "/") != 1 || strings.HasPrefix(s, "/") || strings.HasSuffix(s, "/") {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '/') {
+			return false
+		}
+	}
+	return true
 }
 
 func hosted() bool {
@@ -89,7 +154,12 @@ func main() {
 		os.Exit(1)
 	}
 	if err := run(os.Args[2], os.Args[3]); err != nil {
-		fmt.Fprintln(os.Stderr, "cross-account proof:", err)
+		detail := diagnostic(err)
+		name, class, ok := strings.Cut(detail, "/")
+		if !ok {
+			name, class = "unknown", "other"
+		}
+		fmt.Fprintf(os.Stderr, "cross-account-phase=%s error-class=%s\n", name, class)
 		os.Exit(1)
 	}
 }
@@ -101,7 +171,7 @@ func run(dir, socket string) (result error) {
 	parent := filepath.Dir(dir)
 	root := filepath.Dir(parent)
 	if err := managerGuard(); err != nil {
-		return err
+		return phase("manager-guard", err)
 	}
 	if !strings.HasPrefix(filepath.Base(root), "btr-proof-") || (filepath.Base(parent) != "tmp" && filepath.Base(parent) != "local") {
 		return errors.New("relay is outside the expected disposable fixture")
@@ -113,28 +183,28 @@ func run(dir, socket string) (result error) {
 	nonce := hex.EncodeToString(b[:])
 	stage, err := os.MkdirTemp(parent, "c-")
 	if err != nil {
-		return err
+		return phase("stage-create", err)
 	}
 	defer func() {
 		if err := os.RemoveAll(stage); err != nil && result == nil {
-			result = fmt.Errorf("remove fixture stage: %w", err)
+			result = phase("stage-remove", err)
 		}
 	}()
 	if err = prepareStage(stage); err != nil {
-		return err
+		return phase("stage-permissions", err)
 	}
 	file := filepath.Join(stage, "control")
 	if err = os.WriteFile(file, []byte(nonce), 0644); err != nil {
-		return err
+		return phase("control-file-create", err)
 	}
 	control := filepath.Join(stage, "s")
 	listener, err := net.Listen("unix", control)
 	if err != nil {
-		return fmt.Errorf("control socket: %w", err)
+		return phase("control-socket-listen", err)
 	}
 	defer listener.Close()
 	if err = prepareSocket(control); err != nil {
-		return err
+		return phase("control-socket-permissions", err)
 	}
 	served := make(chan error, 1)
 	go func() {
@@ -151,43 +221,52 @@ func run(dir, socket string) (result error) {
 	}()
 	r := request{Directory: dir, Socket: socket, ControlFile: file, ControlSocket: control, Nonce: nonce}
 	if err = execute(stage, r); err != nil {
-		return err
+		return phase("execute", err)
 	}
 	if err = <-served; err != nil {
-		return fmt.Errorf("control connection: %w", err)
+		return phase("control-socket-accept", err)
 	}
 	return nil
 }
 
 func probe(r request) error {
 	if err := verifyIdentity(r); err != nil {
-		return err
+		return phase("identity", err)
 	}
 	b, err := os.ReadFile(r.ControlFile)
-	if err != nil || string(b) != r.Nonce {
-		return errors.New("control file inaccessible or incorrect")
+	if err != nil {
+		return phase("control-file-read", err)
+	}
+	if string(b) != r.Nonce {
+		return phase("control-file-nonce", errors.New("mismatch"))
 	}
 	c, err := net.DialTimeout("unix", r.ControlSocket, 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("control socket inaccessible: %w", err)
+		return phase("control-socket-dial", err)
 	}
 	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
 	b, err = io.ReadAll(io.LimitReader(c, 100))
 	_ = c.Close()
-	if err != nil || string(b) != r.Nonce {
-		return errors.New("control socket nonce mismatch")
+	if err != nil {
+		return phase("control-socket-read", err)
+	}
+	if string(b) != r.Nonce {
+		return phase("control-socket-nonce", errors.New("mismatch"))
 	}
 	_, err = os.ReadDir(r.Directory)
+	if err == nil {
+		return phase("private-directory-accepted", errors.New("unexpected success"))
+	}
 	if !isPermission(err) {
-		return fmt.Errorf("directory denial was not permission-related: %v", err)
+		return phase("private-directory", err)
 	}
 	c, err = net.DialTimeout("unix", r.Socket, 3*time.Second)
 	if err == nil {
 		c.Close()
-		return errors.New("private socket accepted other account")
+		return phase("private-socket-accepted", errors.New("unexpected success"))
 	}
 	if !isPermission(err) {
-		return fmt.Errorf("socket denial was not permission-related: %w", err)
+		return phase("private-socket", err)
 	}
 	return nil
 }

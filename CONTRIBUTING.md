@@ -18,7 +18,7 @@ bunx playwright install chromium
 bun run verify
 ```
 
-`verify` checks browser-bundle and relay-binary freshness, the pinned Claude SDK, source-distribution version, tooling regressions, native plugin validation and tests, the OMP SDK journey, correctness lint, incremental formatting, four TypeScript boundaries (shared core, Claude, OMP host and browser), and view parity. Formatting covers new handwritten code, not Pierre's original renderers.
+`verify` checks browser-bundle and relay-binary freshness, the pinned Claude SDK, source-distribution version, tooling regressions, native plugin validation and tests, the OMP SDK journey, correctness lint, incremental formatting, four TypeScript boundaries (shared core, Claude, OMP host and browser), and view parity. It includes `bun run test:workspace-git`, a real-Git workspace inventory safety test; the authored test is included in the package gate. Formatting covers new handwritten code, not Pierre's original renderers.
 
 After changing browser sources, run `bun run build:browser` and commit `hosts/browser/dist/app.js` and `app.css`; `bun run check:browser-build` rebuilds and compares bytes. After changing relay sources, use Go 1.27.3 and run `bun run build:relay`, then commit `hosts/relay/bin/brain-trail-relay-{linux,darwin,windows}-{amd64,arm64}[.exe]`; `bun run check:relay-build` cross-builds and compares the six binaries. Browser Three.js 0.160.0, its used addons and their license are bundled locally. The relay distribution includes the x/sys license.
 
@@ -74,7 +74,7 @@ These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.
 
 The host owns replay and shared preview, zoomed and play state. Tabs and WebGL camera remain surface-local. Hosts retain separate durable stores.
 
-Workspace discovery removes Git-reported repository-local environment variables before listing files in the workspace, so inherited `GIT_DIR` or `GIT_INDEX_FILE` cannot redirect that listing to another repository. If discovery cannot use Git, it falls back to filesystem enumeration.
+Workspace discovery removes Git-reported repository-local environment variables before listing files in the workspace, so inherited `GIT_DIR` or `GIT_INDEX_FILE` cannot redirect that listing to another repository. Native `env`/PowerShell and OMP use the same explicit inventory safety arguments: fsmonitor and pager off, hooks pointed at the platform null device, and the `ext` protocol disabled. After stripping local variables they set `GIT_NO_LAZY_FETCH=1`, which suppresses lazy fetching only on Git 2.44 or newer. Ordinary global config, excludes, `safe.directory` and credentials remain available. If discovery cannot use Git, it falls back to filesystem enumeration.
 
 ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT host adapter.
 

@@ -132,7 +132,7 @@ export async function captureBrowserScene(
     return route.continue()
   })
   try {
-    await page.clock.setFixedTime(new Date('2026-11-11T12:00:00.000Z'))
+    await page.clock.install({ time: new Date('2026-11-11T12:00:00.000Z') })
     await page.goto(origin, { waitUntil: 'load' })
     await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
     for (const category of ['read', 'written', 'found', 'linked', 'missing'])
@@ -269,6 +269,11 @@ export async function captureBrowserScene(
       bounds.y + bounds.height / 2,
     )
     await page.mouse.wheel(0, -360)
+    // OrbitControls retains sub-CSSOM damping after spin stops. Pause actual
+    // animation frames only for the publication comparison, not the gesture.
+    const pauseTime = await page.evaluate(() => Date.now() + 1000)
+    await page.clock.pauseAt(pauseTime)
+    const frozenTime = await page.evaluate(() => performance.now())
     const projected = () =>
       canvas.evaluate((element) =>
         [
@@ -284,38 +289,40 @@ export async function captureBrowserScene(
           }
         }),
       )
-    const settled = await canvas.evaluate(async (element) => {
-      const sample = () =>
-        JSON.stringify(
-          [
-            ...element.parentElement.querySelectorAll('.bt-scene-labels span'),
-          ].map((label) => {
-            const parent = label.parentElement.getBoundingClientRect()
-            return [
-              label.textContent,
-              label.style.left,
-              label.style.top,
-              parent.x,
-              parent.y,
-              parent.width,
-              parent.height,
-              label.hidden,
-            ]
+    const waitMeter = (value) => {
+      let timer
+      const observed = page.evaluate(
+        (text) =>
+          new Promise((resolve) => {
+            const app = document.querySelector('#app')
+            const observer = new MutationObserver(() => {
+              if (app?.textContent?.includes(text)) {
+                observer.disconnect()
+                resolve()
+              }
+            })
+            observer.observe(app, {
+              childList: true,
+              subtree: true,
+              characterData: true,
+            })
+            if (app.textContent.includes(text)) {
+              observer.disconnect()
+              resolve()
+            }
           }),
+        `${value} %`,
+      )
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`meter update ${value} did not render`)),
+          10000,
         )
-      let previous = ''
-      let unchanged = 0
-      for (let frame = 0; frame < 1200; frame++) {
-        await new Promise((resolve) => requestAnimationFrame(resolve))
-        const current = sample()
-        unchanged = current === previous ? unchanged + 1 : 0
-        if (unchanged >= 30 && current !== '[]') return true
-        previous = current
-      }
-      return false
-    })
-    if (!settled)
-      throw new Error('projected WebGL labels did not settle after zoom')
+      })
+      return Promise.race([observed, timeout]).finally(() =>
+        clearTimeout(timer),
+      )
+    }
     const projectionBefore = await projected()
     if (projectionBefore.length < 2)
       throw new Error(
@@ -378,14 +385,16 @@ export async function captureBrowserScene(
         meter: { ...snapshot.facts.meter, percent: 43 },
       },
     }
+    const meter43 = waitMeter(43)
     for (const client of clients)
       client.write(`data: ${JSON.stringify(layout)}\n\n`)
     for (const client of clients)
       client.write(`data: ${JSON.stringify(ordinary)}\n\n`)
-    await page
-      .getByText('43 %', { exact: false })
-      .first()
-      .waitFor({ state: 'visible' })
+    await meter43
+    if (!(await page.getByText('43 %', { exact: false }).first().isVisible()))
+      throw new Error('43% meter update was not visible')
+    if ((await page.evaluate(() => performance.now())) !== frozenTime)
+      throw new Error('browser clock advanced during first publication')
     if (!(await canvas.evaluate((el) => el.isConnected)))
       throw new Error('ordinary update replaced the WebGL canvas')
     const cameraStable = await canvas.evaluate((element, coordinates) => {
@@ -432,12 +441,14 @@ export async function captureBrowserScene(
         meter: { ...ordinary.facts.meter, percent: 44 },
       },
     }
+    const meter44 = waitMeter(44)
     for (const client of clients)
       client.write(`data: ${JSON.stringify(secondPublish)}\n\n`)
-    await page
-      .getByText('44 %', { exact: false })
-      .first()
-      .waitFor({ state: 'visible' })
+    await meter44
+    if (!(await page.getByText('44 %', { exact: false }).first().isVisible()))
+      throw new Error('44% meter update was not visible')
+    if ((await page.evaluate(() => performance.now())) !== frozenTime)
+      throw new Error('browser clock advanced during second publication')
     const secondStable = await canvas.evaluate((element, coordinates) => {
       const tip = element.parentElement?.querySelector('.bt-tip')
       return coordinates.every(([name, point]) => {
@@ -469,6 +480,7 @@ export async function captureBrowserScene(
           },
         )}`,
       )
+    await page.clock.resume()
     await second.body.cancel()
     const hiddenNames = {
       ...ordinary,

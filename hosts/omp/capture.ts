@@ -28,7 +28,7 @@ import {
   DEFAULT_SETTINGS,
   findArgv,
   fromFind,
-  GIT_LS,
+  gitInventoryArgv,
   hash,
   initialSettings,
   isShallow,
@@ -242,18 +242,24 @@ export function registerCapture(
                 ([name]) =>
                   !excluded.has(
                     process.platform === 'win32' ? name.toUpperCase() : name,
-                  ),
+                  ) &&
+                  (process.platform !== 'win32' ||
+                    name.toUpperCase() !== 'GIT_NO_LAZY_FETCH'),
               ),
             )
-            const git = Bun.spawn([...GIT_LS], {
-              cwd: canonical,
-              env,
-              timeout: 20000,
-              signal,
-              stdin: 'ignore',
-              stdout: 'pipe',
-              stderr: 'ignore',
-            })
+            env.GIT_NO_LAZY_FETCH = '1'
+            const git = Bun.spawn(
+              gitInventoryArgv(process.platform === 'win32'),
+              {
+                cwd: canonical,
+                env,
+                timeout: 20000,
+                signal,
+                stdin: 'ignore',
+                stdout: 'pipe',
+                stderr: 'ignore',
+              },
+            )
             const [stdout, code] = await Promise.all([
               new Response(git.stdout).text(),
               git.exited,

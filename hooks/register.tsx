@@ -14,7 +14,7 @@ import { sliceToStep } from './fold'
 import { assembleCapture, needsMcpScan, needsTouch } from './acts'
 import { costStats, keepCosts, limitOf, projectFiles, usd, zoneOf } from './readout'
 import type { CostEntry } from './readout'
-import { DEFAULT_SETTINGS, findArgv, fromFind, GIT_LS, hash, initialSettings, isShallow, pickFiles, vaultProbe } from './workspace'
+import { DEFAULT_SETTINGS, findArgv, fromFind, nativeGitInventoryArgv, hash, initialSettings, isShallow, pickFiles, vaultProbe } from './workspace'
 import { cameraDuringGesture, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
 import type { Drawn2d, DrawnFrames, FoldFacts, Step, TabSnapshot, ViewActions, ViewChild, ViewIntent, ViewProps, ViewRuntime, ViewSnapshot, ViewTag } from '../types/view'
 import type { DashboardFeed, FactsWire, HostCommand, CommandReplies, CommandRefusal, LayoutWire, ServerEvent } from '../types/browser'
@@ -109,12 +109,7 @@ const listFiles = async ($: EngineInterface, root: string) => {
   const localVars = shallow ? undefined : await $.process.run(['git', 'rev-parse', '--local-env-vars'], { cwd: root, timeoutMs: 20000 }).catch(() => undefined)
   const reported = localVars?.exitCode === 0 ? localVars.stdout.trim().split(/\r?\n/) : []
   const valid = reported.length > 0 && reported.every(name => /^GIT_[A-Z0-9_]+$/.test(name))
-  const names = reported
-  const gitArgv = windows
-    ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
-        `${names.map(name => `Remove-Item Env:${name} -ErrorAction SilentlyContinue`).join('; ')}; & git ${GIT_LS.slice(1).map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')}; exit $LASTEXITCODE`]
-    : ['env', ...names.flatMap(name => ['-u', name]), ...GIT_LS]
-  const git = valid ? await $.process.run(gitArgv, { cwd: root, timeoutMs: 20000 }).catch(() => undefined) : undefined
+  const git = valid ? await $.process.run(nativeGitInventoryArgv(windows, reported), { cwd: root, timeoutMs: 20000 }).catch(() => undefined) : undefined
   let raw = git !== undefined && git.exitCode === 0 ? git.stdout : ''
   if (raw === '') {
     const argv = windows

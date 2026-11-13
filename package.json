@@ -27,7 +27,8 @@
     "prepare": "node scripts/install-lefthook.mjs",
     "test:tooling": "node --test scripts/quality.test.mjs",
     "test:omp": "bun scripts/omp-test.mjs",
-    "verify": "bun run check:browser-build && bun run check:relay-build && bun run check:sdk && bun run check:release && bun run test:tooling && bun run validate && bun run test && bun run test:omp && bun run lint && bun run format && bun run typecheck:core && bun run typecheck && bun run typecheck:omp && bun run check:views"
+    "test:workspace-git": "bun test tests/workspace-git.test.mjs",
+    "verify": "bun run check:browser-build && bun run check:relay-build && bun run check:sdk && bun run check:release && bun run test:tooling && bun run validate && bun run test && bun run test:omp && bun run test:workspace-git && bun run lint && bun run format && bun run typecheck:core && bun run typecheck && bun run typecheck:omp && bun run check:views"
   },
   "devDependencies": {
     "@anthropic-ai/claude-code": "2.1.322",

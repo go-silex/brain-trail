@@ -22,14 +22,50 @@ export const isShallow = (root: string, home: string) =>
   root === '/' ||
   root === '/Users' ||
   root === '/home'
-export const GIT_LS = [
+export const gitInventoryArgv = (windows: boolean): string[] => [
   'git',
+  '--no-pager',
   '-c',
   'core.quotePath=false',
+  '-c',
+  'core.fsmonitor=',
+  '-c',
+  `core.hooksPath=${windows ? '\\\\.\\NUL' : '/dev/null'}`,
+  '-c',
+  'protocol.ext.allow=never',
+  '-c',
+  'core.askPass=',
+  '-c',
+  'submodule.recurse=false',
   'ls-files',
   '-co',
   '--exclude-standard',
 ]
+export const nativeGitInventoryArgv = (
+  windows: boolean,
+  names: readonly string[],
+): string[] => {
+  if (!names.length || !names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name)))
+    throw new Error('Invalid Git local environment names')
+  const gitArgs = gitInventoryArgv(windows)
+  return windows
+    ? [
+        'powershell.exe',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `${names.map((name) => `Remove-Item Env:${name} -ErrorAction SilentlyContinue`).join('; ')}; $env:GIT_NO_LAZY_FETCH='1'; & git ${gitArgs
+          .slice(1)
+          .map((arg) => `'${arg.replace(/'/g, "''")}'`)
+          .join(' ')}; exit $LASTEXITCODE`,
+      ]
+    : [
+        'env',
+        ...names.flatMap((name) => ['-u', name]),
+        'GIT_NO_LAZY_FETCH=1',
+        ...gitArgs,
+      ]
+}
 export const findArgv = (shallow: boolean): string[] => {
   const heavy = [
     'node_modules',

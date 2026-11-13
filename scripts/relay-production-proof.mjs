@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const version = process.env.RELAY_CLAUDE_VERSION || '2.1.322'
@@ -49,6 +49,7 @@ const alive = (pid) => {
     return error.code === 'EPERM'
   }
 }
+let pidDiagnostic = {}
 const relayPid = (binary) => {
   let result
   if (process.platform === 'win32') {
@@ -80,12 +81,49 @@ const relayPid = (binary) => {
     .split(/\s+/)
     .filter(Boolean)
     .map(Number)
-  return result.status === 0 &&
-    pids.length === 1 &&
-    Number.isSafeInteger(pids[0]) &&
-    pids[0] > 0
-    ? pids[0]
-    : 0
+  pidDiagnostic = {
+    status: result.status,
+    signal: result.signal,
+    errorCode: result.error?.code || null,
+    matches: pids.length,
+    validPid: pids.length === 1 && Number.isSafeInteger(pids[0]) && pids[0] > 0,
+  }
+  if (process.platform === 'win32' && !pidDiagnostic.validPid) {
+    const literal = binary.replaceAll("'", "''")
+    const details = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'brain-trail-relay-*' }); $p | ForEach-Object { [PSCustomObject]@{ name=$_.Name; hasPath=[bool]$_.ExecutablePath; expected=($_.ExecutablePath -eq '${literal}') } } | ConvertTo-Json -Compress`,
+      ],
+      { encoding: 'utf8', timeout: 10000, maxBuffer: 65536, windowsHide: true },
+    )
+    let candidates = []
+    try {
+      const value = JSON.parse(details.stdout || '[]')
+      candidates = (Array.isArray(value) ? value : [value])
+        .filter(
+          (item) =>
+            typeof item?.name === 'string' &&
+            /^brain-trail-relay-[a-z0-9.-]+$/i.test(item.name),
+        )
+        .slice(0, 8)
+        .map((item) => ({
+          name: item.name,
+          hasPath: item.hasPath === true,
+          expected: item.expected === true,
+        }))
+    } catch {}
+    pidDiagnostic = {
+      ...pidDiagnostic,
+      candidateStatus: details.status,
+      candidateErrorCode: details.error?.code || null,
+      candidates,
+    }
+  }
+  return result.status === 0 && pidDiagnostic.validPid ? pids[0] : 0
 }
 const temp = mkdtempSync(
   join(process.platform === 'win32' ? tmpdir() : '/tmp', 'btr-proof-'),
@@ -263,25 +301,72 @@ try {
     'missing private socket or launch file',
   )
   const os = process.platform === 'win32' ? 'windows' : process.platform
-  const arch = process.arch === 'x64' ? 'amd64' : process.arch
-  binary = join(
+  const runnerArch = (process.env.RUNNER_ARCH || process.arch).toLowerCase()
+  const arch =
+    runnerArch === 'x64' || runnerArch === 'amd64'
+      ? 'amd64'
+      : runnerArch === 'arm64' || runnerArch === 'aarch64'
+        ? 'arm64'
+        : ''
+  assert(arch, `unsupported runner architecture: ${runnerArch}`)
+  assert(
+    typeof report.binary === 'string',
+    'SDK fixture did not report the selected production binary',
+  )
+  const expected = join(
     plugin,
     'hosts/relay/bin',
     `brain-trail-relay-${os}-${arch}${process.platform === 'win32' ? '.exe' : ''}`,
   )
+  const samePath = (a, b) =>
+    process.platform === 'win32'
+      ? resolve(a).toLowerCase() === resolve(b).toLowerCase()
+      : resolve(a) === resolve(b)
+  assert(
+    samePath(report.binary, expected),
+    `SDK selected wrong packaged relay: selected=${basename(report.binary)} expected=${basename(expected)} nodeArch=${process.arch} runnerArch=${runnerArch}`,
+  )
+  binary = resolve(report.binary)
   pid = relayPid(binary)
-  assert(pid && alive(pid), 'packaged relay process not observed')
+  assert(
+    pid && alive(pid),
+    `packaged relay process not observed: ${JSON.stringify({ ...pidDiagnostic, binary: basename(binary), nodeArch: process.arch, runnerArch, processorArch: process.env.PROCESSOR_ARCHITECTURE || null, processorWow64: process.env.PROCESSOR_ARCHITEW6432 || null })}`,
+  )
   const helper = process.env.RELAY_CROSS_ACCOUNT_HELPER
   const hosted =
     process.env.GITHUB_ACTIONS === 'true' &&
     process.env.RUNNER_ENVIRONMENT === 'github-hosted'
   const supported = ['linux', 'darwin', 'win32'].includes(process.platform)
-  const runHelper = (...args) =>
-    spawnSync(process.execPath, [helper, ...args], {
+  const runHelper = (...args) => {
+    const result = spawnSync(process.execPath, [helper, ...args], {
       timeout: 75000,
-      stdio: 'ignore',
+      encoding: 'utf8',
+      maxBuffer: 65536,
       windowsHide: true,
-    }).status === 0
+    })
+    if (result.status !== 0) {
+      const phases = [
+        ...(result.stderr || '').matchAll(
+          /cross-account-phase=([a-z0-9-]{1,64}) error-class=([a-z0-9-]{1,64})/g,
+        ),
+      ]
+        .slice(0, 5)
+        .map((match) => ({ phase: match[1], errorClass: match[2] }))
+      console.error(
+        JSON.stringify({
+          operation:
+            args[0] === '--owner' || args[0] === '--closed'
+              ? args[0]
+              : 'negative',
+          status: result.status,
+          signal: result.signal,
+          errorCode: result.error?.code || null,
+          phases,
+        }),
+      )
+    }
+    return result.status === 0
+  }
   const ownerConnects = () =>
     new Promise((done) => {
       const connection = connect(socket)

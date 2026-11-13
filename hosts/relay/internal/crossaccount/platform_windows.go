@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -51,26 +52,34 @@ func isPermission(err error) bool {
 func verifyIdentity(r request) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return err
+		return phase("token-user", err)
 	}
-	if user.User.Sid.String() != "S-1-5-19" || r.Owner == "" || r.Owner == user.User.Sid.String() {
-		return errors.New("service identity is not distinct LocalService")
+	if user.User.Sid.String() != "S-1-5-19" {
+		return phase("not-localservice", errors.New("unexpected service principal"))
+	}
+	if r.Owner == "" {
+		return phase("owner-sid-missing", errors.New("owner unavailable"))
+	}
+	if r.Owner == user.User.Sid.String() {
+		return phase("owner-sid-matches-service", errors.New("service owns relay directory"))
 	}
 	adminSID, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
-		return err
+		return phase("admin-sid", err)
 	}
 	admin, err := windows.Token(0).IsMember(adminSID)
 	if err != nil {
-		return err
+		return phase("admin-membership", err)
 	}
 	if admin {
-		return errors.New("LocalService token is an administrator")
+		return phase("admin-member", errors.New("service token is administrator"))
 	}
 	return nil
 }
 
 func execute(stage string, r request) (result error) {
+	stageName := "owner-info"
+	defer func() { result = phase(stageName, result) }()
 	sd, err := windows.GetNamedSecurityInfo(r.Directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return err
@@ -79,6 +88,7 @@ func execute(stage string, r request) (result error) {
 	if err != nil || owner == nil {
 		return errors.New("cannot inspect relay directory owner")
 	}
+	stageName = "stage-executable"
 	r.Owner = owner.String()
 	src, err := os.Executable()
 	if err != nil {
@@ -106,12 +116,14 @@ func execute(stage string, r request) (result error) {
 	if err != nil {
 		return err
 	}
+	stageName = "scm-connect"
 	name := "BrainTrailProof-" + r.Nonce
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
 	}
 	defer m.Disconnect()
+	stageName = "scm-create"
 	service, err := m.CreateService(name, exe, mgr.Config{StartType: mgr.StartManual, ServiceStartName: `NT AUTHORITY\LocalService`}, "--hosted-service", name, string(arg), filepath.Join(stage, "report.json"))
 	if err != nil {
 		return err
@@ -119,7 +131,7 @@ func execute(stage string, r request) (result error) {
 	defer func() {
 		_, stopErr := service.Control(svc.Stop)
 		if stopErr != nil && !errors.Is(stopErr, windows.ERROR_SERVICE_NOT_ACTIVE) && result == nil {
-			result = fmt.Errorf("stop service: %w", stopErr)
+			result = phase("scm-stop", stopErr)
 		}
 		deadline := time.Now().Add(10 * time.Second)
 		stopped := false
@@ -127,7 +139,7 @@ func execute(stage string, r request) (result error) {
 			status, e := service.Query()
 			if e != nil {
 				if result == nil {
-					result = fmt.Errorf("query service: %w", e)
+					result = phase("scm-query", e)
 				}
 				break
 			}
@@ -138,34 +150,53 @@ func execute(stage string, r request) (result error) {
 			time.Sleep(100 * time.Millisecond)
 		}
 		if !stopped && result == nil {
-			result = errors.New("service did not stop before cleanup deadline")
+			result = phase("scm-stop-timeout", errors.New("service did not stop"))
 		}
 		if e := service.Delete(); e != nil && result == nil {
-			result = fmt.Errorf("delete service: %w", e)
+			result = phase("scm-delete", e)
 		}
 		if e := service.Close(); e != nil && result == nil {
-			result = e
+			result = phase("scm-close", e)
 		}
 	}()
+	stageName = "scm-start"
 	if err = service.Start(); err != nil {
 		return fmt.Errorf("start LocalService: %w", err)
 	}
+	stageName = "service-report"
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		data, e := os.ReadFile(filepath.Join(stage, "report.json"))
 		if e == nil {
 			var answer report
-			if len(data) > 4096 || json.Unmarshal(data, &answer) != nil || !answer.OK {
-				return fmt.Errorf("other-account probe failed: %s", answer.Error)
+			if len(data) > 4096 || json.Unmarshal(data, &answer) != nil {
+				return errors.New("invalid service report")
+			}
+			if !answer.OK {
+				if !safeRemote(answer.Error) {
+					return errors.New("invalid service diagnostic")
+				}
+				return &remoteDiagnostic{value: answer.Error}
 			}
 			return nil
 		}
 		if !errors.Is(e, os.ErrNotExist) {
 			return e
 		}
+		status, queryErr := service.Query()
+		if queryErr != nil {
+			return phase("scm-query", queryErr)
+		}
+		if status.State == svc.Stopped {
+			code := status.Win32ExitCode
+			if status.ServiceSpecificExitCode != 0 {
+				code = status.ServiceSpecificExitCode
+			}
+			return phase("service-exited", syscall.Errno(code))
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return errors.New("LocalService report timed out")
+	return phase("timeout", errors.New("LocalService report timed out"))
 }
 
 type proofService struct {
@@ -175,25 +206,36 @@ type proofService struct {
 
 func (p *proofService) Execute(_ []string, commands <-chan svc.ChangeRequest, statuses chan<- svc.Status) (bool, uint32) {
 	statuses <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
-	done := make(chan struct{})
+	done := make(chan uint32, 1)
 	go func() {
 		err := probe(p.request)
 		answer := report{OK: err == nil}
 		if err != nil {
-			answer.Error = err.Error()
+			answer.Error = diagnostic(err)
 		}
 		data, e := json.Marshal(answer)
-		if e == nil {
-			tmp := p.reportPath + ".tmp"
-			if os.WriteFile(tmp, data, 0600) == nil {
-				_ = os.Rename(tmp, p.reportPath)
-			}
+		if e != nil {
+			done <- 1001
+			return
 		}
-		close(done)
+		tmp := p.reportPath + ".tmp"
+		if e = os.WriteFile(tmp, data, 0600); e != nil {
+			done <- 1002
+			return
+		}
+		if e = os.Rename(tmp, p.reportPath); e != nil {
+			done <- 1003
+			return
+		}
+		done <- 0
 	}()
 	for {
 		select {
-		case <-done:
+		case code := <-done:
+			if code != 0 {
+				statuses <- svc.Status{State: svc.StopPending}
+				return true, code
+			}
 			done = nil
 		case c := <-commands:
 			if c.Cmd == svc.Stop || c.Cmd == svc.Shutdown {

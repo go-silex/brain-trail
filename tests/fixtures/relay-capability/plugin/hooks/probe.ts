@@ -1,5 +1,10 @@
 // Disposable real-SDK capability evidence, not a product bridge.
 import type { Register } from 'claude-code'
+import {
+  gitInventoryArgv,
+  nativeGitInventoryArgv,
+  pickFiles,
+} from '../../../../../hooks/workspace'
 
 export const register: Register = (on) => {
   let roundtripPassed = false
@@ -47,6 +52,7 @@ export const register: Register = (on) => {
     const cwd = await $.session.cwd()
     let socketPath = ''
     let pid = 0
+    let gitEncoding: unknown
     let privacy:
       | {
           kind: string
@@ -76,6 +82,90 @@ export const register: Register = (on) => {
     })
     let timer: { cancel: () => void } | undefined
     try {
+      const windows =
+        (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
+      if (windows) {
+        const gitCwd = `${cwd}/git-unicode`
+        const gitLs = gitInventoryArgv(true)
+        const localVars = await $.process.run(
+          ['git', 'rev-parse', '--local-env-vars'],
+          { cwd: gitCwd, timeoutMs: 20000 },
+        )
+        const names =
+          localVars.exitCode === 0 ? localVars.stdout.trim().split(/\r?\n/) : []
+        if (
+          !names.length ||
+          !names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name))
+        )
+          throw new Error('Git local environment discovery failed')
+        const metadata = await $.process.run(
+          [
+            'powershell.exe',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            '[PSCustomObject]@{version=$PSVersionTable.PSVersion.ToString(); outputCodePage=[Console]::OutputEncoding.CodePage; inputCodePage=[Console]::InputEncoding.CodePage; outputEncoding=$OutputEncoding.WebName} | ConvertTo-Json -Compress',
+          ],
+          { cwd: gitCwd, timeoutMs: 20000 },
+        )
+        const direct = await $.process.run(gitLs, {
+          cwd: gitCwd,
+          timeoutMs: 20000,
+        })
+        const wrappedArgv = nativeGitInventoryArgv(true, names)
+        const wrapped = await $.process.run(wrappedArgv, {
+          cwd: gitCwd,
+          timeoutMs: 20000,
+        })
+        // This explores explicit transcription, not policy-enforced transcription.
+        const transcriptPath = `${$.plugin.root}/git-transcript.txt`.replace(
+          /'/g,
+          "''",
+        )
+        const transcriptArgv = [...wrappedArgv]
+        transcriptArgv[4] = `try { Start-Transcript -Path '${transcriptPath}' -ErrorAction Stop | Out-Null } catch { exit 97 }; ${wrappedArgv[4]}`
+        const transcribed = await $.process.run(transcriptArgv, {
+          cwd: gitCwd,
+          timeoutMs: 20000,
+        })
+        let transcribedProductPaths: string[] | undefined
+        try {
+          transcribedProductPaths = pickFiles(transcribed.stdout, false, gitCwd)
+        } catch {}
+        gitEncoding = {
+          metadata: metadata.stdout.trim(),
+          metadataExit: metadata.exitCode,
+          directExit: direct.exitCode,
+          wrappedExit: wrapped.exitCode,
+          directStdout: direct.stdout,
+          wrappedStdout: wrapped.stdout,
+          transcribedExit: transcribed.exitCode,
+          transcribedStdout: transcribed.stdout,
+          transcribedStderr: transcribed.stderr,
+          transcribedTruncated: transcribed.isStdoutTruncated,
+          transcribedProductPaths,
+          transcribedMatchesDirect: transcribed.stdout === direct.stdout,
+          transcription:
+            'explicit Start-Transcript; not policy-enforced transcription',
+          directTruncated: direct.isStdoutTruncated,
+          wrappedTruncated: wrapped.isStdoutTruncated,
+        }
+        const expected = JSON.stringify(['ascii.txt', 'café-漢-😀.txt'].sort())
+        if (
+          metadata.exitCode !== 0 ||
+          !/"version"\s*:\s*"5\.1\./.test(metadata.stdout) ||
+          !/"outputCodePage"\s*:\s*\d+/.test(metadata.stdout) ||
+          direct.exitCode !== 0 ||
+          wrapped.exitCode !== 0 ||
+          direct.isStdoutTruncated ||
+          wrapped.isStdoutTruncated ||
+          direct.stdout !== wrapped.stdout ||
+          JSON.stringify(pickFiles(direct.stdout, false, gitCwd)) !==
+            expected ||
+          JSON.stringify(pickFiles(wrapped.stdout, false, gitCwd)) !== expected
+        )
+          throw new Error('Windows PowerShell Git Unicode discriminator failed')
+      }
       const binary = (
         await $.fs.read(`${$.plugin.root}/relay-binary.txt`)
       ).trim()
@@ -202,6 +292,7 @@ export const register: Register = (on) => {
         socketPath,
         privacy,
         acknowledgements,
+        gitEncoding,
       }
       await $.fs.write(`${cwd}/probe-report.json`, JSON.stringify(report))
       return { text: JSON.stringify(report) }
@@ -212,6 +303,7 @@ export const register: Register = (on) => {
         socketPath,
         privacy,
         acknowledgements,
+        gitEncoding,
         error: String(error).slice(0, 500),
       }
       await $.fs

@@ -33,7 +33,6 @@ const summary = {
   platform,
   claude: version,
   distribution: 'CI-built fixture; not packaged release proof',
-  declaredMinimumClaude: '2.1.275 (README)',
   result: 'failed',
   gatewayRequests: [],
   windowsAcl: 'not-applicable',
@@ -92,6 +91,17 @@ try {
   cpSync(join(root, 'tests/fixtures/relay-capability/plugin'), plugin, {
     recursive: true,
   })
+  // Materialize the current product helpers without maintaining a probe copy.
+  cpSync(join(root, 'hooks/workspace.ts'), join(plugin, 'hooks/workspace.ts'))
+  cpSync(join(root, 'hooks/files.ts'), join(plugin, 'hooks/files.ts'))
+  mkdirSync(join(plugin, 'types'))
+  cpSync(join(root, 'types/model.ts'), join(plugin, 'types/model.ts'))
+  const probePath = join(plugin, 'hooks/probe.ts')
+  const probeSource = readFileSync(probePath, 'utf8')
+  const sourceImport = "'../../../../../hooks/workspace'"
+  if (probeSource.split(sourceImport).length !== 2)
+    fail('Expected exactly one product helper import in capability probe')
+  writeFileSync(probePath, probeSource.replace(sourceImport, "'./workspace'"))
   const binaryName =
     process.platform === 'win32' ? 'relay-capability.exe' : 'relay-capability'
   writeFileSync(join(plugin, 'relay-binary.txt'), binaryName)
@@ -157,8 +167,32 @@ try {
     'WINDIR',
     'COMSPEC',
     'PATHEXT',
+    'OS',
   ])
     if (process.env[key]) env[key] = process.env[key]
+  if (process.platform === 'win32') {
+    const gitWork = join(work, 'git-unicode')
+    mkdirSync(gitWork)
+    for (const name of ['ascii.txt', 'café-漢-😀.txt'])
+      writeFileSync(join(gitWork, name), 'isolated fixture\n')
+    const gitEnv = { ...env, GIT_CONFIG_NOSYSTEM: '1' }
+    for (const args of [
+      ['init', '-q'],
+      ['add', '--', 'ascii.txt', 'café-漢-😀.txt'],
+    ]) {
+      const result = spawnSync('git', args, {
+        cwd: gitWork,
+        env: gitEnv,
+        encoding: 'utf8',
+        timeout: 20000,
+        windowsHide: true,
+      })
+      if (result.error || result.status !== 0)
+        fail(
+          `Isolated Git fixture setup failed: ${result.stderr || result.error || result.status}`,
+        )
+    }
+  }
   if (override) {
     const actual = spawnSync(claude, ['--version'], {
       cwd: work,
@@ -237,6 +271,8 @@ try {
   report = readJson(join(work, 'probe-report.json')) || report
   if (process.platform === 'win32')
     summary.windowsAcl = report?.privacy ?? 'missing'
+  if (process.platform === 'win32')
+    summary.gitEncoding = report?.gitEncoding ?? 'missing'
   const end = readJson(join(work, 'probe-end.json'))
   if (summary.gatewayRequestCount)
     fail('Unexpected inert gateway request attempted')
@@ -244,6 +280,8 @@ try {
     fail('Headless command timed out; route or session termination unproven')
   if (report?.error)
     fail(`Fixture error: ${String(report.error).slice(0, 1024)}`)
+  if (process.platform === 'win32' && !report?.gitEncoding)
+    fail('Windows Git Unicode discriminator did not run')
   if (spawnError || exitCode !== 0)
     fail(`Claude startup or headless command failed (exit ${exitCode})`)
   if (
