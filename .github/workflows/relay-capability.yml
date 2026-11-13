@@ -1,0 +1,60 @@
+name: Temporary relay capability probe
+
+on:
+  push:
+    branches: [feat/shared-rendering]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-capability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: ${{ matrix.platform.target }} / Claude ${{ matrix.claude }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        claude: ['2.1.322', '2.1.321']
+        platform:
+          - { target: linux-x64, runner: ubuntu-24.04 }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: macos-x64, runner: macos-15-intel }
+          - { target: macos-arm64, runner: macos-15 }
+          - { target: windows-x64, runner: windows-2022 }
+          - { target: windows-arm64, runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Install genuine pinned CLI outside checkout
+        shell: bash
+        run: npm install --prefix "$RUNNER_TEMP/relay-cli" --no-save --ignore-scripts --no-audit --no-fund "@anthropic-ai/claude-code@${{ matrix.claude }}"
+      - name: Probe isolated SDK and Go relay
+        shell: bash
+        env:
+          RELAY_CLI_ROOT: ${{ runner.temp }}/relay-cli
+          RELAY_CLAUDE_VERSION: ${{ matrix.claude }}
+          RELAY_PROBE_OUTPUT: ${{ github.workspace }}/relay-probe-output
+        run: node scripts/relay-platform-probe.mjs
+      - name: Upload synthetic probe summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.platform.target }}-${{ matrix.claude }}
+          path: relay-probe-output/
+          if-no-files-found: warn
+          retention-days: 3
