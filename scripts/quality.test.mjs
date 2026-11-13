@@ -23,6 +23,7 @@ import {
   decideViewChanges,
   proofFingerprint,
 } from './view-changes.mjs'
+import { fixtureInputProblem } from './view-input.mjs'
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url))
 const candidate = resolve(scriptsDir, '..')
@@ -632,8 +633,9 @@ test('view approvals bind exact proof units and never hide unrelated failures', 
   assert.deepEqual(decide([treeDiff, svgDiff]).errors, [])
   assert.deepEqual(decide([treeDiff, svgDiff]).observed, [treeDiff, svgDiff])
   for (const message of [
-    'browser index.html bytes differ',
-    'browser data.js bytes differ',
+    'browser network request failed',
+    'browser console error',
+    'baseline and candidate fixture input/action transcripts differ',
     'capture failed',
   ]) {
     const strict = { kind: 'operational', message }
@@ -767,4 +769,91 @@ test('view change declarations reject malformed and blanket approvals', () => {
       () => decideViewChanges({ declaration, baseline }),
       /view changes declaration:/,
     )
+})
+
+test('view fixture contract rejects divergent inputs and unperformed actions', () => {
+  const scenario = {
+    id: 'example',
+    component: 'Pane',
+    surface: 'desktop',
+    theme: 'dark',
+    lang: 'en',
+    tab: 'map',
+    phase: 'ready',
+    view3d: true,
+    browser3d: true,
+    transition: 'none',
+  }
+  const settings = {
+    openMd: 'default',
+    openOther: 'default',
+    hover: true,
+    band: true,
+  }
+  const capture = {
+    fixture: {
+      input: {
+        scenario,
+        semantic: false,
+        clock: 10000,
+        cwd: '/work/demo',
+        home: '/home/example',
+        files: ['notes/a.md'],
+        noteBody: '# Note A',
+        listing: 'files',
+        state: {
+          tab: 'map',
+          lang: 'en',
+          view3d: true,
+          events: {
+            shape: 'events-1',
+            value: [{ k: 'read', p: 'notes/a.md' }],
+          },
+          meter: { shape: 'meter-1', value: { window: 200000 } },
+          settings: { shape: 'settings-1', value: settings },
+        },
+        store: { lang: 'en', settings },
+        usage: { startedAt: 0 },
+      },
+      actions: ['open-3d'],
+    },
+  }
+  assert.equal(
+    fixtureInputProblem(scenario, capture, structuredClone(capture)),
+    null,
+  )
+  const changed = structuredClone(capture)
+  changed.fixture.input.state.events.value[0].p = 'notes/other.md'
+  assert.match(
+    fixtureInputProblem(scenario, capture, changed),
+    /transcripts differ/,
+  )
+  const omitted = structuredClone(capture)
+  omitted.fixture.actions = []
+  assert.match(
+    fixtureInputProblem(scenario, capture, omitted),
+    /expected actions/,
+  )
+  const missing = structuredClone(capture)
+  delete missing.fixture.input.state.meter
+  assert.match(fixtureInputProblem(scenario, capture, missing), /seeded state/)
+  assert.match(
+    fixtureInputProblem(scenario, capture, {}),
+    /transcript is missing/,
+  )
+  for (const [transition, action] of [
+    ['follow', 'follow'],
+    ['replay', 'play'],
+  ]) {
+    const nextScenario = { ...scenario, browser3d: false, transition }
+    const next = structuredClone(capture)
+    next.fixture.input.scenario = nextScenario
+    next.fixture.actions = [action]
+    assert.equal(fixtureInputProblem(nextScenario, next, next), null)
+    next.fixture.actions = []
+    assert.match(
+      fixtureInputProblem(nextScenario, next, next),
+      /expected actions/,
+    )
+  }
 })

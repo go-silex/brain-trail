@@ -325,6 +325,7 @@ type Held = { value: unknown; version: number }
 export type Host = {
   clock: MockClock
   writes: { path: string; text: string }[]
+  fixtureInput: unknown
   opened: string[][]
   browserEvents: unknown[]
   browserReady: Promise<void>
@@ -524,7 +525,7 @@ export const installHost = (
   on('session.cwd', () => ({ value: CWD }))
   on('session.id', () => ({ value: 'synthetic-session' }))
   on('session.surfaces', () => ({ value: [scenario.surface] }))
-  on('session.usage', () => ({
+  const usage = {
     value: {
       startedAt: 0,
       rateLimits: [],
@@ -575,7 +576,8 @@ export const installHost = (
         },
       },
     },
-  }))
+  }
+  on('session.usage', () => usage)
   on('process.run', async (_$, e) => {
     if (e.argv[0] === 'open' || e.argv[0] === 'xdg-open')
       opened.push([...e.argv])
@@ -693,8 +695,26 @@ export const installHost = (
   }))
   on('prompt.fill', () => ({ isFilled: true }))
 
+  const fixtureInput: unknown = JSON.parse(
+    JSON.stringify({
+      scenario,
+      semantic,
+      clock: NOW,
+      cwd: CWD,
+      home: HOME,
+      files,
+      noteBody: NOTE_BODY,
+      listing: ctl.listing,
+      state: Object.fromEntries(
+        [...state].map(([key, heldState]) => [key, heldState.value]),
+      ),
+      store: Object.fromEntries(store),
+      usage: usage.value,
+    }),
+  )
   return {
     clock,
+    fixtureInput,
     writes,
     opened,
     browserEvents,
@@ -907,6 +927,7 @@ export const captureView = async (
   semantic = false,
 ) => {
   const host = installHost(on, scenario, semantic)
+  const actions: string[] = []
   const ui = await $.ui.mount(mountTarget(scenario))
   await layoutChrome(scenario, ui)
   if (scenario.phase === 'loading') {
@@ -919,17 +940,22 @@ export const captureView = async (
     await host.settled()
     return {
       id: scenario.id,
+      fixture: { input: host.fixtureInput, actions },
       tree,
       svgs: svgsOf(tree),
       artifacts: artifactsOf(host.writes),
     }
   }
   await settleReady(scenario, host, ui)
-  if (scenario.browser3d) await ui.press({ key: 'open-3d' })
+  const press = async (key: string) => {
+    await ui.press({ key })
+    actions.push(key)
+  }
+  if (scenario.browser3d) await press('open-3d')
   if (scenario.browser3d && host.relayStarted()) await host.browserReady
-  if (scenario.transition === 'follow') await ui.press({ key: 'follow' })
-  if (scenario.transition === 'replay') await ui.press({ key: 'play' })
-  if (scenario.phase === 'coach-error') await ui.press({ key: 'coach-run' })
+  if (scenario.transition === 'follow') await press('follow')
+  if (scenario.transition === 'replay') await press('play')
+  if (scenario.phase === 'coach-error') await press('coach-run')
   if (
     scenario.browser3d ||
     scenario.transition !== 'none' ||
@@ -939,6 +965,7 @@ export const captureView = async (
   const tree = await ui.drawn()
   return {
     id: scenario.id,
+    fixture: { input: host.fixtureInput, actions },
     tree,
     svgs: svgsOf(tree),
     browserEvents: host.browserEvents,

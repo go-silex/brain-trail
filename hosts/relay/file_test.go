@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -104,6 +107,7 @@ func TestHeldFileSymlinkAndWorkspaceReplacement(t *testing.T) {
 		if _, err := a.Read(p.ID); err == nil {
 			t.Fatal("changed symlink accepted")
 		}
+		a.Close()
 	} else {
 		t.Fatalf("symlink fixture unavailable: %v", err)
 	}
@@ -114,7 +118,21 @@ func TestHeldFileSymlinkAndWorkspaceReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Rename(root, filepath.Join(base, "old-root")); err != nil {
-		t.Fatal(err)
+		// Windows can prohibit renaming an open directory even when the held
+		// leaf itself permits rename-save. Verify this is containment, not a
+		// skipped replacement: the original remains readable and release must
+		// make the same directory rename possible.
+		if runtime.GOOS != "windows" || !errors.Is(err, syscall.Errno(32)) {
+			t.Fatal(err)
+		}
+		got, readErr := a.Read(p.ID)
+		if readErr != nil || got.Text != inside {
+			t.Fatalf("blocked workspace move changed held file: %+v, %v", got, readErr)
+		}
+		a.Release(p.ID)
+		if err := os.Rename(root, filepath.Join(base, "old-root")); err != nil {
+			t.Fatalf("workspace still cannot move after release: %v", err)
+		}
 	}
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)

@@ -29,6 +29,7 @@ import {
 } from './view-changes.mjs'
 import { probeNativeMapLayout } from './native-map-layout.mjs'
 import { captureBrowserScene } from './browser-parity.mjs'
+import { fixtureInputProblem } from './view-input.mjs'
 
 const CANDIDATE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -544,25 +545,28 @@ const installFixtures = async (baselineRoot, candidateRoot, root) => {
   }
   const staged = path.join(root, 'fixtures')
   await cp(source, staged, { recursive: true })
-  await access(path.join(baselineRoot, FIXTURE))
-  const baselineFixtures = path.join(root, 'baseline-fixtures')
-  await cp(path.join(baselineRoot, 'tests', 'fixtures'), baselineFixtures, {
-    recursive: true,
-  })
-  await rm(path.join(baselineRoot, 'tests'), { recursive: true, force: true })
-  await cp(baselineFixtures, path.join(baselineRoot, 'tests', 'fixtures'), {
-    recursive: true,
-  })
-  await rm(path.join(candidateRoot, 'tests'), { recursive: true, force: true })
-  await cp(staged, path.join(candidateRoot, 'tests', 'fixtures'), {
-    recursive: true,
-  })
+  for (const isolated of [baselineRoot, candidateRoot]) {
+    await rm(path.join(isolated, 'tests'), { recursive: true, force: true })
+    await cp(staged, path.join(isolated, 'tests', 'fixtures'), {
+      recursive: true,
+    })
+  }
   const hashed = await hashTree(staged)
-  const historical = await hashTree(baselineFixtures)
+  const baselineFixture = await hashTree(
+    path.join(baselineRoot, 'tests', 'fixtures'),
+  )
+  const candidateFixture = await hashTree(
+    path.join(candidateRoot, 'tests', 'fixtures'),
+  )
+  if (
+    baselineFixture.sha256 !== hashed.sha256 ||
+    candidateFixture.sha256 !== hashed.sha256
+  )
+    throw new Error('staged common fixture differs between isolated roots')
   return {
     path: FIXTURE,
     sha256: hashed.sha256,
-    baselineSha256: historical.sha256,
+    baselineSha256: baselineFixture.sha256,
     files: hashed.files.length,
     bytes: hashed.bytes,
   }
@@ -909,6 +913,15 @@ const compareCase = async (
   }
   if (!baseline || !candidate) {
     item.errors.push('missing native capture')
+    return { item, differences }
+  }
+  await writeFile(
+    path.join(dir, 'fixture-inputs.json'),
+    `${JSON.stringify({ baseline: baseline.fixture, candidate: candidate.fixture }, null, 2)}\n`,
+  )
+  const fixtureProblem = fixtureInputProblem(scenario, baseline, candidate)
+  if (fixtureProblem) {
+    item.errors.push(fixtureProblem)
     return { item, differences }
   }
   await writeFile(
