@@ -1,4 +1,5 @@
 import type { TrailSettings } from '../types/model'
+import type { SettingsPatch } from '../types/view'
 import type {
   TabSnapshot,
   ViewActions,
@@ -7,6 +8,17 @@ import type {
 } from '../types/view'
 import { strings } from './i18n'
 import { card } from './view-common'
+
+export const applySettingsPatch = (
+  current: TrailSettings,
+  patch: SettingsPatch,
+): TrailSettings => {
+  const { planUsd, ...rest } = patch
+  const next = { ...current, ...rest }
+  if (planUsd === null) delete next.planUsd
+  else if (planUsd !== undefined) next.planUsd = planUsd
+  return next
+}
 
 export const renderSettings = <N, Press>(
   R: ViewRuntime<N, Press>,
@@ -17,8 +29,7 @@ export const renderSettings = <N, Press>(
   const S = strings(s.lang, s.assistant)
   const set = b.settings
   const list = ['preview', 'default', ...b.apps]
-  const save = (patch: Partial<TrailSettings>) =>
-    act.saveSettings({ ...set, ...patch })
+  const save = (patch: SettingsPatch) => act.saveSettings(patch)
   const choice = (
     key: string,
     value: string,
@@ -91,7 +102,7 @@ export const renderSettings = <N, Press>(
           submitLabel: S.save,
           onSubmit: (v: string) => {
             const n = Number(v.replace(',', '.').replace(/[^0-9.]/g, ''))
-            return save({ planUsd: n > 0 ? n : undefined })
+            return save({ planUsd: n > 0 ? n : null })
           },
         }),
       ),

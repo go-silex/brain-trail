@@ -6,10 +6,10 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dist = join(root, 'hosts/omp/browser/dist')
+const dist = join(root, 'hosts/browser/dist')
 const check = process.argv.slice(2)
 if (check.some((arg) => arg !== '--check') || check.length > 1)
-  throw new Error('Usage: bun scripts/build-omp.mjs [--check]')
+  throw new Error('Usage: bun scripts/build-browser.mjs [--check]')
 if (Bun.version !== '1.4.4')
   throw new Error(`Expected Bun 1.4.4, got ${Bun.version}`)
 const licenses = await Promise.all(
@@ -18,6 +18,7 @@ const licenses = await Promise.all(
     ['marked', 'node_modules/marked/LICENSE'],
     ['DOMPurify', 'node_modules/dompurify/LICENSE'],
     ['highlight.js', 'node_modules/highlight.js/LICENSE'],
+    ['three and addons', 'node_modules/three/LICENSE'],
   ].map(
     async ([name, file]) =>
       `${name}:\n${await readFile(join(root, file), 'utf8')}`,
@@ -27,7 +28,7 @@ const banner = `/*! Third-party licenses\n${licenses.join('\n\n').replaceAll('*/
 const temp = await mkdtemp(join(tmpdir(), 'brain-trail-build-'))
 try {
   const result = await Bun.build({
-    entrypoints: [join(root, 'hosts/omp/browser/main.ts')],
+    entrypoints: [join(root, 'hosts/browser/main.ts')],
     outdir: temp,
     root,
     target: 'browser',

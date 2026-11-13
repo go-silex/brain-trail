@@ -19,7 +19,7 @@
       "!.claude-plugin/sdk/**",
       "!node_modules/**",
       "!.artifacts/**",
-      "!hosts/omp/browser/dist/**"
+      "!hosts/browser/dist/**"
     ]
   },
   "formatter": {
@@ -116,10 +116,12 @@
       "includes": [
         "types/model.ts",
         "types/contracts.ts",
+        "types/browser.ts",
         "hooks/acts.ts",
         "hooks/fold.ts",
         "hooks/readout.ts",
         "hooks/pointer.ts",
+        "hooks/scene3d.ts",
         "types/view.ts",
         "hooks/views.ts",
         "hooks/view-*.ts",

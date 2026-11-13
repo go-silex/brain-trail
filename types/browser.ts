@@ -1,4 +1,4 @@
-import type { Layout } from '../../hooks/map'
+import type { Layout } from '../hooks/map'
 import type {
   Coach,
   Lang,
@@ -6,12 +6,15 @@ import type {
   PreviewRef,
   TrailEvent,
   TrailSettings,
-} from '../../types/model'
+} from './model'
 import type {
   CompactOutcome,
   CostHistory,
   InstructionFile,
-} from '../../types/view'
+  SettingsPatch,
+  SharedView,
+  SharedViewIntent,
+} from './view'
 
 export type FactsWire = {
   assistant: string
@@ -44,12 +47,14 @@ export type ServerEvent =
       generation: number
       revision: number
       facts: FactsWire
+      shared: SharedView
     }
   | { v: 1; kind: 'ended'; generation: number }
 export type HostCommand =
   | { kind: 'open'; ref: PreviewRef; app: string }
   | { kind: 'preview-read'; ref: PreviewRef }
-  | { kind: 'settings'; next: TrailSettings }
+  | { kind: 'settings'; patch: SettingsPatch }
+  | { kind: 'view'; intent: SharedViewIntent }
   | { kind: 'lang'; lang: Lang }
   | {
       kind:
@@ -64,6 +69,7 @@ export type CommandReplies = {
   open: { ok: true }
   'preview-read': { ok: true; text: string | null }
   settings: { ok: true }
+  view: { ok: true }
   lang: { ok: true }
   'clear-trail': { ok: true }
   compact: { ok: true; outcome: CompactOutcome }
@@ -74,7 +80,15 @@ export type CommandReplies = {
 }
 export type CommandRefusal = {
   ok: false
-  error: 'stale-generation' | 'invalid' | 'forbidden' | 'unsupported'
+  error:
+    | 'stale-generation'
+    | 'invalid'
+    | 'forbidden'
+    | 'unsupported'
+    | 'busy'
+    | 'timeout'
+    | 'too-large'
+    | 'disconnected'
 }
 export type CommandRequest = { v: 1; generation: number; command: HostCommand }
 export type DashboardFeed = {
@@ -82,6 +96,7 @@ export type DashboardFeed = {
     generation: number
     revision: number
     facts: FactsWire
+    shared: SharedView
     layout: LayoutWire | undefined
   }
   execute<C extends HostCommand>(
@@ -89,7 +104,6 @@ export type DashboardFeed = {
     command: C,
   ): Promise<CommandReplies[C['kind']] | CommandRefusal>
   subscribe(listener: (event: ServerEvent) => void): () => void
-  threeD(): { page: string; data: string } | undefined
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -100,19 +114,50 @@ const ref = (value: unknown): value is PreviewRef =>
   value.p.length > 0 &&
   (value.out === undefined || typeof value.out === 'boolean') &&
   Object.keys(value).every((k) => k === 'p' || k === 'out')
-const settings = (value: unknown): value is TrailSettings =>
+const settings = (value: unknown): value is SettingsPatch =>
   record(value) &&
-  typeof value.openMd === 'string' &&
-  typeof value.openOther === 'string' &&
-  typeof value.hover === 'boolean' &&
-  (value.planUsd === undefined ||
-    (typeof value.planUsd === 'number' &&
-      Number.isFinite(value.planUsd) &&
-      value.planUsd >= 0)) &&
-  (value.band === undefined || typeof value.band === 'boolean') &&
-  Object.keys(value).every((k) =>
-    ['openMd', 'openOther', 'hover', 'planUsd', 'band'].includes(k),
+  Object.keys(value).length > 0 &&
+  Object.entries(value).every(([k, v]) =>
+    k === 'openMd' || k === 'openOther'
+      ? typeof v === 'string'
+      : k === 'hover' || k === 'band'
+        ? typeof v === 'boolean'
+        : k === 'planUsd'
+          ? v === null ||
+            (typeof v === 'number' && Number.isFinite(v) && v >= 0)
+          : false,
   )
+
+const intent = (value: unknown): value is SharedViewIntent => {
+  if (!record(value)) return false
+  const keys = Object.keys(value)
+  switch (value.kind) {
+    case 'preview':
+      return keys.length === 2 && (value.ref === null || ref(value.ref))
+    case 'follow':
+      return keys.length === 2 && typeof value.following === 'boolean'
+    case 'replay-play':
+      return (
+        keys.length === 2 &&
+        Number.isSafeInteger(value.steps) &&
+        (value.steps as number) >= 0
+      )
+    case 'replay-step':
+      return (
+        keys.length === 3 &&
+        (value.by === -1 || value.by === 1) &&
+        Number.isSafeInteger(value.steps) &&
+        (value.steps as number) >= 0
+      )
+    case 'whole':
+    case 'replay-pause':
+    case 'replay-live':
+    case 'replay-reset':
+      return keys.length === 1
+    default:
+      return false
+  }
+}
 
 export const parseCommand = (body: unknown): CommandRequest | undefined => {
   if (
@@ -121,7 +166,8 @@ export const parseCommand = (body: unknown): CommandRequest | undefined => {
     !Number.isSafeInteger(body.generation) ||
     typeof body.generation !== 'number' ||
     body.generation < 1 ||
-    !record(body.command)
+    !record(body.command) ||
+    Object.keys(body).some((k) => !['v', 'generation', 'command'].includes(k))
   )
     return undefined
   const c = body.command
@@ -136,8 +182,12 @@ export const parseCommand = (body: unknown): CommandRequest | undefined => {
       command = { kind: 'preview-read', ref: c.ref }
       break
     case 'settings':
-      if (!settings(c.next)) return undefined
-      command = { kind: 'settings', next: c.next }
+      if (!settings(c.patch)) return undefined
+      command = { kind: 'settings', patch: c.patch }
+      break
+    case 'view':
+      if (!intent(c.intent)) return undefined
+      command = { kind: 'view', intent: c.intent }
       break
     case 'lang':
       if (c.lang !== 'en' && c.lang !== 'fr') return undefined
@@ -154,5 +204,18 @@ export const parseCommand = (body: unknown): CommandRequest | undefined => {
     default:
       return undefined
   }
+  const allowed =
+    command.kind === 'open'
+      ? ['kind', 'ref', 'app']
+      : command.kind === 'preview-read'
+        ? ['kind', 'ref']
+        : command.kind === 'settings'
+          ? ['kind', 'patch']
+          : command.kind === 'view'
+            ? ['kind', 'intent']
+            : command.kind === 'lang'
+              ? ['kind', 'lang']
+              : ['kind']
+  if (Object.keys(c).some((k) => !allowed.includes(k))) return undefined
   return { v: 1, generation: body.generation, command }
 }

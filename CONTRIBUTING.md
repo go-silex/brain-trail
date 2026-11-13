@@ -10,7 +10,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not
 
 ## Development checks
 
-The Claude plugin is distributed as source. The OMP package includes committed browser assets; users do not need to build them. Development tools are pinned in `package.json`; the quality workflow uses Bun 1.4.4 and Node 22.22.0.
+The Claude plugin is distributed as source with committed browser assets and six standalone Go relay binaries. Claude end users need no Node, Bun or Go installation or lifecycle build. Development tools are pinned in `package.json`; CI uses Bun 1.4.4, Node 22.22.0 and Go 1.27.3.
 
 ```bash
 bun install --frozen-lockfile --ignore-scripts
@@ -18,21 +18,23 @@ bunx playwright install chromium
 bun run verify
 ```
 
-`verify` checks browser-bundle freshness, the pinned Claude SDK, source-distribution version, tooling regressions, native plugin validation and tests, the OMP SDK journey, correctness lint, incremental formatting, four TypeScript boundaries (shared core, Claude, OMP host and browser), and view parity. Formatting covers new handwritten code, not Pierre's original renderers.
+`verify` checks browser-bundle and relay-binary freshness, the pinned Claude SDK, source-distribution version, tooling regressions, native plugin validation and tests, the OMP SDK journey, correctness lint, incremental formatting, four TypeScript boundaries (shared core, Claude, OMP host and browser), and view parity. Formatting covers new handwritten code, not Pierre's original renderers.
 
-After changing OMP browser sources, run `bun run build:omp` and commit the resulting assets in `hosts/omp/browser/dist/`. `bun run check:omp-build` rebuilds to temporary output and compares bytes against the committed bundle.
+After changing browser sources, run `bun run build:browser` and commit `hosts/browser/dist/app.js` and `app.css`; `bun run check:browser-build` rebuilds and compares bytes. After changing relay sources, use Go 1.27.3 and run `bun run build:relay`, then commit `hosts/relay/bin/brain-trail-relay-{linux,darwin,windows}-{amd64,arm64}[.exe]`; `bun run check:relay-build` cross-builds and compares the six binaries. Browser Three.js 0.160.0, its used addons and their license are bundled locally. The relay distribution includes the x/sys license.
 
 Install the optional local Lefthook checks with `bun run prepare`. The guarded installer never changes `core.hooksPath`. Git worktrees share their canonical hooks directory; existing hooks are accepted only when their exact bytes match this project's installation receipt. Unowned or modified hooks are left untouched.
 
 Runtime source changes require a newer plugin version and a matching marketplace entry. With an OMP manifest, the root package version must match them. Changes to root `omp`, `files`, `exports`, `dependencies`, `optionalDependencies`, `peerDependencies` or `engines` count as runtime changes; scripts and dev dependencies alone do not. The baseline is `VIEW_BASE`, then `RELEASE_BASE`, then `origin/main`. CI supplies the event's baseline; an all-zero default-branch baseline is refused rather than compared to the candidate itself.
 
-The quality workflow also validates and tests a complete source copy without `.git` or `node_modules`, exercising the marketplace's root source rather than a separate development entry point.
+The quality workflow validates and tests an archived source copy without `.git` or `node_modules`. Its production relay matrix runs Go tests and an archived-package SDK fixture across six hosted OS/architecture targets and Claude CLI 2.1.321/2.1.322. It checks cross-account isolation on hosted Linux and Windows; macOS reports that negative check as unsupported, not passed. This fixture is not real Desktop native-policy proof.
+
+Before merge, execute the production matrix and exercise the real Claude Desktop surface end to end, including consent, file authority and session lifecycle. Record actual results and unresolved platform limitations; cross-compilation, SDK fixture results or source-only packaging alone do not establish Desktop behavior.
 
 ## View parity
 
 `bun run check:views` compares the working source with the baseline through the pinned native runner. The manifest covers the six panes, the prompt band, desktop and terminal surfaces, dark and light themes, English and French, inline and browser 3D, and targeted loading, error, empty and transition states.
 
-The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline commit, frozen candidate-source hash, fixture matrix, and native-tree, SVG-source, browser `index.html`, and `data.js` byte comparisons. Raster pixel mismatches are retained and diagnostic; they do not fail that proof. Capture, decode, network, and missing-artifact errors still fail it. For SVGs, CSS animations are materialized at 1600 ms with `commitStyles()` and cancelled; SMIL is paused at 1.6 seconds. This compares one frame, not motion parity. The browser scene uses real WebGL, its production page, and held-key navigation. It loads Three and fonts from their existing public CDNs; this is not an offline check.
+The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline commit, frozen candidate-source hash and fixture matrix. It compares native trees and SVG source and viewport, and executes historical and candidate browser scenes with semantic and action checks. Raster pixel differences are diagnostic; capture, decode, network, console and missing-artifact failures remain fatal. SVG CSS animations are materialized at 1600 ms and SMIL is paused at 1.6 seconds: this compares one frame, not motion parity. Historical scene dependencies are supplied locally for the test; the candidate bundles its own.
 
 Only opaque numeric press handles and verified temporary module locations are treated as nonvisual. SVG source bytes are the SVG proof. The raster is a diagnostic of the materialized frame, not a substitute for the source comparison.
 
@@ -52,7 +54,7 @@ tree and SVG artifacts before copying each fingerprint into the declaration.
 Fingerprints bind both baseline and candidate: the canonical tree pair, the SVG
 source SHA-256 pair, or the complete viewport pair respectively. Unused or
 mismatched approvals fail. Declarations apply only to their exact baseline;
-browser HTML/data differences and operational failures cannot be approved.
+browser execution failures and operational failures cannot be approved.
 
 These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.1.322's test runner also drops the pointer's `fine` field before the real Client handler receives it: resized cell-centre gestures are exercised, but sub-cell precision is not established by those tests.
 
@@ -60,13 +62,15 @@ These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.
 
 | Files | Interface and responsibility |
 | --- | --- |
-| `types/model.ts`, `types/view.ts` | Host-free session data and the shared view contract. |
+| `types/model.ts`, `types/view.ts`, `types/browser.ts` | Host-free session, shared view and browser protocol contracts. |
 | `hooks/views.ts`, `hooks/view-*.ts`, `hooks/view-controller.ts`, `hooks/workspace.ts` | Shared tab views, transitions and workspace logic, without Claude, Bun or DOM globals. |
-| `hooks/fold.ts`, `hooks/readout.ts`, `hooks/pointer.ts` | Replay, context and file projections, and pointer geometry without host calls. |
+| `hooks/fold.ts`, `hooks/readout.ts`, `hooks/pointer.ts`, `hooks/scene3d.ts` | Replay, context and file projections, pointer geometry and shared scene geometry. |
 | `hooks/acts.ts`, `hooks/files.ts`, `hooks/mcp.ts` | Current tool names, file detection and connector interpretation. Host-free does not mean host-neutral. |
-| `hooks/register.tsx` | Claude SDK calls, state, lifecycle, queues, timers, storage and native view adapter. |
-| `hooks/map.ts`, `hooks/spin.ts`, `hooks/brain3d.ts` | SVG and browser rendering. The pane's SVG budget is 131,072 characters. |
-| `hosts/omp/` | Genuine OMP capture and lifecycle adapter, local server, file authority, persistence and browser renderer. |
+| `hooks/register.tsx`, `hosts/native/` | Claude SDK calls, host-owned state, lifecycle, storage and native adapter. |
+| `hooks/map.ts`, `hooks/spin.ts`, `hosts/browser/` | Shared map shell and SVG renderer, plus the browser UI and WebGL renderer. The pane's SVG budget is 131,072 characters. |
+| `hosts/omp/`, `hosts/relay/` | OMP capture, lifecycle and persistence; Go relay, file authority and SDK-safe client shared by hosts. |
+
+The host owns replay and shared preview, zoomed and play state. Tabs and WebGL camera remain surface-local. Hosts retain separate durable stores.
 
 ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT host adapter.
 

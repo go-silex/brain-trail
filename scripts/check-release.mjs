@@ -120,7 +120,7 @@ function nonRuntime(path) {
   if (
     path === 'tsconfig.json' ||
     path === 'tsconfig.core.json' ||
-    /^tsconfig\.omp.*\.json$/.test(path)
+    /^tsconfig\.(omp.*|browser)\.json$/.test(path)
   )
     return true
   if (

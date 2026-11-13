@@ -1,20 +1,18 @@
 /// <reference lib="dom" />
-import { makeIndex, type Index } from '../../../hooks/files'
-import { createMapRenderer, DARK, LIGHT } from '../../../hooks/map'
+import { makeIndex, type Index } from '../../hooks/files'
+import { createMapRenderer, DARK, LIGHT } from '../../hooks/map'
 import {
   cameraDuringGesture,
   GESTURE0,
-  STEP_MS,
   VIEW_STATE0,
   mapGesture,
+  isSharedViewIntent,
   mapWheel,
   openTarget,
   plan,
-  replayTick,
-  timerEffect,
-} from '../../../hooks/view-controller'
-import { renderPane } from '../../../hooks/views'
-import type { PreviewRef } from '../../../types/model'
+} from '../../hooks/view-controller'
+import { renderPane } from '../../hooks/views'
+import type { PreviewRef } from '../../types/model'
 import type {
   DrawnFrames,
   GestureMemory,
@@ -24,14 +22,14 @@ import type {
   ViewIntent,
   ViewSnapshot,
   ViewState,
-} from '../../../types/view'
+} from '../../types/view'
 import type {
   CommandReplies,
   FactsWire,
   HostCommand,
   LayoutWire,
   ServerEvent,
-} from '../wire'
+} from '../../types/browser'
 import { DomRenderer, runtime } from './dom'
 
 export function startPage(
@@ -59,7 +57,7 @@ export function startPage(
     handoffUrl.searchParams.delete('file')
     history.replaceState(history.state, '', handoffUrl)
   }
-  let state: ViewState = { ...VIEW_STATE0 },
+  let state: ViewState = { ...VIEW_STATE0, view3d: true },
     memory: GestureMemory = { ...GESTURE0 }
   let generation = 0,
     revision = 0,
@@ -68,7 +66,9 @@ export function startPage(
     index: Index | undefined
   let frames: DrawnFrames = { d2: undefined, d3: undefined },
     maps = createMapRenderer()
-  let timer: number | undefined, toastTimer: number | undefined
+  let mapWidth = 0,
+    mapHeight = 0
+  let toastTimer: number | undefined
   let preview: { ref: PreviewRef; text: string | undefined } | undefined,
     previewSerial = 0,
     ended = false
@@ -81,24 +81,20 @@ export function startPage(
     }, 5000)
   }
   if (hadHandoff && pendingFile === undefined) toast('Invalid file link')
-  const stopTimer = () => {
-    clearInterval(timer)
-    timer = undefined
-  }
   const reset = (next: number) => {
     generation = next
     revision = 0
     facts = undefined
     layout = undefined
     index = undefined
-    state = { ...VIEW_STATE0 }
+    state = { ...VIEW_STATE0, view3d: true }
     memory = { ...GESTURE0 }
     frames = { d2: undefined, d3: undefined }
     maps = createMapRenderer()
     preview = undefined
     previewSerial++
     ended = false
-    stopTimer()
+    dom.dispose()
   }
   const apply = (steps: Step[]) => {
     for (const step of steps)
@@ -136,6 +132,7 @@ export function startPage(
       toast('Session unavailable')
       return undefined
     }
+    const currentGeneration = generation
     try {
       const response = await fetch('command', {
         method: 'POST',
@@ -145,6 +142,7 @@ export function startPage(
       })
       const result: CommandReplies[C['kind']] | { ok: false; error: string } =
         await response.json()
+      if (ended || generation !== currentGeneration) return undefined
       if (!result.ok) {
         toast(result.error)
         return undefined
@@ -168,25 +166,45 @@ export function startPage(
       !sameRef(state.preview, ref)
     )
       return
-    preview = { ref, text: result?.text ?? undefined }
+    if (result === undefined) return
+    preview = { ref, text: result.text ?? undefined }
     render()
   }
   const intent = async (i: ViewIntent) => {
-    const effect = timerEffect(i)
-    if (effect !== 'none') stopTimer()
-    apply(plan(i, { now: Date.now(), frames }))
-    if (state.tab !== 'map' || i.kind === 'toggle-3d') memory = GESTURE0
-    if (i.kind === 'preview') {
-      previewSerial++
-      preview = undefined
-      if (i.ref !== null) void loadPreview(i.ref)
+    if (ended || generation === 0) return
+    if (isSharedViewIntent(i)) {
+      const result = await command({ kind: 'view', intent: i })
+      if (result === undefined) return
+      apply(
+        plan(i, { now: Date.now(), frames }).filter(
+          (step) =>
+            step.key !== 'zoomed' &&
+            step.key !== 'play' &&
+            step.key !== 'preview',
+        ),
+      )
+      if (i.kind === 'whole' || (i.kind === 'follow' && i.following))
+        dom.resetScene()
+      render()
+      return
     }
-    if (effect === 'start' && i.kind === 'replay-play')
-      timer = window.setInterval(() => {
-        state = { ...state, play: replayTick(i.steps)(state.play) }
-        if (!state.play.playing) stopTimer()
-        render()
-      }, STEP_MS)
+    const steps = plan(i, { now: Date.now(), frames })
+    if (steps.some((step) => step.key === 'zoomed') && state.zoomed) {
+      if (
+        (await command({ kind: 'view', intent: { kind: 'whole' } })) ===
+        undefined
+      )
+        return
+    }
+    apply(
+      steps.filter(
+        (step) =>
+          step.key !== 'zoomed' &&
+          step.key !== 'play' &&
+          step.key !== 'preview',
+      ),
+    )
+    if (state.tab !== 'map' || i.kind === 'toggle-3d') memory = GESTURE0
     render()
   }
   const openFile = async (ref: PreviewRef) => {
@@ -236,28 +254,28 @@ export function startPage(
     refreshMeter: async () => {
       await command({ kind: 'refresh-meter' })
     },
-    saveSettings: async (next) => {
-      await command({ kind: 'settings', next })
+    saveSettings: async (patch) => {
+      await command({ kind: 'settings', patch })
     },
     setLang: async (lang) => {
       await command({ kind: 'lang', lang })
     },
     clearTrail: async () => {
-      const currentGeneration = generation
-      const result = await command({ kind: 'clear-trail' })
-      if (result !== undefined && generation === currentGeneration) {
-        apply(plan({ kind: 'replay-reset' }, { now: Date.now(), frames }))
-        render()
-      }
+      await command({ kind: 'clear-trail' })
     },
     retryLayout: () => {
       void command({ kind: 'retry-layout' })
     },
     open3d: async () => {
-      const win = window.open('./3d/', '_blank')
-      if (win === null) return false
-      win.opener = null
-      return true
+      if (ended) return false
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen()
+        else await document.documentElement.requestFullscreen()
+        return true
+      } catch {
+        toast('Fullscreen unavailable')
+        return false
+      }
     },
     analyseCoach: async () => {
       await command({ kind: 'coach-analyse' })
@@ -267,28 +285,48 @@ export function startPage(
   }
   const dom = new DomRenderer(container, {
     gesture: (gesture) => {
-      if (facts === undefined || state.tab !== 'map') return null
+      if (ended || facts === undefined || state.tab !== 'map') return null
       const result = mapGesture(gesture, state, memory, frames, {
         now: Date.now(),
         hoverNames: facts.settings.hover,
       })
       memory = result.memory
-      apply(result.steps)
+      if (result.steps.some((step) => step.key === 'zoomed') && state.zoomed)
+        void command({ kind: 'view', intent: { kind: 'whole' } })
+      apply(
+        result.steps.filter(
+          (step) =>
+            step.key !== 'zoomed' &&
+            step.key !== 'play' &&
+            step.key !== 'preview',
+        ),
+      )
       if (result.open !== undefined) void openFile(result.open)
       if (result.steps.length > 0) render()
       return result.tip
     },
     wheel: (by, fx, fy) => {
-      if (state.tab !== 'map') return false
+      if (ended || state.tab !== 'map') return false
       const steps = mapWheel(by, state.view3d, { fx, fy }, frames)
       if (!steps.length) return false
       apply(steps)
       render()
       return true
     },
+    resize: (width, height) => {
+      if (
+        Math.abs(width - mapWidth) < 0.5 &&
+        Math.abs(height - mapHeight) < 0.5
+      )
+        return
+      mapWidth = width
+      mapHeight = height
+      render()
+    },
   })
   function render() {
     if (facts === undefined || ended) return
+    container.dataset.tab = state.tab
     const f = facts,
       connected = new Map(f.connected.map(([k, v]) => [k, new Set(v)])),
       fold = { index, connected, linked: new Set(f.linked) }
@@ -370,11 +408,18 @@ export function startPage(
         }
         break
     }
+    const style = getComputedStyle(container)
+    const availableHeight = Math.max(
+      1,
+      container.clientHeight -
+        parseFloat(style.paddingTop) -
+        parseFloat(style.paddingBottom),
+    )
     const snapshot: ViewSnapshot = {
       now: Date.now(),
       widthPx: Math.max(
         240,
-        Math.min(900, Math.floor(container.clientWidth) - 24),
+        Math.floor(mapWidth || container.clientWidth - 24),
       ),
       lang: f.lang,
       assistant: f.assistant,
@@ -384,11 +429,28 @@ export function startPage(
       events: f.events,
       open: state.open,
       body,
+      fill: {
+        rows: availableHeight / 16,
+        mapAspect:
+          mapWidth > 0 && mapHeight > 0
+            ? mapHeight / mapWidth
+            : Math.max(
+                0.1,
+                availableHeight /
+                  Math.max(
+                    1,
+                    container.clientWidth -
+                      parseFloat(style.paddingLeft) -
+                      parseFloat(style.paddingRight),
+                  ),
+              ),
+      },
     }
     const out = renderPane(runtime, snapshot, actions, maps)
     if (out.drawn?.kind === '2d') frames = { ...frames, d2: out.drawn.frame }
     else if (out.drawn?.kind === '3d')
       frames = { ...frames, d3: out.drawn.frame }
+    dom.hoverNames = f.settings.hover
     dom.render(out.node)
   }
   const events = new EventSource('events')
@@ -396,9 +458,15 @@ export function startPage(
     status.textContent = ''
   }
   events.onerror = () => {
-    status.textContent = 'Connection lost; reconnecting…'
+    events.close()
+    ended = true
+    previewSerial++
+    container.inert = true
+    dom.dispose()
+    status.textContent = 'Connection lost. Reopen from the host.'
   }
   events.onmessage = (message) => {
+    if (ended) return
     let event: ServerEvent
     try {
       event = JSON.parse(message.data) as ServerEvent
@@ -417,12 +485,16 @@ export function startPage(
     if (event.generation > generation) reset(event.generation)
     if (event.kind === 'ended') {
       ended = true
-      stopTimer()
+      previewSerial++
+      container.inert = true
+      dom.dispose()
       status.textContent = 'Session ended'
       events.close()
       return
     }
     if (event.kind === 'layout') {
+      if (layout !== undefined && event.layout.layoutRev < layout.layoutRev)
+        return
       layout = event.layout
       index = makeIndex(layout.root, layout.paths)
       render()
@@ -432,17 +504,35 @@ export function startPage(
     if (event.kind === 'snapshot' && event.revision > revision) {
       revision = event.revision
       facts = event.facts
+      const previousPreview = state.preview
+      state = { ...state, ...event.shared }
+      if (state.preview === null) {
+        previewSerial++
+        preview = undefined
+      } else if (!sameRef(previousPreview, state.preview)) {
+        void loadPreview(state.preview)
+      }
       render()
       drainFile()
     }
   }
-  new ResizeObserver(render).observe(container)
+  const resizeObserver = new ResizeObserver(render)
+  resizeObserver.observe(container)
   theme.addEventListener('change', render)
-  setInterval(() => {
-    if (
-      facts?.workspace.kind === 'loading' ||
-      (state.tab === 'map' && state.view3d && state.cam3d.spin)
-    )
-      render()
+  const redraw = window.setInterval(() => {
+    if (!ended && facts?.workspace.kind === 'loading') render()
   }, 1000)
+  window.addEventListener(
+    'pagehide',
+    () => {
+      ended = true
+      events.close()
+      resizeObserver.disconnect()
+      theme.removeEventListener('change', render)
+      clearInterval(redraw)
+      clearTimeout(toastTimer)
+      dom.dispose()
+    },
+    { once: true },
+  )
 }

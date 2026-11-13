@@ -5,13 +5,15 @@ import type {
 import { strings } from '../../hooks/i18n'
 import { limitOf, usd } from '../../hooks/readout'
 import { TITLE, weather } from '../../hooks/view-common'
+import { RelayRefusal } from '../relay/client'
 import { registerCapture } from './capture'
 import { startDashboardServer, type DashboardServer } from './server'
-import type { DashboardFeed, FactsWire } from './wire'
+import type { DashboardFeed, FactsWire } from '../../types/browser'
 
 const factory: ExtensionFactory = (pi) => {
   let server: DashboardServer | undefined
   let starting: Promise<DashboardServer> | undefined
+  let attempted = false
   let stopped = false
   let bandContext: ExtensionContext | undefined
   let bandRendered = false
@@ -43,61 +45,71 @@ const factory: ExtensionFactory = (pi) => {
 
   const ensureServer = async (
     feed: DashboardFeed,
+    explicit = false,
   ): Promise<DashboardServer> => {
     if (stopped) throw new Error('Brain Trail has shut down')
-    if (server) return server
-    starting ??= startDashboardServer(feed)
-    const ready = await starting
-    if (stopped) {
-      await ready.stop()
-      throw new Error('Brain Trail has shut down')
+    if (server && !server.isClosed()) return server
+    server = undefined
+    if (!starting) {
+      if (attempted && !explicit)
+        throw new RelayRefusal(
+          'disconnected',
+          'Brain Trail relay disconnected; reopen it with /brain-trail',
+        )
+      attempted = true
+      starting = startDashboardServer(feed, (error) => {
+        const message = `Brain Trail relay ${error.code}: ${error.message}. Reopen with /brain-trail.`
+        if (bandContext?.hasUI) bandContext.ui.notify(message, 'warning')
+        else process.stderr.write(`${message}\n`)
+      })
     }
-    server = ready
-    return ready
-  }
-  const openBrowser = async (url: string) => {
-    const command =
-      process.platform === 'darwin'
-        ? 'open'
-        : process.platform === 'win32'
-          ? 'rundll32.exe'
-          : 'xdg-open'
-    const args =
-      process.platform === 'win32'
-        ? ['url.dll,FileProtocolHandler', url]
-        : [url]
-    const result = await pi.exec(command, args, { timeout: 5000 })
-    if (result.code !== 0)
-      throw new Error(result.stderr || 'The browser could not be opened')
+    const pending = starting
+    try {
+      const ready = await pending
+      if (stopped) {
+        ready.close()
+        throw new Error('Brain Trail has shut down')
+      }
+      server = ready
+      return ready
+    } finally {
+      if (starting === pending) starting = undefined
+    }
   }
   const announce = async (ctx: ExtensionContext, current: DashboardServer) => {
-    if (!ctx.hasUI) {
-      process.stderr.write(`Brain Trail: ${current.url}\n`)
-      return
-    }
-    ctx.ui.notify(`Brain Trail: ${current.url}`, 'info')
     try {
-      await openBrowser(current.url)
+      if (ctx.hasUI) await current.openBrowser()
+      else
+        process.stderr.write(
+          `Brain Trail launch file: ${await current.prepareBrowser()}\n`,
+        )
     } catch (error) {
-      ctx.ui.notify(`${String(error)} — ${current.url}`, 'warning')
+      if (ctx.hasUI) ctx.ui.notify(String(error), 'warning')
+      else process.stderr.write(`Brain Trail: ${String(error)}\n`)
     }
   }
   const feed = registerCapture(pi, {
+    authority: () => ensureServer(feed),
     async onRootStart(ctx, current, autoOpen) {
       bandContext = ctx
       bandRendered = false
       updateBand(current.current().facts)
-      const ready = await ensureServer(current)
-      if (!ctx.hasUI || autoOpen) await announce(ctx, ready)
+      try {
+        const ready = await ensureServer(current)
+        if (!ctx.hasUI || autoOpen) await announce(ctx, ready)
+      } catch (error) {
+        if (ctx.hasUI) ctx.ui.notify(String(error), 'warning')
+        else process.stderr.write(`Brain Trail: ${String(error)}\n`)
+      }
     },
     async onRootStop() {
       stopped = true
       stopBand()
       if (bandContext?.hasUI) bandContext.ui.setWidget('brain-trail', undefined)
       bandContext = undefined
-      const active = server ?? (await starting)
+      const active = server ?? (await starting?.catch(() => undefined))
       server = undefined
-      if (active) await active.stop()
+      if (active) active.close()
     },
   })
   const stopBand = feed.subscribe((event) => {
@@ -108,7 +120,14 @@ const factory: ExtensionFactory = (pi) => {
     async handler(_args, ctx) {
       if (ctx.agent.kind !== 'main')
         throw new Error('Brain Trail opens from the main session only')
-      await announce(ctx, await ensureServer(feed))
+      try {
+        const ready = await ensureServer(feed, true)
+        await feed.refreshApps()
+        await announce(ctx, ready)
+      } catch (error) {
+        if (ctx.hasUI) ctx.ui.notify(String(error), 'warning')
+        else process.stderr.write(`Brain Trail: ${String(error)}\n`)
+      }
     },
   })
 }

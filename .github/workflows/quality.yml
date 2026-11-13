@@ -26,11 +26,15 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.27.3
+          cache: false
       - run: bun install --frozen-lockfile --ignore-scripts
       - name: Install pinned Chromium
         run: bunx playwright install --with-deps chromium
-      - name: Check committed OMP browser bundle
-        run: bun run check:omp-build
+      - name: Check committed browser bundle
+        run: bun run check:browser-build
       - run: bun run verify
       - name: Test installed-source layout
         run: |
@@ -38,6 +42,18 @@ jobs:
           plugin="$(mktemp -d)"
           trap 'rm -rf "$plugin"' EXIT
           git archive --format=tar HEAD | tar -xf - -C "$plugin"
+          test -s "$plugin/hosts/browser/dist/app.js"
+          test -s "$plugin/hosts/browser/dist/app.css"
+          test -s "$plugin/hosts/relay/bin/LICENSE-x-sys"
+          for os in linux darwin windows; do
+            for arch in amd64 arm64; do
+              suffix=""
+              if [ "$os" = windows ]; then suffix=".exe"; fi
+              relay="$plugin/hosts/relay/bin/brain-trail-relay-$os-$arch$suffix"
+              test -s "$relay"
+              test -x "$relay"
+            done
+          done
           node node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs plugin validate --strict "$plugin"
           node node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs plugin test "$plugin"
       - name: Upload synthetic view parity evidence
@@ -47,3 +63,48 @@ jobs:
           name: view-parity
           path: .artifacts/view-parity
           if-no-files-found: ignore
+  relay-production:
+    name: Production relay ${{ matrix.platform.target }} / Claude ${{ matrix.claude }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        claude: ['2.1.321', '2.1.322']
+        platform:
+          - { target: linux-x64, runner: ubuntu-24.04 }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: macos-x64, runner: macos-15-intel }
+          - { target: macos-arm64, runner: macos-15 }
+          - { target: windows-x64, runner: windows-2022 }
+          - { target: windows-arm64, runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Install genuine pinned CLI outside checkout
+        shell: bash
+        run: npm install --prefix "$RUNNER_TEMP/relay-cli" --no-save --ignore-scripts --no-audit --no-fund "@anthropic-ai/claude-code@${{ matrix.claude }}"
+      - name: Test production relay
+        working-directory: hosts/relay
+        run: go test ./...
+      - name: Build cross-account proof executable
+        shell: bash
+        working-directory: hosts/relay
+        run: go build -o "$RUNNER_TEMP/crossaccount.exe" ./internal/crossaccount
+      - name: Exercise packaged production relay through SDK
+        shell: bash
+        env:
+          RELAY_CLI_ROOT: ${{ runner.temp }}/relay-cli
+          RELAY_CLAUDE_VERSION: ${{ matrix.claude }}
+          RELAY_CROSS_ACCOUNT_BINARY: ${{ runner.temp }}/crossaccount.exe
+          RELAY_CROSS_ACCOUNT_HELPER: ${{ github.workspace }}/scripts/relay-cross-account.mjs
+        run: node scripts/relay-production-proof.mjs

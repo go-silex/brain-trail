@@ -2,8 +2,10 @@
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import { marked } from 'marked'
+import { WebGLScene } from './scene3d'
 import type {
   MapGesture,
+  Scene3dProps,
   MapTip,
   ViewBoxProps,
   ViewButtonProps,
@@ -18,7 +20,7 @@ import type {
   ViewSvgProps,
   ViewTag,
   ViewTextProps,
-} from '../../../types/view'
+} from '../../types/view'
 
 type Kind =
   | 'box'
@@ -30,16 +32,24 @@ type Kind =
   | 'markdown'
   | 'code'
   | 'map'
+  | 'scene3d'
 export type VNode = {
   kind: Kind
   props: ViewProps
   children: (VNode | string)[]
   key: string | undefined
 }
-type Slot = { value: VNode | string; node: Node; children: Slot[] }
+type Slot = {
+  value: VNode | string
+  node: Node
+  children: Slot[]
+  scene?: WebGLScene
+  observer?: ResizeObserver
+}
 export type MapHandlers = {
   gesture: (g: MapGesture) => MapTip | null
   wheel: (by: number, fx: number, fy: number) => boolean
+  resize: (width: number, height: number) => void
 }
 
 const flatten = (input: ViewChild<VNode>, out: (VNode | string)[]) => {
@@ -70,6 +80,7 @@ export const runtime: ViewRuntime<VNode, MouseEvent> = {
   Markdown: tag('markdown'),
   Code: tag('code'),
   MapHit: tag('map'),
+  Scene3d: tag('scene3d'),
 }
 const space = (value: ViewSpace | undefined, axis: 'x' | 'y') => {
   if (value === undefined) return ''
@@ -131,6 +142,7 @@ const language = (p: ViewCodeProps) => {
 export class DomRenderer {
   private root: Slot | undefined
   private mapPressSequence = 0
+  hoverNames = true
   constructor(
     private readonly container: HTMLElement,
     private readonly map: MapHandlers,
@@ -139,6 +151,23 @@ export class DomRenderer {
     this.root = this.patch(this.container, this.root, value)
     if (this.container.firstChild !== this.root.node)
       this.container.appendChild(this.root.node)
+  }
+  resetScene() {
+    const visit = (slot: Slot) => {
+      slot.scene?.resetCamera()
+      for (const child of slot.children) visit(child)
+    }
+    if (this.root !== undefined) visit(this.root)
+  }
+  dispose() {
+    if (this.root !== undefined) this.disposeSlot(this.root)
+    this.root = undefined
+    this.container.replaceChildren()
+  }
+  private disposeSlot(slot: Slot) {
+    slot.scene?.dispose()
+    slot.observer?.disconnect()
+    for (const child of slot.children) this.disposeSlot(child)
   }
   private patch(
     parent: Node,
@@ -158,8 +187,10 @@ export class DomRenderer {
           ? document.createTextNode(value)
           : this.create(value.kind)
       const slot: Slot = { value, node, children: [] }
-      if (old !== undefined) parent.replaceChild(node, old.node)
-      else parent.appendChild(node)
+      if (old !== undefined) {
+        this.disposeSlot(old)
+        parent.replaceChild(node, old.node)
+      } else parent.appendChild(node)
       if (typeof value !== 'string') this.update(slot, value, undefined)
       return slot
     }
@@ -193,7 +224,25 @@ export class DomRenderer {
   }
   private update(slot: Slot, value: VNode, previous: VNode | undefined) {
     const el = slot.node as HTMLElement
+    if (value.kind === 'scene3d') {
+      el.className = 'bt-scene3d'
+      const props = value.props as Scene3dProps
+      if (slot.scene === undefined) slot.scene = new WebGLScene(el, props)
+      else slot.scene.update(props)
+      slot.scene.setHover(this.hoverNames)
+      return
+    }
+    if (value.key !== undefined) el.dataset.key = value.key
+    else delete el.dataset.key
     el.className = `bt-${value.kind}`
+    if (value.key === 'map-wrap' && slot.observer === undefined) {
+      slot.observer = new ResizeObserver((entries) => {
+        const rect = entries[0]?.contentRect
+        if (rect && rect.width > 0 && rect.height > 0)
+          this.map.resize(rect.width, rect.height)
+      })
+      slot.observer.observe(el)
+    }
     if (value.kind === 'box') {
       const p = value.props as ViewBoxProps,
         s = el.style
@@ -357,8 +406,10 @@ export class DomRenderer {
       result.push(child)
     })
     for (const child of old)
-      if (!used.has(child) && child.node.parentNode === parent)
+      if (!used.has(child) && child.node.parentNode === parent) {
+        this.disposeSlot(child)
         parent.removeChild(child.node)
+      }
     slot.children = result
   }
   private installMap(el: HTMLElement) {

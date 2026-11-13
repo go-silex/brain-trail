@@ -326,6 +326,12 @@ export type Host = {
   clock: MockClock
   writes: { path: string; text: string }[]
   opened: string[][]
+  browserEvents: unknown[]
+  browserReady: Promise<void>
+  relayStarted: () => boolean
+  preparedFiles: string[]
+  readFiles: string[]
+  fileRead: Promise<void>
   listing: 'files' | 'empty'
   releaseList: () => void
   settled: () => Promise<void>
@@ -337,6 +343,7 @@ export type Host = {
 const runOf = (
   argv: readonly string[],
   listing: 'files' | 'empty',
+  files: readonly string[],
 ): {
   exitCode: number
   stdout: string
@@ -346,6 +353,14 @@ const runOf = (
 } => {
   const cmd = argv[0] ?? ''
   const script = argv[1] ?? ''
+  if (cmd === 'uname')
+    return {
+      exitCode: 0,
+      stdout: 'Linux x86_64\n',
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    }
   if (cmd === 'sh' && script.includes('HOME'))
     return {
       exitCode: 0,
@@ -373,7 +388,7 @@ const runOf = (
       }
     return {
       exitCode: 0,
-      stdout: `${FILE_LIST.join('\n')}\n`,
+      stdout: `${files.join('\n')}\n`,
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
@@ -391,12 +406,31 @@ const runOf = (
 const isList = (argv: readonly string[]) =>
   argv[0] === 'git' || argv[0] === 'find'
 
-export const installHost = (on: On, scenario: ViewCase): Host => {
+export const installHost = (
+  on: On,
+  scenario: ViewCase,
+  semantic = false,
+): Host => {
   const clock = mock.clock(on, { now: NOW })
+  const files = semantic ? [...FILE_LIST, 'notes/c.md'] : FILE_LIST
   const state = new Map<string, Held>()
   const store = new Map<string, unknown>()
   const writes: { path: string; text: string }[] = []
   const opened: string[][] = []
+  const browserEvents: unknown[] = []
+  let relayStarted = false
+  let resolveBrowserReady = () => {}
+  const browserReady = new Promise<void>((resolve) => {
+    resolveBrowserReady = resolve
+  })
+  const holdRelay = new Promise<void>(() => {})
+  const preparedFiles: string[] = []
+  const readFiles: string[] = []
+  let resolveFileRead = () => {}
+  const fileRead = new Promise<void>((resolve) => {
+    resolveFileRead = resolve
+  })
+  const handles = new Map<string, string>()
   const ctl = {
     listing:
       scenario.phase === 'error' ? ('empty' as const) : ('files' as const),
@@ -424,7 +458,18 @@ export const installHost = (on: On, scenario: ViewCase): Host => {
   }
   seed('tab', scenario.tab)
   seed('lang', scenario.lang)
-  seed('events', scenario.phase === 'empty' ? [] : EVENTS)
+  seed(
+    'events',
+    scenario.phase === 'empty'
+      ? []
+      : semantic
+        ? [
+            ...EVENTS,
+            { k: 'read', p: 'notes/c.md', at: 2_500 },
+            { k: 'seen', ps: ['CLAUDE.md'], via: 'link', at: 4_500 },
+          ].sort((a, b) => a.at - b.at)
+        : EVENTS,
+  )
   seed('meter', meterOf(scenario))
   seed('settings', settingsOf())
   if (scenario.view3d) seed('view3d', true)
@@ -453,6 +498,7 @@ export const installHost = (on: On, scenario: ViewCase): Host => {
     await next(forwarded)
     return { value: { isSet: true as const, version: nextVersion } }
   })
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
   on('store.get', (_$, e) => ({ value: store.get(e.key) }))
   on('store.set', (_$, e) => {
     store.set(e.key, e.value)
@@ -534,7 +580,96 @@ export const installHost = (on: On, scenario: ViewCase): Host => {
     if (e.argv[0] === 'open' || e.argv[0] === 'xdg-open')
       opened.push([...e.argv])
     if (isList(e.argv)) await held
-    return { value: runOf(e.argv, ctl.listing) }
+    return { value: runOf(e.argv, ctl.listing, files) }
+  })
+  on('process.spawn', async function* (_$, e, next) {
+    if (!e.argv[0]?.includes('brain-trail-relay')) return yield* next(e)
+    relayStarted = true
+    yield {
+      stream: 'stdout' as const,
+      text: '{"t":"hello","protocol":1,"socket":"/tmp/brain-trail-fixture/relay.sock"}\n',
+    }
+    if (scenario.browser3d)
+      yield {
+        stream: 'stdout' as const,
+        text: '{"t":"clients","n":1,"seq":1}\n',
+      }
+    await holdRelay
+    return { value: { code: 0, signal: null } }
+  })
+  on('http.fetch', (_$, e, next) => {
+    if (!e.url.startsWith('http://localhost/h/')) return next(e)
+    if (
+      ![
+        '/h/event',
+        '/h/ready',
+        '/h/launch',
+        '/h/apps',
+        '/h/file/prepare',
+        '/h/file/read',
+        '/h/file/verify',
+        '/h/file/release',
+      ].some((route) => e.url.endsWith(route))
+    )
+      throw new Error(`Unexpected fixture relay request: ${e.url}`)
+    const request = JSON.parse(String(e.init?.body)) as {
+      root?: string
+      path?: string
+      id?: string
+      kind?: string
+      seq?: number
+    }
+    let response: unknown = { ok: true }
+    if (e.url.endsWith('/apps')) response = { apps: [] }
+    if (e.url.endsWith('/event')) browserEvents.push(request)
+    if (e.url.endsWith('/ready')) {
+      const ready =
+        scenario.browser3d &&
+        request.seq === 1 &&
+        browserEvents.some(
+          (event) =>
+            typeof event === 'object' &&
+            event !== null &&
+            'kind' in event &&
+            event.kind === 'snapshot',
+        )
+      response = { ok: ready }
+      if (ready) resolveBrowserReady()
+    }
+    if (e.url.endsWith('/file/prepare')) {
+      const path = request.path ?? ''
+      if (
+        request.root !== CWD ||
+        !files.some((file) => path === `${CWD}/${file}`)
+      )
+        response = { ok: false, error: 'forbidden' }
+      else {
+        const id = String(handles.size + 1)
+        handles.set(id, path)
+        preparedFiles.push(path)
+        response = { id, path, inside: true }
+      }
+    }
+    if (e.url.endsWith('/file/read')) {
+      const path = handles.get(request.id ?? '')
+      if (!path) response = { ok: false, error: 'forbidden' }
+      else {
+        readFiles.push(path)
+        resolveFileRead()
+        response = { text: path.endsWith('/notes/a.md') ? NOTE_BODY : '' }
+      }
+    }
+    if (e.url.endsWith('/file/verify') && !handles.has(request.id ?? ''))
+      response = { ok: false, error: 'forbidden' }
+    if (e.url.endsWith('/file/release')) handles.delete(request.id ?? '')
+    return {
+      value: {
+        status: 200,
+        ok: true,
+        headers: {},
+        text: JSON.stringify(response),
+      },
+    }
   })
   on('fs.read', (_$, e) => ({
     value: e.path.endsWith('notes/a.md') ? NOTE_BODY : '',
@@ -562,6 +697,12 @@ export const installHost = (on: On, scenario: ViewCase): Host => {
     clock,
     writes,
     opened,
+    browserEvents,
+    browserReady,
+    relayStarted: () => relayStarted,
+    preparedFiles,
+    readFiles,
+    fileRead,
     get listing() {
       return ctl.listing
     },
@@ -763,8 +904,9 @@ export const captureView = async (
   $: Engine,
   on: On,
   scenario: (typeof viewCases)[number],
+  semantic = false,
 ) => {
-  const host = installHost(on, scenario)
+  const host = installHost(on, scenario, semantic)
   const ui = await $.ui.mount(mountTarget(scenario))
   await layoutChrome(scenario, ui)
   if (scenario.phase === 'loading') {
@@ -784,6 +926,7 @@ export const captureView = async (
   }
   await settleReady(scenario, host, ui)
   if (scenario.browser3d) await ui.press({ key: 'open-3d' })
+  if (scenario.browser3d && host.relayStarted()) await host.browserReady
   if (scenario.transition === 'follow') await ui.press({ key: 'follow' })
   if (scenario.transition === 'replay') await ui.press({ key: 'play' })
   if (scenario.phase === 'coach-error') await ui.press({ key: 'coach-run' })
@@ -798,6 +941,7 @@ export const captureView = async (
     id: scenario.id,
     tree,
     svgs: svgsOf(tree),
+    browserEvents: host.browserEvents,
     artifacts: artifactsOf(host.writes),
   }
 }

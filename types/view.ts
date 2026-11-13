@@ -3,6 +3,7 @@ import type { Layout, Palette } from '../hooks/map'
 import type { MapFrame } from '../hooks/pointer'
 import type { FigureId } from '../hooks/readout'
 import type { Cam, SpinView } from '../hooks/spin'
+import type { SceneSemantics } from '../hooks/scene3d'
 import type {
   Camera,
   Coach,
@@ -13,6 +14,7 @@ import type {
   Tab,
   TrailEvent,
   TrailSettings,
+  Trail,
 } from './model'
 
 export type ViewState = {
@@ -24,6 +26,24 @@ export type ViewState = {
   view3d: boolean
   cam3d: Cam
   preview: PreviewRef | null
+}
+export type SharedView = Pick<ViewState, 'preview' | 'zoomed' | 'play'>
+export type SettingsPatch = Partial<Omit<TrailSettings, 'planUsd'>> & {
+  planUsd?: number | null
+}
+export type Scene3dProps = {
+  key?: string
+  layout: Layout
+  semantics: SceneSemantics
+  trail: Trail
+  palette: Palette
+  state: MapState
+  now: number
+  lang: Lang
+  filesWord: string
+  outside: number
+  onIntent: (intent: ViewIntent) => Promise<void>
+  onOpen: (ref: PreviewRef) => Promise<void>
 }
 export type Step = {
   [K in keyof ViewState]: { key: K; next: (v: ViewState[K]) => ViewState[K] }
@@ -219,6 +239,7 @@ export type ViewRuntime<N, Press> = {
   Markdown: ViewTag<ViewMarkdownProps, N> | undefined
   Code: ViewTag<ViewCodeProps, N> | undefined
   MapHit: ViewTag<Keyed, N> | undefined
+  Scene3d?: ViewTag<Scene3dProps, N>
   Measure?: ViewTag<
     Keyed & {
       stamp: string
@@ -248,6 +269,20 @@ export type ViewIntent =
   | { kind: 'turn-3d'; by: number }
   | { kind: 'spin-3d' }
   | { kind: 'zoom-3d'; dir: 'in' | 'out' }
+export type SharedViewIntent = Extract<
+  ViewIntent,
+  {
+    kind:
+      | 'preview'
+      | 'replay-play'
+      | 'replay-pause'
+      | 'replay-live'
+      | 'replay-step'
+      | 'replay-reset'
+      | 'follow'
+      | 'whole'
+  }
+>
 export type CompactOutcome =
   | { kind: 'done' }
   | { kind: 'skipped'; reason: string }
@@ -261,7 +296,7 @@ export type ViewActions<Press> = {
   toast: (text: string) => void
   compact: () => Promise<CompactOutcome>
   refreshMeter: () => Promise<void>
-  saveSettings: (next: TrailSettings) => Promise<void>
+  saveSettings: (patch: SettingsPatch) => Promise<void>
   setLang: (lang: Lang) => Promise<void>
   clearTrail: () => Promise<void>
   retryLayout: () => void

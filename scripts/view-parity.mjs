@@ -28,6 +28,7 @@ import {
   proofFingerprint,
 } from './view-changes.mjs'
 import { probeNativeMapLayout } from './native-map-layout.mjs'
+import { captureBrowserScene } from './browser-parity.mjs'
 
 const CANDIDATE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -91,10 +92,10 @@ const main = async () => {
     limit: LIMIT,
     limits: [
       LIMIT,
-      'Browser scenes load Three 0.160.0 from jsDelivr and Inter/JetBrains Mono from Google Fonts. This is not an offline proof.',
+      'Historical scene dependencies are served locally from the pinned Three package; its remote font stylesheet is replaced with an empty stylesheet.',
       'SVG HTML only frames the production SVG on the fixture theme background. It is not a native UI replica and is not a desktop layout.',
       'SVG proof captures one frame: CSS animations are materialized at 1600 ms and cancelled; SMIL is paused at 1.6 seconds. It does not prove motion parity.',
-      'Primary proof compares native trees, SVG source and viewport, browser index.html, and data.js. Exact declared tree/SVG proofs may be approved; browser and operational failures remain strict. Raster differences are diagnostic.',
+      'Primary proof compares native trees, SVG source and viewport. Exact declared tree/SVG proofs may be approved; browser execution and operational failures remain strict. Raster differences are diagnostic.',
       'Numeric press.handle values are canonicalized; presence and type remain significant. Svg props.source is replaced with an ordered slot before the tree compare.',
     ],
     baseline: null,
@@ -185,7 +186,7 @@ const main = async () => {
   const intendedCount = receipt.cases.filter((item) => item.intended).length
   const equality = intendedCount
     ? `${intendedCount} intended changes, others equal`
-    : 'sources equal'
+    : 'native proofs equal'
   const line = receipt.ok
     ? `view-parity: ok ${receipt.counts.native} cases${scope}, ${equality}, raster diagnostic ${receipt.rasterDifferent} — ${shown(path.join(output, 'receipt.json'))}`
     : `view-parity: fail ${failed || receipt.errors.length}${scope}, raster diagnostic ${receipt.rasterDifferent} — ${shown(path.join(output, 'receipt.json'))}`
@@ -255,7 +256,7 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
     sha256: production.sha256,
     files: production.files.length,
     bytes: production.bytes,
-    note: 'SHA256 of the isolated candidate after identical fixture copy and before throwaway wrappers. HEAD alone does not name this dirty tree.',
+    note: 'SHA256 of the isolated candidate after staging its fixture and before throwaway wrappers. HEAD alone does not name this dirty tree.',
   }
   await writeFile(path.join(output, 'input.sha256'), production.canonical)
 
@@ -360,6 +361,42 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
       receipt.rasterDifferent += rasterDiagnosticCount(item)
       if (!item.ok) writeCaseDiagnostic(item, output)
       writeRasterDiagnostic(item, output)
+    }
+    const semanticScenario = manifest.find((item) => item.browser3d === true)
+    if (semanticScenario) {
+      await rm(path.join(candidateRoot, 'tests', 'parity-cases'), {
+        recursive: true,
+        force: true,
+      })
+      const semanticDir = path.join(candidateRoot, 'tests', 'parity-cases')
+      await mkdir(semanticDir, { recursive: true })
+      await writeFile(
+        path.join(semanticDir, 'semantic.test.tsx'),
+        caseWrapper(semanticScenario.id, true),
+      )
+      const run = await runNative(
+        'candidate-semantic',
+        candidateRoot,
+        output,
+        1,
+      )
+      if (run.code !== 0)
+        throw new Error(`semantic fixture failed: ${runnerReport(run)}`)
+      const semantic = capturesOf(
+        run,
+        [semanticScenario],
+        'candidate-semantic',
+      ).get(semanticScenario.id)
+      const scene = await captureBrowserScene(
+        browser,
+        candidateRoot,
+        semantic,
+        semanticScenario,
+        true,
+      )
+      await writeFile(path.join(output, 'semantic-browser.png'), scene.png)
+      receipt.semanticBrowser = scene.probe
+      receipt.counts.browserScenes++
     }
   } finally {
     if (browser) await browser.close()
@@ -507,16 +544,25 @@ const installFixtures = async (baselineRoot, candidateRoot, root) => {
   }
   const staged = path.join(root, 'fixtures')
   await cp(source, staged, { recursive: true })
-  for (const isolated of [baselineRoot, candidateRoot]) {
-    await rm(path.join(isolated, 'tests'), { recursive: true, force: true })
-    await cp(staged, path.join(isolated, 'tests', 'fixtures'), {
-      recursive: true,
-    })
-  }
+  await access(path.join(baselineRoot, FIXTURE))
+  const baselineFixtures = path.join(root, 'baseline-fixtures')
+  await cp(path.join(baselineRoot, 'tests', 'fixtures'), baselineFixtures, {
+    recursive: true,
+  })
+  await rm(path.join(baselineRoot, 'tests'), { recursive: true, force: true })
+  await cp(baselineFixtures, path.join(baselineRoot, 'tests', 'fixtures'), {
+    recursive: true,
+  })
+  await rm(path.join(candidateRoot, 'tests'), { recursive: true, force: true })
+  await cp(staged, path.join(candidateRoot, 'tests', 'fixtures'), {
+    recursive: true,
+  })
   const hashed = await hashTree(staged)
+  const historical = await hashTree(baselineFixtures)
   return {
     path: FIXTURE,
     sha256: hashed.sha256,
+    baselineSha256: historical.sha256,
     files: hashed.files.length,
     bytes: hashed.bytes,
   }
@@ -649,7 +695,10 @@ test('view-parity manifest', { timeoutMs: ${TEST_TIMEOUT_MS} }, () => {
 })
 `
 
-const caseWrapper = (id) => `import { test } from 'claude-code/testing'
+const caseWrapper = (
+  id,
+  semantic = false,
+) => `import { test } from 'claude-code/testing'
 import { captureView, viewCases } from '../fixtures/views'
 
 const id = ${JSON.stringify(id)}
@@ -657,7 +706,7 @@ const scenario = viewCases.find((item) => item && item.id === id)
 if (!scenario) throw new Error('view-parity wrapper missing scenario ' + id)
 
 test(id, { timeoutMs: ${TEST_TIMEOUT_MS} }, async ($, on) => {
-  const captured = await captureView($, on, scenario)
+  const captured = await captureView($, on, scenario${semantic ? ', true' : ''})
   console.log(${JSON.stringify(MARK_CASE)} + JSON.stringify(captured))
 })
 `
@@ -956,34 +1005,48 @@ const compareCase = async (
       }
     }
   }
-  const leftBrowser = browserPair(baseline)
-  const rightBrowser = browserPair(candidate)
-  if (leftBrowser.error)
-    item.errors.push(`baseline browser artifacts: ${leftBrowser.error}`)
-  if (rightBrowser.error)
-    item.errors.push(`candidate browser artifacts: ${rightBrowser.error}`)
-  if (
-    scenario.browser3d === true &&
-    (!leftBrowser.files || !rightBrowser.files)
-  ) {
-    item.errors.push(
-      'browser3d case did not produce index.html and data.js on both sides',
-    )
-  }
-  if (leftBrowser.files || rightBrowser.files) {
-    item.browser = await compareBrowser(
-      dir,
-      leftBrowser.files,
-      rightBrowser.files,
-      browser,
-      output,
-    )
-    if (item.browser.html && !item.browser.html.equal)
-      item.errors.push('browser index.html bytes differ')
-    if (item.browser.data && !item.browser.data.equal)
-      item.errors.push('browser data.js bytes differ')
-    if (item.browser.error)
-      item.errors.push(`browser scene ${item.browser.error}`)
+  if (scenario.browser3d === true) {
+    const leftBrowser = browserPair(baseline)
+    if (leftBrowser.error || !leftBrowser.files)
+      item.errors.push(
+        `baseline browser artifacts: ${leftBrowser.error ?? 'missing historical scene'}`,
+      )
+    else if (!browser) item.errors.push('browser scene: playwright unavailable')
+    else {
+      try {
+        const sceneDir = path.join(dir, 'browser')
+        await mkdir(sceneDir, { recursive: true })
+        const leftShot = await rasterScene(
+          browser,
+          sceneDir,
+          'baseline',
+          leftBrowser.files,
+        )
+        const rightShot = await captureBrowserScene(
+          browser,
+          candidateRoot,
+          candidate,
+          scenario,
+        )
+        await writeFile(path.join(sceneDir, 'baseline.png'), leftShot.png)
+        await writeFile(path.join(sceneDir, 'candidate.png'), rightShot.png)
+        item.browser = {
+          probe: { baseline: leftShot.probe, candidate: rightShot.probe },
+          raster: null,
+        }
+        const pixels = await comparePng(
+          browser,
+          leftShot.png,
+          rightShot.png,
+          sceneDir,
+        )
+        recordRaster(item.browser, pixels, output)
+      } catch (error) {
+        item.errors.push(
+          `browser scene ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
   }
   return { item, differences }
 }
@@ -1454,83 +1517,7 @@ const browserPair = (captured) => {
       error: 'browser capture needs index.html and data.js',
     }
   }
-  const pageError = productionPageProblem(files['index.html'], files['data.js'])
-  if (pageError) return { files: null, error: pageError }
   return { files, error: null }
-}
-
-const productionPageProblem = (html, data) => {
-  if (
-    !html.includes('id="follow"') ||
-    !html.includes('id="overview"') ||
-    !html.includes('id="stat"') ||
-    !html.includes('id="live"')
-  ) {
-    return 'index.html is not the production HUD page'
-  }
-  if (!html.includes(THREE_PREFIX))
-    return 'index.html does not load Three 0.160.0 from jsDelivr'
-  if (!html.includes('<script type="module">'))
-    return 'index.html has no production module script'
-  if (!data.startsWith('window.BT_DATA='))
-    return 'data.js is not the production session payload'
-  return null
-}
-
-const compareBrowser = async (dir, left, right, browser, output) => {
-  const sceneDir = path.join(dir, 'browser')
-  await mkdir(sceneDir, { recursive: true })
-  const item = {
-    html: null,
-    data: null,
-    raster: null,
-    error: null,
-    actions: [
-      'overview',
-      'follow',
-      'ArrowRight:down',
-      'runFor:500',
-      'ArrowRight:up',
-    ],
-    network: 'jsDelivr three@0.160.0 and Google Fonts; not offline',
-  }
-  if (!left || !right) {
-    item.error = 'missing production page on one side'
-    return item
-  }
-  await writeFile(
-    path.join(sceneDir, 'baseline.index.html'),
-    left['index.html'],
-  )
-  await writeFile(path.join(sceneDir, 'baseline.data.js'), left['data.js'])
-  await writeFile(
-    path.join(sceneDir, 'candidate.index.html'),
-    right['index.html'],
-  )
-  await writeFile(path.join(sceneDir, 'candidate.data.js'), right['data.js'])
-  item.html = byteProof(left['index.html'], right['index.html'])
-  item.data = byteProof(left['data.js'], right['data.js'])
-  if (!browser) {
-    item.error = 'playwright unavailable for browser scene'
-    return item
-  }
-  try {
-    const leftShot = await rasterScene(browser, sceneDir, 'baseline', left)
-    const rightShot = await rasterScene(browser, sceneDir, 'candidate', right)
-    item.probe = { baseline: leftShot.probe, candidate: rightShot.probe }
-    await writeFile(path.join(sceneDir, 'baseline.png'), leftShot.png)
-    await writeFile(path.join(sceneDir, 'candidate.png'), rightShot.png)
-    const pixels = await comparePng(
-      browser,
-      leftShot.png,
-      rightShot.png,
-      sceneDir,
-    )
-    recordRaster(item, pixels, output)
-  } catch (error) {
-    item.error = error instanceof Error ? error.message : String(error)
-  }
-  return item
 }
 
 const rasterScene = async (browser, dir, side, files) => {
@@ -1637,9 +1624,27 @@ const rasterScene = async (browser, dir, side, files) => {
         now: performance.now(),
         date: Date.now(),
         canvas: canvas ? { width: canvas.width, height: canvas.height } : null,
+        categories: window.BT_DATA.state.map(([index, kind]) => [
+          window.BT_BASE.files[index]?.[0],
+          kind,
+        ]),
         dpr: window.devicePixelRatio,
       }
     })
+    for (const expected of [
+      ['notes/a.md', 1],
+      ['src/app.ts', 2],
+      ['notes/b.md', 0],
+    ]) {
+      if (
+        !probe.categories.some(
+          ([file, kind]) => file === expected[0] && kind === expected[1],
+        )
+      )
+        throw new Error(
+          `historical scene missing expected category for ${expected[0]}`,
+        )
+    }
     probe.boot = boot
     if (probe.now !== SCENE_FINAL_NOW)
       throw new Error(
@@ -1684,19 +1689,35 @@ const assertSceneLive = async (page, errors) => {
 
 const allowSceneRequest = async (route, errors) => {
   const url = route.request().url()
-  const allowed =
-    url.startsWith('file:') ||
-    url.startsWith('data:') ||
-    url.startsWith('blob:') ||
-    url.startsWith(THREE_PREFIX) ||
-    url.startsWith('https://fonts.googleapis.com/') ||
-    url.startsWith('https://fonts.gstatic.com/')
-  if (!allowed) {
-    errors.push(`disallowed request ${url}`)
-    await route.abort()
+  if (url.startsWith(THREE_PREFIX)) {
+    const relative = decodeURIComponent(
+      new URL(url).pathname.slice(new URL(THREE_PREFIX).pathname.length),
+    )
+    const base = path.join(CANDIDATE, 'node_modules/three')
+    const file = path.resolve(base, relative)
+    if (!file.startsWith(`${base}${path.sep}`))
+      throw new Error('invalid historical Three module path')
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/javascript',
+      body: await readFile(file),
+    })
     return
   }
-  await route.continue()
+  if (url.startsWith('https://fonts.googleapis.com/')) {
+    await route.fulfill({ status: 200, contentType: 'text/css', body: '' })
+    return
+  }
+  if (
+    url.startsWith('file:') ||
+    url.startsWith('data:') ||
+    url.startsWith('blob:')
+  ) {
+    await route.continue()
+    return
+  }
+  errors.push(`disallowed request ${url}`)
+  await route.abort()
 }
 
 const comparePng = async (browser, left, right, dir) => {
@@ -1869,11 +1890,6 @@ const writeCaseDiagnostic = (item, output) => {
       lines.push(`  svg ${svg.index}: source bytes differ`)
     if (svg.error) lines.push(`  svg ${svg.index}: ${svg.error}`)
   }
-  if (item.browser?.html && !item.browser.html.equal)
-    lines.push('  browser index.html bytes differ')
-  if (item.browser?.data && !item.browser.data.equal)
-    lines.push('  browser data.js bytes differ')
-  if (item.browser?.error) lines.push(`  browser: ${item.browser.error}`)
   process.stderr.write(`${lines.join('\n')}\n`)
 }
 const rasterDiagnosticCount = (item) => {

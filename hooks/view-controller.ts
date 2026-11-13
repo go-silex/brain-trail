@@ -1,4 +1,5 @@
 import type { Coach, Play, PreviewRef, TrailSettings } from '../types/model'
+import type { SharedView, SharedViewIntent } from '../types/view'
 import type {
   DrawnFrames,
   GestureMemory,
@@ -202,12 +203,54 @@ export const plan = (
       ]
   }
 }
+export const isSharedViewIntent = (i: ViewIntent): i is SharedViewIntent =>
+  i.kind === 'preview' ||
+  i.kind === 'replay-play' ||
+  i.kind === 'replay-pause' ||
+  i.kind === 'replay-live' ||
+  i.kind === 'replay-step' ||
+  i.kind === 'replay-reset' ||
+  i.kind === 'follow' ||
+  i.kind === 'whole'
+
+export const sharedView = (state: ViewState): SharedView => ({
+  preview: state.preview,
+  zoomed: state.zoomed,
+  play: state.play,
+})
+
+export const reduceSharedView = (
+  shared: SharedView,
+  intent: SharedViewIntent,
+  steps: number,
+): SharedView => {
+  if (
+    steps < 1 &&
+    (intent.kind === 'replay-play' || intent.kind === 'replay-step')
+  )
+    return { ...shared, play: { step: null, playing: false } }
+  const bounded =
+    intent.kind === 'replay-play' || intent.kind === 'replay-step'
+      ? { ...intent, steps }
+      : intent
+  const next = { ...shared }
+  for (const step of plan(bounded, {
+    now: 0,
+    frames: { d2: undefined, d3: undefined },
+  })) {
+    if (step.key === 'preview') next.preview = step.next(next.preview)
+    else if (step.key === 'zoomed') next.zoomed = step.next(next.zoomed)
+    else if (step.key === 'play') next.play = step.next(next.play)
+  }
+  return next
+}
 export const timerEffect = (i: ViewIntent): 'start' | 'stop' | 'none' =>
   i.kind === 'replay-play'
     ? 'start'
     : i.kind === 'replay-pause' ||
         i.kind === 'replay-live' ||
-        i.kind === 'replay-step'
+        i.kind === 'replay-step' ||
+        i.kind === 'replay-reset'
       ? 'stop'
       : 'none'
 export const replayTick =

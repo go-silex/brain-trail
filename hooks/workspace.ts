@@ -130,29 +130,3 @@ export const EDITORS = [
   'BBEdit',
   'Nova',
 ]
-export const appsArgv = (home: string): string[] => [
-  'ls',
-  '/Applications',
-  `${home}/Applications`,
-  '/System/Applications',
-]
-export const appsIn = (stdout: string): string[] => {
-  const found = new Set(
-    stdout.split('\n').map((x) => x.trim().replace(/\.app$/, '')),
-  )
-  return EDITORS.filter((a) => found.has(a))
-}
-export const openAttempts = (abs: string, app: string): string[][] => [
-  ...(app === 'Obsidian'
-    ? [
-        [
-          'open',
-          `obsidian://open?path=${encodeURIComponent(abs.normalize('NFD'))}`,
-        ],
-      ]
-    : app !== 'default'
-      ? [['open', '-a', app, abs]]
-      : []),
-  ['open', abs],
-  ['xdg-open', abs],
-]
