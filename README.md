@@ -98,6 +98,8 @@ The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc
 
 Follow the session as it works, replay it step by step, and zoom with the wheel. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
 
+Browser 3D adapts to the theme: dark mode uses restrained ambient connections and activity glows; light mode retains its point rendering without bloom.
+
 Opening the browser or a file reports that the launch was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. File opens still require host consent.
 
 In a docked Claude Desktop pane, every tab stays within the available height:

@@ -34,6 +34,7 @@ export class WebGLScene {
   private readonly background = new THREE.Group()
   private backgroundLayout?: Scene3dProps['layout']
   private backgroundColor = ''
+  private backgroundLight?: boolean
   private readonly ray = new THREE.Raycaster()
   private readonly pointer = new THREE.Vector2()
   private readonly labels = document.createElement('div')
@@ -202,23 +203,64 @@ export class WebGLScene {
     const { layout, trail, palette, semantics } = this.props
     const shape = brain(layout),
       colors = kindColors(palette)
-    this.scene.background = new THREE.Color(palette.bg)
+    const background = new THREE.Color(palette.bg)
+    this.scene.background = background
+    const lightBackground =
+      0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b >
+      0.5
+    // Bloom adds the bright background back over the entire light scene.
+    this.bloom.enabled = !lightBackground
     const positions = new Float32Array(layout.files.length * 3)
     const color = new Float32Array(positions.length)
     const sizes = new Float32Array(layout.files.length)
+    const phases = lightBackground
+      ? undefined
+      : new Float32Array(layout.files.length)
+    const glows = lightBackground
+      ? undefined
+      : new Float32Array(layout.files.length)
     const c = new THREE.Color(),
       foreground = new THREE.Color(palette.fg)
+    const random = (i: number) => {
+      let t = Math.imul(i + 1, 2654435761) >>> 0
+      t ^= t >>> 15
+      t = Math.imul(t, 2246822519) >>> 0
+      t ^= t >>> 13
+      t = Math.imul(t, 3266489917) >>> 0
+      t ^= t >>> 16
+      return (t >>> 0) / 4294967296
+    }
+    const current = trail.moves.at(-1)?.n
     for (let i = 0; i < layout.files.length; i++) {
       positions.set([shape.X[i]!, shape.Y[i]!, shape.Z[i]!], i * 3)
       c.set(colors[semantics.kinds.get(i) ?? 'node'])
       if (!semantics.kinds.has(i)) c.lerp(foreground, 0.35)
-      sizes[i] = semantics.kinds.has(i) ? 18 : 11
+      if (phases && glows) {
+        phases[i] = random(i * 3 + 5)
+        const touched = semantics.touched.has(i)
+        glows[i] =
+          i === current || touched ? 1 : semantics.kinds.has(i) ? 0.2 : 0
+        sizes[i] =
+          i === current
+            ? 30
+            : touched
+              ? 16 + Math.log2((trail.state.get(i)?.count ?? 0) + 1) * 5
+              : semantics.kinds.has(i)
+                ? 9
+                : 7 + random(i * 5) * 3
+      } else {
+        sizes[i] = semantics.kinds.has(i) ? 18 : 11
+      }
       color.set([c.r, c.g, c.b], i * 3)
     }
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setAttribute('color', new THREE.BufferAttribute(color, 3))
     geometry.setAttribute('pointSize', new THREE.BufferAttribute(sizes, 1))
+    if (phases && glows) {
+      geometry.setAttribute('phase', new THREE.BufferAttribute(phases, 1))
+      geometry.setAttribute('glow', new THREE.BufferAttribute(glows, 1))
+    }
     this.points = new THREE.Points(
       geometry,
       new THREE.ShaderMaterial({
@@ -226,12 +268,17 @@ export class WebGLScene {
           scale: { value: Math.max(1, this.height) * 1.3 },
           time: { value: 0 },
         },
-        vertexShader:
-          'attribute float pointSize; uniform float scale; uniform float time; varying vec3 vColor; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float pulse = 0.9 + 0.1*sin(time*1.1 + position.x*.02 + position.z*.01); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * pulse; }',
-        fragmentShader:
-          'varying vec3 vColor; void main(){ float d = length(gl_PointCoord - vec2(0.5)); if (d > 0.5) discard; float a = pow(1.0 - d * 2.0, 1.5); gl_FragColor = vec4(vColor, a); }',
+        vertexShader: lightBackground
+          ? 'attribute float pointSize; uniform float scale; uniform float time; varying vec3 vColor; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float pulse = 0.9 + 0.1*sin(time*1.1 + position.x*.02 + position.z*.01); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * pulse; }'
+          : 'attribute float pointSize; attribute float phase; attribute float glow; uniform float scale; uniform float time; varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float tw = 0.8 + 0.2 * sin(time * 1.1 + phase * 6.283); float pulse = 1.0 + glow * 0.28 * sin(time * 2.6 + phase * 6.283); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * mix(tw, 1.0, glow); vGlow = glow; vFar = 1.0 - smoothstep(1400.0, 9000.0, -mv.z); }',
+        fragmentShader: lightBackground
+          ? 'varying vec3 vColor; void main(){ float d = length(gl_PointCoord - vec2(0.5)); if (d > 0.5) discard; float a = pow(1.0 - d * 2.0, 1.5); gl_FragColor = vec4(vColor, a); }'
+          : 'varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard; float core = 1.0 - smoothstep(0.0, 0.5, d); float a = pow(core, mix(2.2, 1.3, vGlow)); gl_FragColor = vec4(vColor, a * mix(0.5, 1.0, vGlow) * mix(0.35, 1.0, vFar)); }',
         transparent: true,
         depthWrite: false,
+        blending: lightBackground
+          ? THREE.NormalBlending
+          : THREE.AdditiveBlending,
         vertexColors: true,
       }),
     )
@@ -241,11 +288,13 @@ export class WebGLScene {
     const curves: THREE.QuadraticBezierCurve3[] = []
     if (
       this.backgroundLayout !== layout ||
-      this.backgroundColor !== palette.fg
+      this.backgroundColor !== palette.fg ||
+      this.backgroundLight !== lightBackground
     ) {
       this.clearGroup(this.background)
       this.backgroundLayout = layout
       this.backgroundColor = palette.fg
+      this.backgroundLight = lightBackground
       // Synapses use the shared file positions; folder membership only selects neighbours.
       const folders = new Map<string, number[]>()
       layout.files.forEach(([path], i) => {
@@ -298,9 +347,12 @@ export class WebGLScene {
         new THREE.LineSegments(
           synapses,
           new THREE.LineBasicMaterial({
-            color: palette.fg,
+            color: lightBackground ? palette.fg : '#9fb6c4',
             transparent: true,
-            opacity: 0.08,
+            opacity: lightBackground ? 0.08 : 0.045,
+            blending: lightBackground
+              ? THREE.NormalBlending
+              : THREE.AdditiveBlending,
             depthWrite: false,
           }),
         ),

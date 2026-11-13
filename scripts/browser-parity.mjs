@@ -217,10 +217,155 @@ export async function captureBrowserScene(
           return [name, point]
         })
       })
+    // Settle the damping tail, then sample picks and pixels on the same frame.
+    // The screenshot uses the compositor and does not await a page rAF.
+    const pixelTime = await page.evaluate(() => Date.now() + 1000)
+    await page.clock.pauseAt(pixelTime)
     const fittedFiles = await scanFiles()
     for (const name of layout.layout.paths)
       if (!fittedFiles.some(([file]) => file === name))
         throw new Error(`default scene did not fit pickable file ${name}`)
+    // The compositor screenshot observes what a user sees; copying the WebGL
+    // drawing buffer here can instead read a discarded, transparent frame.
+    // Locate the known read file with the existing raycast scan, and exclude
+    // DOM labels and the tooltip rather than counting their pixels as points.
+    const readPoint = fittedFiles.find(([name]) => name === 'notes/a.md')[1]
+    await page.mouse.move(readPoint.x, readPoint.y)
+    await page.mouse.move(0, 0)
+    const clip = {
+      x: Math.floor(readPoint.x) - 20,
+      y: Math.floor(readPoint.y) - 20,
+      width: 40,
+      height: 40,
+    }
+    const overlays = () =>
+      canvas.evaluate((element, point) => {
+        const bounds = element.getBoundingClientRect()
+        if (
+          point.x - 20 < bounds.left ||
+          point.x + 20 > bounds.right ||
+          point.y - 20 < bounds.top ||
+          point.y + 20 > bounds.bottom
+        )
+          throw new Error('Read file pixel probe is too close to canvas edge')
+        const result = []
+        for (const overlay of element.parentElement.querySelectorAll(
+          '.bt-scene-labels span, .bt-tip',
+        )) {
+          const style = getComputedStyle(overlay)
+          if (
+            overlay.hidden ||
+            style.display === 'none' ||
+            style.visibility !== 'visible' ||
+            Number(style.opacity) === 0
+          )
+            continue
+          const rect = overlay.getBoundingClientRect()
+          result.push({
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+          })
+        }
+        for (let y = Math.floor(point.y - 4); y <= Math.ceil(point.y + 4); y++)
+          for (
+            let x = Math.floor(point.x - 4);
+            x <= Math.ceil(point.x + 4);
+            x++
+          )
+            if (document.elementFromPoint(x, y) !== element)
+              throw new Error(
+                'Read file pixel probe is covered by a DOM element',
+              )
+        return result
+      }, readPoint)
+    const beforeOverlays = await overlays()
+    const screenshot = await page.screenshot({
+      type: 'png',
+      scale: 'css',
+      clip,
+    })
+    const afterOverlays = await overlays()
+    await page.clock.resume()
+    const pixels = await page.evaluate(
+      async ({ image, point, clip, overlays }) => {
+        const bitmap = new Image()
+        bitmap.src = image
+        await bitmap.decode()
+        const copy = document.createElement('canvas')
+        copy.width = bitmap.naturalWidth
+        copy.height = bitmap.naturalHeight
+        const context = copy.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('Could not decode scene screenshot')
+        context.drawImage(bitmap, 0, 0)
+        const { data, width, height } = context.getImageData(
+          0,
+          0,
+          copy.width,
+          copy.height,
+        )
+        const sx = width / clip.width
+        const sy = height / clip.height
+        const core = []
+        const surround = [[], [], []]
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const px = clip.x + (x + 0.5) / sx
+            const py = clip.y + (y + 0.5) / sy
+            const distance = Math.hypot(px - point.x, py - point.y)
+            const covered = overlays.some(
+              (rect) =>
+                px >= rect.left &&
+                px < rect.right &&
+                py >= rect.top &&
+                py < rect.bottom,
+            )
+            if (covered && distance <= 4)
+              throw new Error(
+                'Read file pixel probe overlaps a label or tooltip',
+              )
+            if (covered) continue
+            const offset = (y * width + x) * 4
+            if (distance <= 4)
+              core.push([data[offset], data[offset + 1], data[offset + 2]])
+            else if (distance >= 12 && distance <= 18)
+              for (let channel = 0; channel < 3; channel++)
+                surround[channel].push(data[offset + channel])
+          }
+        }
+        if (core.length < 3 || surround[0].length < 100)
+          throw new Error(
+            'Read file pixel probe has insufficient unobscured samples',
+          )
+        const background = surround.map((values) => {
+          values.sort((a, b) => a - b)
+          return values[Math.floor(values.length / 2)]
+        })
+        const contrasting = core.filter((pixel) =>
+          pixel.some(
+            (value, channel) => Math.abs(value - background[channel]) >= 20,
+          ),
+        ).length
+        return {
+          point,
+          background,
+          contrasting,
+          samples: core.length,
+          scale: [sx, sy],
+        }
+      },
+      {
+        image: `data:image/png;base64,${screenshot.toString('base64')}`,
+        point: readPoint,
+        clip,
+        overlays: [...beforeOverlays, ...afterOverlays],
+      },
+    )
+    if (pixels.contrasting < 3)
+      throw new Error(
+        `WebGL read file has no visible canvas contrast: ${JSON.stringify(pixels)}`,
+      )
     const measure = async () =>
       page.evaluate(() => {
         const bounds = (s) => {
@@ -580,7 +725,10 @@ export async function captureBrowserScene(
     if (!(await page.locator('#app').evaluate((element) => element.inert)))
       throw new Error('disconnected browser did not disable the application')
     if (errors.length) throw new Error(errors.join('; '))
-    return { png, probe: { initial, resized, revealed } }
+    return {
+      png,
+      probe: { initial, resized, revealed, readFilePixels: pixels },
+    }
   } finally {
     await context.close()
     for (const client of clients) client.end()

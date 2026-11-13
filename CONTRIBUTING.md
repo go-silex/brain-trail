@@ -40,6 +40,8 @@ Launch tests use controlled child processes and exercise receipts and eventual e
 
 The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline commit, frozen candidate-source hash and fixture matrix. It compares native trees and SVG source and viewport, and executes historical and candidate browser scenes with semantic and action checks. Raster pixel differences are diagnostic; capture, decode, network, console and missing-artifact failures remain fatal. SVG CSS animations are materialized at 1600 ms and SMIL is paused at 1.6 seconds: this compares one frame, not motion parity. Historical scene dependencies are supplied locally for the test; the candidate bundles its own.
 
+The browser visibility guard samples compositor pixels around a known read file in dark and light themes with the camera and clock stable, excluding DOM labels and tooltips; it checks canvas contrast rather than treating overlays as visible points.
+
 The browser picking oracle exhausts integer CSS-client coordinates for its search; it does not establish continuous or subpixel visibility.
 
 Only opaque numeric press handles and verified temporary module locations are treated as nonvisual. SVG source bytes are the SVG proof. The raster is a diagnostic of the materialized frame, not a substitute for the source comparison.
