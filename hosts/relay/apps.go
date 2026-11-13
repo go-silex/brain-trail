@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strings"
 )
 
@@ -57,13 +56,4 @@ func selectedApp(name string) (application, string, error) {
 
 func obsidianURL(path string) string {
 	return "obsidian://open?path=" + strings.ReplaceAll(url.QueryEscape(path), "+", "%20")
-}
-
-// Wait in the background to reap the child without blocking on a GUI process.
-func launch(command *exec.Cmd) error {
-	if err := command.Start(); err != nil {
-		return err
-	}
-	go func() { _ = command.Wait() }()
-	return nil
 }

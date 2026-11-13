@@ -73,8 +73,10 @@ export type FoldFacts = {
 export type PreviewFacts = {
   ref: PreviewRef
   text: string | undefined
+  pending?: boolean
   settings: TrailSettings
   apps: readonly string[]
+  appsUnavailable?: boolean
 }
 export type MapState = Pick<
   ViewState,
@@ -111,7 +113,12 @@ export type TabSnapshot =
       coach: Coach
       instructionFile: InstructionFile
     }
-  | { tab: 'settings'; settings: TrailSettings; apps: readonly string[] }
+  | {
+      tab: 'settings'
+      settings: TrailSettings
+      apps: readonly string[]
+      appsUnavailable?: boolean
+    }
 export type ViewSnapshot = {
   now: number
   widthPx: number

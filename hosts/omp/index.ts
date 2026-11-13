@@ -57,11 +57,21 @@ const factory: ExtensionFactory = (pi) => {
           'Brain Trail relay disconnected; reopen it with /brain-trail',
         )
       attempted = true
-      starting = startDashboardServer(feed, (error) => {
-        const message = `Brain Trail relay ${error.code}: ${error.message}. Reopen with /brain-trail.`
-        if (bandContext?.hasUI) bandContext.ui.notify(message, 'warning')
-        else process.stderr.write(`${message}\n`)
-      })
+      starting = startDashboardServer(
+        feed,
+        (error) => {
+          const message = `Brain Trail relay ${error.code}: ${error.message}. Reopen with /brain-trail.`
+          if (bandContext?.hasUI) bandContext.ui.notify(message, 'warning')
+          else process.stderr.write(`${message}\n`)
+        },
+        (outcome) => {
+          if (stopped || feed.current().generation !== outcome.generation)
+            return
+          const message = `Brain Trail opener process exited with error code ${outcome.code}.`
+          if (bandContext?.hasUI) bandContext.ui.notify(message, 'warning')
+          else process.stderr.write(`${message}\n`)
+        },
+      )
     }
     const pending = starting
     try {
@@ -78,7 +88,7 @@ const factory: ExtensionFactory = (pi) => {
   }
   const announce = async (ctx: ExtensionContext, current: DashboardServer) => {
     try {
-      if (ctx.hasUI) await current.openBrowser()
+      if (ctx.hasUI) await current.openBrowser(feed.current().generation)
       else
         process.stderr.write(
           `Brain Trail launch file: ${await current.prepareBrowser()}\n`,

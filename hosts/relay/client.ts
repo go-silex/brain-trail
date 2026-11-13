@@ -2,7 +2,10 @@ import {
   parseCommand,
   type DashboardFeed,
   type ServerEvent,
+  type LaunchReceipt,
 } from '../../types/browser'
+
+export type LaunchOutcome = { id: string; generation: number; code: number }
 
 export interface RelayIO {
   start(
@@ -20,7 +23,7 @@ export interface RelayIO {
   ): Promise<{ status: number; body: string }>
   schedule(callback: () => void, ms: number): () => void
   onFailure(error: RelayRefusal): void
-  open(path: string, app?: string): Promise<void>
+  onLaunchOutcome(outcome: LaunchOutcome): void
   randomToken(): string
   log(message: string): void
 }
@@ -30,7 +33,7 @@ export interface RelayClient {
   isClosed(): boolean
   listApps(): Promise<string[]>
   prepareBrowser(): Promise<string>
-  openBrowser(): Promise<void>
+  openBrowser(generation: number): Promise<LaunchReceipt>
   prepareFile(
     root: string,
     path: string,
@@ -38,7 +41,11 @@ export interface RelayClient {
   readFile(id: string): Promise<string>
   verifyFile(id: string): Promise<boolean>
   releaseFile(id: string): Promise<void>
-  openFile(id: string, app?: string): Promise<void>
+  openFile(
+    id: string,
+    app: string | undefined,
+    generation: number,
+  ): Promise<LaunchReceipt>
 }
 
 const lineLimit = 256 * 1024
@@ -64,6 +71,7 @@ export class RelayRefusal extends Error {
       | 'unsupported'
       | 'busy'
       | 'timeout'
+      | 'launch-failed'
       | 'stale-generation',
     message: string,
     readonly status?: number,
@@ -93,6 +101,7 @@ export async function startRelay(
   let version = 0
   let published = 0
   let publishing: Promise<void> | undefined
+  const launches = new Map<string, number>()
   let ended: Extract<ServerEvent, { kind: 'ended' }> | undefined
   let unsubscribe = () => {}
   let resolveHello!: () => void
@@ -129,6 +138,7 @@ export async function startRelay(
   const close = () => {
     if (stopped) return
     stopped = true
+    launches.clear()
     rejectClosed(terminalFailure ?? disconnected())
     unsubscribe()
     process?.close()
@@ -207,7 +217,8 @@ export async function startRelay(
       message === 'busy' ||
       message === 'timeout' ||
       message === 'stale-generation' ||
-      message === 'disconnected'
+      message === 'disconnected' ||
+      message === 'launch-failed'
         ? message
         : response.status === 413
           ? 'too-large'
@@ -228,7 +239,7 @@ export async function startRelay(
   const flush = (): Promise<void> => {
     if (publishing) return publishing
     publishing = (async () => {
-      while (!stopped && clients > 0 && published !== version) {
+      if (!stopped && clients > 0 && published !== version) {
         const target = version
         const pendingEnd = ended
         ended = undefined
@@ -274,7 +285,14 @@ export async function startRelay(
     )
     return publishing
   }
+  const clearStaleLaunches = (generation: number) => {
+    for (const [id, current] of launches) {
+      if (current !== generation) launches.delete(id)
+    }
+  }
   const changed = (value?: ServerEvent) => {
+    if (value)
+      clearStaleLaunches(value.kind === 'ended' ? -1 : value.generation)
     if (value?.kind === 'ended') {
       ended = value
       endedGeneration = value.generation
@@ -288,9 +306,7 @@ export async function startRelay(
   const command = async (id: string, body: unknown) => {
     let reply: unknown = { ok: false, error: 'invalid' }
     try {
-      do {
-        await flush()
-      } while (!stopped && clients > 0 && published !== version)
+      await flush()
       if (stopped || clients === 0) reply = { ok: false, error: 'disconnected' }
       else {
         const parsed = parseCommand(body)
@@ -338,6 +354,30 @@ export async function startRelay(
       if (typeof value.id !== 'string' || !value.id)
         throw new Error('Invalid relay command id')
       void command(value.id, value.body)
+    } else if (value.t === 'launch-exit') {
+      if (
+        typeof value.id !== 'string' ||
+        !Number.isSafeInteger(value.generation) ||
+        !Number.isInteger(value.code)
+      )
+        throw new Error('Invalid launch outcome')
+      const generation = launches.get(value.id)
+      launches.delete(value.id)
+      if (
+        generation === value.generation &&
+        generation === feed.current().generation &&
+        value.code !== 0
+      ) {
+        try {
+          io.onLaunchOutcome({
+            id: value.id,
+            generation,
+            code: value.code as number,
+          })
+        } catch (error) {
+          io.log(`Launch outcome notification failed: ${String(error)}`)
+        }
+      }
     } else if (value.t !== 'ping') throw new Error('Unknown relay frame')
   }
   const onChunk = (chunk: string) => {
@@ -397,6 +437,35 @@ export async function startRelay(
       throw new RelayRefusal('invalid', 'Invalid relay socket path')
     return `${socket.slice(0, separator + 1)}open.html`
   }
+  const launch = async (
+    route: string,
+    generation: number,
+    body: (id: string) => object,
+  ): Promise<LaunchReceipt> => {
+    if (feed.current().generation !== generation)
+      throw new RelayRefusal('stale-generation', 'Stale launch generation')
+    clearStaleLaunches(generation)
+    if (launches.size >= 32)
+      throw new RelayRefusal('busy', 'Too many active launch observers')
+    const id = io.randomToken()
+    if (!id || launches.has(id))
+      throw new RelayRefusal('invalid', 'Invalid launch correlation')
+    launches.set(id, generation)
+    try {
+      const result = await request(route, body(id))
+      if (
+        !object(result) ||
+        result.ok !== true ||
+        (result.status !== 'spawned' && result.status !== 'dispatched')
+      )
+        throw new RelayRefusal('invalid', 'Invalid relay launch receipt')
+      if (result.status === 'dispatched') launches.delete(id)
+      return { status: result.status }
+    } catch (error) {
+      launches.delete(id)
+      throw error
+    }
+  }
 
   return {
     close,
@@ -412,8 +481,12 @@ export async function startRelay(
       return result.apps as string[]
     },
     prepareBrowser,
-    async openBrowser() {
-      await io.open(await prepareBrowser())
+    async openBrowser(generation) {
+      return launch('launch', generation, (id) => ({
+        open: true,
+        id,
+        generation,
+      }))
     },
     async prepareFile(root, path) {
       const result = await request('file/prepare', { root, path })
@@ -450,8 +523,13 @@ export async function startRelay(
     async releaseFile(id) {
       await request('file/release', { id })
     },
-    async openFile(id, app) {
-      await request('file/open', { id, ...(app === undefined ? {} : { app }) })
+    async openFile(id, app, generation) {
+      return launch('file/open', generation, (launchId) => ({
+        id,
+        launchId,
+        generation,
+        ...(app === undefined ? {} : { app }),
+      }))
     },
   }
 }

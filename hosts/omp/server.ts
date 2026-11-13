@@ -6,6 +6,7 @@ import {
   startRelay,
   type RelayClient,
   type RelayIO,
+  type LaunchOutcome,
   type RelayRefusal,
 } from '../relay/client'
 
@@ -14,6 +15,7 @@ export type DashboardServer = RelayClient
 export async function startDashboardServer(
   feed: DashboardFeed,
   onFailure: (error: RelayRefusal) => void,
+  onLaunchOutcome: (outcome: LaunchOutcome) => void,
 ): Promise<DashboardServer> {
   const arch = process.arch === 'x64' ? 'amd64' : process.arch
   const platform = process.platform === 'win32' ? 'windows' : process.platform
@@ -68,21 +70,13 @@ export async function startDashboardServer(
       } as RequestInit & { unix: string })
       return { status: response.status, body: await response.text() }
     },
-    async open(path) {
-      const child = Bun.spawn([binary, 'open', path], {
-        stdin: 'ignore',
-        stdout: 'ignore',
-        stderr: 'ignore',
-      })
-      if ((await child.exited) !== 0)
-        throw new Error('The browser could not be opened')
-    },
     randomToken: () => randomBytes(32).toString('base64url'),
     schedule: (callback, ms) => {
       const timer = setTimeout(callback, ms)
       return () => clearTimeout(timer)
     },
     onFailure,
+    onLaunchOutcome,
     log: (message) => {
       process.stderr.write(`Brain Trail: ${message}\n`)
     },

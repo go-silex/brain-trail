@@ -69,7 +69,11 @@ export function startPage(
   let mapWidth = 0,
     mapHeight = 0
   let toastTimer: number | undefined
-  let preview: { ref: PreviewRef; text: string | undefined } | undefined,
+  let preview:
+      | { ref: PreviewRef; status: 'pending' }
+      | { ref: PreviewRef; status: 'ready'; text: string | undefined }
+      | { ref: PreviewRef; status: 'failed' }
+      | undefined,
     previewSerial = 0,
     ended = false
   const theme = matchMedia('(prefers-color-scheme: light)')
@@ -158,16 +162,19 @@ export function startPage(
   const loadPreview = async (ref: PreviewRef) => {
     const serial = ++previewSerial,
       currentGeneration = generation
-    preview = undefined
+    preview = { ref, status: 'pending' }
     const result = await command({ kind: 'preview-read', ref })
     if (
+      ended ||
       generation !== currentGeneration ||
       serial !== previewSerial ||
       !sameRef(state.preview, ref)
     )
       return
-    if (result === undefined) return
-    preview = { ref, text: result.text ?? undefined }
+    preview =
+      result === undefined
+        ? { ref, status: 'failed' }
+        : { ref, status: 'ready', text: result.text ?? undefined }
     render()
   }
   const intent = async (i: ViewIntent) => {
@@ -309,7 +316,16 @@ export function startPage(
       if (ended || state.tab !== 'map') return false
       const steps = mapWheel(by, state.view3d, { fx, fy }, frames)
       if (!steps.length) return false
-      apply(steps)
+      if (steps.some((step) => step.key === 'zoomed') && state.zoomed)
+        void command({ kind: 'view', intent: { kind: 'whole' } })
+      apply(
+        steps.filter(
+          (step) =>
+            step.key !== 'zoomed' &&
+            step.key !== 'play' &&
+            step.key !== 'preview',
+        ),
+      )
       render()
       return true
     },
@@ -335,7 +351,7 @@ export function startPage(
       case 'context':
         body = {
           tab: 'context',
-          breakdown: undefined,
+          breakdown: f.breakdown,
           costHistory: f.costHistory,
           settings: f.settings,
         }
@@ -346,7 +362,7 @@ export function startPage(
       case 'coach':
         body = {
           tab: 'coach',
-          breakdown: undefined,
+          breakdown: f.breakdown,
           fold,
           coach: f.coach,
           instructionFile: f.instructionFile,
@@ -357,21 +373,25 @@ export function startPage(
         break
       case 'files':
         if (f.workspace.kind === 'loading') return
-        if (
-          state.preview !== null &&
-          (preview === undefined || !sameRef(state.preview, preview.ref))
-        )
-          return
         body = {
           tab: 'files',
-          breakdown: undefined,
+          breakdown: f.breakdown,
           fold,
           preview:
-            state.preview === null || preview === undefined
+            state.preview === null
               ? null
               : {
                   ref: state.preview,
-                  text: preview.text,
+                  text:
+                    preview !== undefined &&
+                    sameRef(state.preview, preview.ref) &&
+                    preview.status === 'ready'
+                      ? preview.text
+                      : undefined,
+                  pending:
+                    preview === undefined ||
+                    !sameRef(state.preview, preview.ref) ||
+                    preview.status === 'pending',
                   settings: f.settings,
                   apps: f.apps,
                 },
@@ -493,7 +513,7 @@ export function startPage(
       return
     }
     if (event.kind === 'layout') {
-      if (layout !== undefined && event.layout.layoutRev < layout.layoutRev)
+      if (layout !== undefined && event.layout.layoutRev <= layout.layoutRev)
         return
       layout = event.layout
       index = makeIndex(layout.root, layout.paths)
@@ -505,7 +525,12 @@ export function startPage(
       revision = event.revision
       facts = event.facts
       const previousPreview = state.preview
-      state = { ...state, ...event.shared }
+      const enableFollow = !state.zoomed && event.shared.zoomed
+      state = {
+        ...state,
+        ...event.shared,
+        ...(enableFollow ? { camera: null } : {}),
+      }
       if (state.preview === null) {
         previewSerial++
         preview = undefined

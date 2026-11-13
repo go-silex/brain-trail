@@ -78,6 +78,12 @@ export const renderSettings = <N, Press>(
           { size: 'caption', dimColor: true, wrap: 'wrap' },
           S.openWithWhy,
         ),
+        b.appsUnavailable &&
+          R.h(
+            R.Text,
+            { size: 'caption', dimColor: true, wrap: 'wrap' },
+            S.appsUnavailable,
+          ),
         appRow('openMd', S.openMd),
         appRow('openOther', S.openOther),
       ),

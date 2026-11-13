@@ -57,6 +57,12 @@ export const renderFiles = <N, Press>(
           onPress: () => act.openIn(ref, app),
         }),
       ),
+      b.preview.appsUnavailable &&
+        R.h(
+          R.Text,
+          { size: 'caption', dimColor: true, wrap: 'wrap' },
+          S.appsUnavailable,
+        ),
       card(
         R,
         s,
@@ -70,13 +76,15 @@ export const renderFiles = <N, Press>(
             { size: 'caption', dimColor: true, wrap: 'truncate-start' },
             ref.p,
           ),
-          body === undefined
-            ? R.h(R.Text, { dimColor: true }, S.cannotRead)
-            : abs.endsWith('.md') && R.Markdown !== undefined
-              ? R.h(R.Markdown, { text: body })
-              : R.Code !== undefined
-                ? R.h(R.Code, { source: body, path: abs })
-                : R.h(R.Text, { wrap: 'wrap' }, body),
+          b.preview.pending
+            ? R.h(R.Text, { dimColor: true }, S.previewLoading)
+            : body === undefined
+              ? R.h(R.Text, { dimColor: true }, S.cannotRead)
+              : abs.endsWith('.md') && R.Markdown !== undefined
+                ? R.h(R.Markdown, { text: body })
+                : R.Code !== undefined
+                  ? R.h(R.Code, { source: body, path: abs })
+                  : R.h(R.Text, { wrap: 'wrap' }, body),
         ),
       ),
     )

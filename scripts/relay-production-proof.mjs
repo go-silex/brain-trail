@@ -118,16 +118,36 @@ try {
   const packed = spawnSync(
     'git',
     ['archive', '--format=tar', `--output=${archive}`, 'HEAD'],
-    { cwd: root, timeout: 30000, stdio: 'ignore', windowsHide: true },
+    {
+      cwd: root,
+      timeout: 30000,
+      encoding: 'utf8',
+      maxBuffer: 65536,
+      windowsHide: true,
+    },
   )
-  assert(packed.status === 0, 'cannot archive committed source package')
+  if (packed.status !== 0)
+    throw new Error(
+      `cannot archive committed source package: status=${packed.status} signal=${packed.signal} error=${packed.error?.message ?? 'none'} stderr=${packed.stderr ?? ''}`,
+    )
   mkdirSync(plugin)
-  const unpacked = spawnSync('tar', ['-xf', archive, '-C', plugin], {
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT
+  if (process.platform === 'win32' && !systemRoot)
+    throw new Error('cannot locate Windows system tar: SystemRoot is missing')
+  const tar =
+    process.platform === 'win32'
+      ? join(systemRoot, 'System32', 'tar.exe')
+      : 'tar'
+  const unpacked = spawnSync(tar, ['-xf', archive, '-C', plugin], {
     timeout: 30000,
-    stdio: 'ignore',
+    encoding: 'utf8',
+    maxBuffer: 65536,
     windowsHide: true,
   })
-  assert(unpacked.status === 0, 'cannot extract committed source package')
+  if (unpacked.status !== 0)
+    throw new Error(
+      `cannot extract committed source package: status=${unpacked.status} signal=${unpacked.signal} error=${unpacked.error?.message ?? 'none'} stderr=${unpacked.stderr ?? ''}`,
+    )
   const fixture = join(plugin, 'tests/fixtures/relay-production')
   cpSync(
     join(fixture, '.claude-plugin/plugin.json'),
@@ -255,7 +275,7 @@ try {
   const hosted =
     process.env.GITHUB_ACTIONS === 'true' &&
     process.env.RUNNER_ENVIRONMENT === 'github-hosted'
-  const supported = process.platform === 'linux' || process.platform === 'win32'
+  const supported = ['linux', 'darwin', 'win32'].includes(process.platform)
   const runHelper = (...args) =>
     spawnSync(process.execPath, [helper, ...args], {
       timeout: 75000,
@@ -282,10 +302,7 @@ try {
     return process.platform === 'win32' ? true : ownerConnects()
   }
   assert(await ownerControl(), 'owner directory/socket control failed')
-  let crossAccount =
-    process.platform === 'darwin' && hosted
-      ? 'skipped-unsupported'
-      : 'skipped-local'
+  let crossAccount = 'skipped-local'
   if (hosted && supported && helper)
     crossAccount = runHelper(dirname(socket), socket) ? 'passed' : 'failed'
   else if (

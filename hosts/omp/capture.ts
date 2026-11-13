@@ -19,6 +19,7 @@ import {
   replayTick,
   sharedView,
   STEP_MS,
+  timerEffect,
   VIEW_STATE0,
 } from '../../hooks/view-controller'
 import { applySettingsPatch } from '../../hooks/view-settings'
@@ -89,6 +90,7 @@ export function registerCapture(
   let unsubscribe: (() => void) | undefined
   let index: Index | undefined, layout: LayoutWire | undefined
   let replayTimer: ReturnType<ExtensionContext['setInterval']> | undefined
+  let replayEpoch = 0
   let shared = sharedView(VIEW_STATE0)
   let root = ''
   let connected = new Map<string, Set<string>>()
@@ -638,7 +640,8 @@ export function registerCapture(
   }
   const bind = async (context: ExtensionContext, first: boolean) => {
     if (context.agent.kind !== 'main') return
-    if (replayTimer && ctx) ctx.clearTimer(replayTimer)
+    replayEpoch++
+    if (replayTimer !== undefined && ctx) ctx.clearTimer(replayTimer)
     replayTimer = undefined
     shared = sharedView(VIEW_STATE0)
     abort.abort()
@@ -847,11 +850,12 @@ export function registerCapture(
           const verified = await authority.verifyFile(file.id)
           if (!valid()) return refusal('stale-generation')
           if (!verified) return refusal('forbidden')
-          await authority.openFile(
+          const launch = await authority.openFile(
             file.id,
             command.app === 'default' ? undefined : command.app,
+            g,
           )
-          return { ok: true }
+          return { ok: true, launch }
         } catch (error) {
           if (!valid()) return refusal('stale-generation')
           if (error instanceof RelayRefusal) {
@@ -894,21 +898,29 @@ export function registerCapture(
           command.intent,
           facts.events.filter(isStep).length,
         )
-        if (replayTimer) context.clearTimer(replayTimer)
-        replayTimer = undefined
-        if (shared.play.playing) {
-          replayTimer = context.setInterval(() => {
-            if (!current(g)) return
-            shared = {
-              ...shared,
-              play: replayTick(facts.events.filter(isStep).length)(shared.play),
-            }
-            if (!shared.play.playing && replayTimer) {
-              context.clearTimer(replayTimer)
-              replayTimer = undefined
-            }
-            publish()
-          }, STEP_MS)
+        const effect = timerEffect(command.intent)
+        if (effect !== 'none') {
+          replayEpoch++
+          if (replayTimer !== undefined) context.clearTimer(replayTimer)
+          replayTimer = undefined
+          if (effect === 'start' && shared.play.playing) {
+            const clockEpoch = replayEpoch
+            replayTimer = context.setInterval(() => {
+              if (!current(g) || clockEpoch !== replayEpoch) return
+              shared = {
+                ...shared,
+                play: replayTick(facts.events.filter(isStep).length)(
+                  shared.play,
+                ),
+              }
+              if (!shared.play.playing && replayTimer !== undefined) {
+                context.clearTimer(replayTimer)
+                replayTimer = undefined
+                replayEpoch++
+              }
+              publish()
+            }, STEP_MS)
+          }
         }
         publish()
         return { ok: true }
@@ -919,7 +931,8 @@ export function registerCapture(
         publish()
         return { ok: true }
       case 'clear-trail':
-        if (replayTimer) context.clearTimer(replayTimer)
+        replayEpoch++
+        if (replayTimer !== undefined) context.clearTimer(replayTimer)
         replayTimer = undefined
         shared = sharedView(VIEW_STATE0)
         generation++
@@ -1146,7 +1159,9 @@ export function registerCapture(
     if (context.agent.kind !== 'main' || !ctx) return
     abort.abort()
     if (timer) context.clearTimer(timer)
-    if (replayTimer) context.clearTimer(replayTimer)
+    replayEpoch++
+    if (replayTimer !== undefined) context.clearTimer(replayTimer)
+    replayTimer = undefined
     unsubscribe?.()
     emit({ v: 1, kind: 'ended', generation })
     ctx = undefined

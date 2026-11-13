@@ -25,6 +25,20 @@ import { brain } from '../hooks/scene3d.ts'
 import type { FactsWire, ServerEvent } from '../types/browser.ts'
 import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
 
+type BrowserDom = {
+  DOMParser: new () => {
+    parseFromString: (
+      source: string,
+      type: string,
+    ) => { documentElement: { getAttribute: (name: string) => string | null } }
+  }
+  document: {
+    querySelector: (selector: string) => {
+      getAttribute: (name: string) => string | null
+    } | null
+  }
+}
+
 const scratch = process.env.BRAIN_TRAIL_TEST_DIR
 if (!scratch || !process.env.PI_CODING_AGENT_DIR)
   throw new Error('Run through bun scripts/omp-test.mjs for isolation')
@@ -420,9 +434,33 @@ async function until<T>(
       changed,
     )
     await page.locator('button[data-key="play"]').click()
-    await until(
+    const playing = await until(
       () => (snapshot()?.shared.play.step !== null ? snapshot() : undefined),
       changed,
+    )
+    assert.ok(playing.shared.play.playing)
+    const firstStep = playing.shared.play.step
+    if (typeof firstStep !== 'number')
+      throw new Error('replay did not start at a numeric step')
+    const replayEvents = events.length
+    for (let pulse = 0; pulse < 8; pulse++) {
+      await page.waitForTimeout(160)
+      await succeeded(playing.generation, {
+        kind: 'view',
+        intent: { kind: 'preview', ref: null },
+      })
+    }
+    await page.waitForTimeout(100)
+    assert.ok(
+      events
+        .slice(replayEvents)
+        .some(
+          (event) =>
+            event.kind === 'snapshot' &&
+            event.shared.play.step !== null &&
+            event.shared.play.step > firstStep,
+        ),
+      'unrelated view intents restarted the host replay clock',
     )
     await page.locator('button[data-key="live"]').click()
     await until(
@@ -509,6 +547,59 @@ async function until<T>(
     await page.locator('button[data-key="view-3d"]').click()
     const image = page.locator('img[data-key="map"]')
     await image.waitFor({ state: 'visible' })
+    await succeeded(observed.generation, {
+      kind: 'view',
+      intent: { kind: 'follow', following: false },
+    })
+    await until(
+      () => (snapshot()?.shared.zoomed ? snapshot() : undefined),
+      changed,
+    )
+    const imageBounds = await image.boundingBox()
+    assert.ok(imageBounds)
+    await page.mouse.move(
+      imageBounds.x + imageBounds.width / 2,
+      imageBounds.y + imageBounds.height / 2,
+    )
+    await page.mouse.wheel(0, -280)
+    await until(
+      () => (snapshot()?.shared.zoomed === false ? snapshot() : undefined),
+      changed,
+    )
+    const viewBox = () =>
+      image.evaluate((element) => {
+        const source = element.getAttribute('src')
+        if (!source?.startsWith('data:image/svg+xml,')) return null
+        const { DOMParser } = globalThis as unknown as BrowserDom
+        return new DOMParser()
+          .parseFromString(
+            decodeURIComponent(source.slice('data:image/svg+xml,'.length)),
+            'image/svg+xml',
+          )
+          .documentElement.getAttribute('viewBox')
+      })
+    const manualView = await viewBox()
+    assert.ok(manualView)
+    await succeeded(observed.generation, {
+      kind: 'view',
+      intent: { kind: 'follow', following: false },
+    })
+    await until(
+      () => (snapshot()?.shared.zoomed ? snapshot() : undefined),
+      changed,
+    )
+    await page.waitForFunction((before) => {
+      const { document, DOMParser } = globalThis as unknown as BrowserDom
+      const source = document
+        .querySelector('img[data-key="map"]')
+        ?.getAttribute('src')
+      if (!source?.startsWith('data:image/svg+xml,')) return false
+      const svg = new DOMParser().parseFromString(
+        decodeURIComponent(source.slice('data:image/svg+xml,'.length)),
+        'image/svg+xml',
+      )
+      return svg.documentElement.getAttribute('viewBox') !== before
+    }, manualView)
     const latestLayout = events.findLast((entry) => entry.kind === 'layout')
     assert.ok(latestLayout && latestLayout.kind === 'layout')
     const childFile = latestLayout.layout.layout.files.find(
@@ -703,6 +794,30 @@ async function until<T>(
         : undefined
     }, changed)
     assert.equal(outsideHistory.generation, generation)
+    await succeeded(generation, {
+      kind: 'view',
+      intent: { kind: 'preview', ref: { p: outside, out: true } },
+    })
+    await until(
+      () =>
+        snapshot()?.shared.preview?.p === outside ? snapshot() : undefined,
+      changed,
+    )
+    await page.locator('button[data-key="t-files"]').click()
+    await page
+      .locator('[data-key="preview-back"]')
+      .waitFor({ state: 'visible' })
+    await page.getByText(/cannot be read|impossible de lire/i).waitFor({
+      state: 'visible',
+    })
+    await page.locator('[data-key="preview-back"]').click()
+    await until(
+      () => (snapshot()?.shared.preview === null ? snapshot() : undefined),
+      changed,
+    )
+    await page
+      .locator('[data-key="kpi-open-start"]')
+      .waitFor({ state: 'visible' })
     await unlink(outside)
     await symlink(canary, outside)
     await session.sessionManager.flush()

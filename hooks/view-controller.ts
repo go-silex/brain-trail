@@ -162,6 +162,9 @@ export const plan = (
       return frame === undefined
         ? []
         : [
+            ...(i.f === 1
+              ? []
+              : [{ key: 'zoomed' as const, next: () => false }]),
             {
               key: 'camera',
               next: () => zoomFrame(frame.view, i.fx, i.fy, i.f, SIZE),
@@ -441,18 +444,22 @@ export const mapGesture = (
             }
         } else if (!g.right && hit.file !== undefined)
           open = { p: frame.layout.files[hit.file]![0] }
-        else
+        else {
+          if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
           steps.push({
             key: 'camera',
             next: () =>
               zoomFrame(frame.view, g.fx, g.fy, g.right ? 1.8 : 1 / 1.8, SIZE),
           })
+        }
       } else if (g.kind === 'drag') {
         const base =
           memory.drag2d?.press === g.press
             ? memory.drag2d.view
             : { ...frame.view }
         memory = { ...memory, drag2d: { press: g.press, view: base } }
+        if (s.zoomed && (g.fx !== g.sfx || g.fy !== g.sfy))
+          steps.push({ key: 'zoomed', next: () => false })
         steps.push({
           key: 'camera',
           next: () => panFrame(base, g.fx - g.sfx, g.fy - g.sfy),
@@ -477,9 +484,10 @@ export const mapWheel = (
       },
     ]
   const frame = frames.d2
-  return frame === undefined
+  return frame === undefined || by === 0
     ? []
     : [
+        { key: 'zoomed', next: () => false },
         {
           key: 'camera',
           next: () => zoomFrame(frame.view, hover.fx, hover.fy, f, SIZE),

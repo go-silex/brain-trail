@@ -4,6 +4,7 @@
 import type { On, RenderElement } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { mock } from 'claude-code/testing'
+import type { HostCommand } from '../../types/browser'
 
 export const FILE_LIST = ['CLAUDE.md', 'notes/a.md', 'notes/b.md', 'src/app.ts']
 export const NOTE_BODY = '# Note A\n\nSYNTHETIC_NOTE_BODY\n'
@@ -327,12 +328,26 @@ export type Host = {
   writes: { path: string; text: string }[]
   fixtureInput: unknown
   opened: string[][]
+  logs: { text: string; to: 'transcript' | 'debug' }[]
   browserEvents: unknown[]
   browserReady: Promise<void>
   relayStarted: () => boolean
   preparedFiles: string[]
   readFiles: string[]
   fileRead: Promise<void>
+  filePrepared: Promise<void>
+  command: (generation: number, command: HostCommand) => Promise<unknown>
+  disconnectRelay: () => void
+  holdFork: () => void
+  forkStarted: Promise<void>
+  releaseFork: () => void
+  holdPlayWrite: () => void
+  playWriteBlocked: Promise<void>
+  releasePlayWrite: () => void
+  holdPreviewRead: () => void
+  previewReadBlocked: Promise<void>
+  releasePreviewRead: () => void
+  langStored: Promise<void>
   listing: 'files' | 'empty'
   releaseList: () => void
   settled: () => Promise<void>
@@ -418,20 +433,64 @@ export const installHost = (
   const store = new Map<string, unknown>()
   const writes: { path: string; text: string }[] = []
   const opened: string[][] = []
+  const logs: { text: string; to: 'transcript' | 'debug' }[] = []
   const browserEvents: unknown[] = []
   let relayStarted = false
   let resolveBrowserReady = () => {}
   const browserReady = new Promise<void>((resolve) => {
     resolveBrowserReady = resolve
   })
-  const holdRelay = new Promise<void>(() => {})
+  const frames: string[] = []
+  let wakeRelay = () => {}
+  let relayEnded = false
+  let commandId = 0
+  const replies = new Map<string, (reply: unknown) => void>()
+  const sendFrame = (frame: string) => {
+    frames.push(frame)
+    wakeRelay()
+  }
   const preparedFiles: string[] = []
+  let resolveFilePrepared = () => {}
+  const filePrepared = new Promise<void>((resolve) => {
+    resolveFilePrepared = resolve
+  })
   const readFiles: string[] = []
   let resolveFileRead = () => {}
   const fileRead = new Promise<void>((resolve) => {
     resolveFileRead = resolve
   })
   const handles = new Map<string, string>()
+  let forkHeld = false
+  let resolveForkStarted = () => {}
+  let releaseFork = () => {}
+  const forkStarted = new Promise<void>((resolve) => {
+    resolveForkStarted = resolve
+  })
+  const forkGate = new Promise<void>((resolve) => {
+    releaseFork = resolve
+  })
+  let playWriteHeld = false
+  let resolvePlayBlocked = () => {}
+  let releasePlayWrite = () => {}
+  const playWriteBlocked = new Promise<void>((resolve) => {
+    resolvePlayBlocked = resolve
+  })
+  const playWriteGate = new Promise<void>((resolve) => {
+    releasePlayWrite = resolve
+  })
+  let previewReadHeld = false
+  let resolvePreviewBlocked = () => {}
+  let releasePreviewRead = () => {}
+  let resolveLangStored = () => {}
+  const previewReadBlocked = new Promise<void>((resolve) => {
+    resolvePreviewBlocked = resolve
+  })
+  const previewReadGate = new Promise<void>((resolve) => {
+    releasePreviewRead = resolve
+  })
+  const langStored = new Promise<void>((resolve) => {
+    resolveLangStored = resolve
+  })
   const ctl = {
     listing:
       scenario.phase === 'error' ? ('empty' as const) : ('files' as const),
@@ -481,6 +540,11 @@ export const installHost = (
     if (e.plugin !== 'brain-trail-v2') return next(e)
     // The host subscribes the drawing on get. A later set redraws it only if this get reached the host.
     await next(e)
+    if (e.key === 'preview' && previewReadHeld) {
+      previewReadHeld = false
+      resolvePreviewBlocked()
+      await previewReadGate
+    }
     const heldState = state.get(e.key)
     if (heldState === undefined)
       return { value: { value: undefined, version: 0 } }
@@ -488,6 +552,11 @@ export const installHost = (
   })
   on('state.set', async (_$, e, next) => {
     if (e.plugin !== 'brain-trail-v2') return next(e)
+    if (e.key === 'play' && playWriteHeld) {
+      playWriteHeld = false
+      resolvePlayBlocked()
+      await playWriteGate
+    }
     const current = state.get(e.key)
     const version = current?.version ?? 0
     if (e.ifVersion !== undefined && e.ifVersion !== version)
@@ -503,6 +572,7 @@ export const installHost = (
   on('store.get', (_$, e) => ({ value: store.get(e.key) }))
   on('store.set', (_$, e) => {
     store.set(e.key, e.value)
+    if (e.key === 'lang') resolveLangStored()
     return { value: undefined }
   })
   on('store.delete', (_$, e) => {
@@ -596,7 +666,14 @@ export const installHost = (
         stream: 'stdout' as const,
         text: '{"t":"clients","n":1,"seq":1}\n',
       }
-    await holdRelay
+    while (!relayEnded) {
+      if (frames.length === 0)
+        await new Promise<void>((resolve) => {
+          wakeRelay = resolve
+        })
+      while (frames.length > 0)
+        yield { stream: 'stdout' as const, text: frames.shift()! }
+    }
     return { value: { code: 0, signal: null } }
   })
   on('http.fetch', (_$, e, next) => {
@@ -605,6 +682,7 @@ export const installHost = (
       ![
         '/h/event',
         '/h/ready',
+        '/h/reply',
         '/h/launch',
         '/h/apps',
         '/h/file/prepare',
@@ -620,10 +698,18 @@ export const installHost = (
       id?: string
       kind?: string
       seq?: number
+      open?: boolean
+      body?: unknown
     }
     let response: unknown = { ok: true }
+    if (e.url.endsWith('/launch') && request.open === true)
+      response = { ok: true, status: 'dispatched' }
     if (e.url.endsWith('/apps')) response = { apps: [] }
     if (e.url.endsWith('/event')) browserEvents.push(request)
+    if (e.url.endsWith('/reply') && request.id !== undefined) {
+      replies.get(request.id)?.(request.body)
+      replies.delete(request.id)
+    }
     if (e.url.endsWith('/ready')) {
       const ready =
         scenario.browser3d &&
@@ -649,6 +735,7 @@ export const installHost = (
         const id = String(handles.size + 1)
         handles.set(id, path)
         preparedFiles.push(path)
+        resolveFilePrepared()
         response = { id, path, inside: true }
       }
     }
@@ -685,14 +772,22 @@ export const installHost = (
     if (e.event === 'ui.render') markPacked()
     return next(e)
   })
+  on('ui.log', (_$, e) => {
+    logs.push({ text: e.text, to: e.to })
+    return { value: undefined }
+  })
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.copy', () => ({ value: { isCopied: true } }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('model.fork', () => ({
-    value: { isAnswered: false as const, reason: 'nothing-to-fork' as const },
-  }))
+  on('model.fork', async () => {
+    resolveForkStarted()
+    if (forkHeld) await forkGate
+    return {
+      value: { isAnswered: false as const, reason: 'nothing-to-fork' as const },
+    }
+  })
   on('prompt.fill', () => ({ isFilled: true }))
 
   const fixtureInput: unknown = JSON.parse(
@@ -717,12 +812,42 @@ export const installHost = (
     fixtureInput,
     writes,
     opened,
+    logs,
     browserEvents,
     browserReady,
     relayStarted: () => relayStarted,
     preparedFiles,
     readFiles,
     fileRead,
+    filePrepared,
+    command: (generation, command) =>
+      new Promise((resolve) => {
+        const id = String(++commandId)
+        replies.set(id, resolve)
+        sendFrame(
+          `${JSON.stringify({ t: 'cmd', id, body: { v: 1, generation, command } })}\n`,
+        )
+      }),
+    disconnectRelay: () => {
+      relayEnded = true
+      wakeRelay()
+    },
+    holdFork: () => {
+      forkHeld = true
+    },
+    forkStarted,
+    releaseFork,
+    holdPlayWrite: () => {
+      playWriteHeld = true
+    },
+    playWriteBlocked,
+    releasePlayWrite,
+    holdPreviewRead: () => {
+      previewReadHeld = true
+    },
+    previewReadBlocked,
+    releasePreviewRead,
+    langStored,
     get listing() {
       return ctl.listing
     },

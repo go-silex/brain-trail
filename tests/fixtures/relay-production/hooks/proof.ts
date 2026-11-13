@@ -22,7 +22,10 @@ export const register: Register = (on) => {
       resolveDone = resolve
     })
     const binary = await relayBinary($)
-    const port = relayIO($, binary)
+    const port = relayIO(
+      $,
+      (generation) => generation === feed.current().generation,
+    )
     const start = port.start
     port.start = (exe, args, input, onChunk, onExit) =>
       start(
@@ -39,9 +42,6 @@ export const register: Register = (on) => {
     port.request = (path, token, route, body) => {
       socket = path
       return request(path, token, route, body)
-    }
-    port.open = async (path) => {
-      launch = path
     }
     const feed = {
       current: () => ({
@@ -75,7 +75,7 @@ export const register: Register = (on) => {
         `${$.plugin.root}/hosts/browser/dist`,
         feed,
       )
-      await client.openBrowser()
+      launch = await client.prepareBrowser()
       await $.fs.write(
         `${cwd}/relay-production.json`,
         JSON.stringify({ phase: 'ready', launch, socket }),

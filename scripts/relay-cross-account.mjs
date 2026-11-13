@@ -18,14 +18,10 @@ if (
   !args.slice(mode === '--hosted' ? 0 : 1).every(isAbsolute)
 )
   process.exit(1)
-if (
-  !['linux', 'win32', 'darwin'].includes(process.platform) ||
-  (mode === '--hosted' && process.platform === 'darwin')
-)
-  process.exit(1)
+if (!['linux', 'win32', 'darwin'].includes(process.platform)) process.exit(1)
 let command = executable
 let commandArgs = [mode, ...args.slice(mode === '--hosted' ? 0 : 1)]
-if (mode === '--hosted' && process.platform === 'linux') {
+if (mode === '--hosted' && process.platform !== 'win32') {
   command = 'sudo'
   commandArgs = [
     '-n',

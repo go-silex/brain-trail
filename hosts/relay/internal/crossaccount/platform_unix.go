@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package main
 
@@ -20,7 +20,7 @@ import (
 func serviceEntry() bool { return false }
 func managerGuard() error {
 	if os.Geteuid() != 0 {
-		return errors.New("Linux proof requires a root-launched manager")
+		return errors.New("Unix proof requires a root-launched manager")
 	}
 	return nil
 }
@@ -44,17 +44,29 @@ func verifyIdentity(r request) error {
 	return nil
 }
 
+// macOS can represent its built-in nobody IDs as signed decimal values.
+func parseID(value string) (uint32, error) {
+	if value == "-2" {
+		return ^uint32(1), nil
+	}
+	id, err := strconv.ParseUint(value, 10, 32)
+	if err != nil || id == 0 || id == uint64(^uint32(0)) {
+		return 0, errors.New("invalid nobody identity")
+	}
+	return uint32(id), nil
+}
+
 func execute(stage string, r request) error {
 	if os.Geteuid() != 0 {
-		return errors.New("Linux proof requires a root-launched manager")
+		return errors.New("Unix proof requires a root-launched manager")
 	}
 	u, err := user.Lookup("nobody")
 	if err != nil {
 		return err
 	}
-	uid, e1 := strconv.ParseUint(u.Uid, 10, 32)
-	gid, e2 := strconv.ParseUint(u.Gid, 10, 32)
-	if e1 != nil || e2 != nil || uid == 0 {
+	uid, e1 := parseID(u.Uid)
+	gid, e2 := parseID(u.Gid)
+	if e1 != nil || e2 != nil {
 		return errors.New("invalid nobody identity")
 	}
 	info, err := os.Stat(r.Directory)
@@ -62,7 +74,7 @@ func execute(stage string, r request) error {
 		return err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || uint32(uid) == st.Uid || st.Uid == 0 {
+	if !ok || uid == st.Uid || st.Uid == 0 {
 		return errors.New("invalid relay directory owner")
 	}
 	src, err := os.Executable()
@@ -93,7 +105,7 @@ func execute(stage string, r request) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(stage, "probe"), "--child", string(arg))
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
 	data, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("other-account probe failed: %w", err)

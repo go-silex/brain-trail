@@ -1,6 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
+import { packFiles } from '../hooks/map'
 import {
+  GESTURE0,
+  mapGesture,
+  mapWheel,
+  plan,
   reduceSharedView,
   sharedView,
   VIEW_STATE0,
@@ -93,4 +98,45 @@ test('shared preview and follow do not project another surface tab or camera', (
   expect(Object.keys(following).sort()).toEqual(['play', 'preview', 'zoomed'])
   expect(surface.tab).toBe('settings')
   expect(surface.camera).toEqual({ x: 10, y: 20, side: 30 })
+})
+
+test('2D navigation turns follow off while no-op wheel preserves it', () => {
+  const layout = packFiles(['notes/a.md'], 'Example')
+  const frames = {
+    d2: {
+      view: { vx: 10, vy: 20, vw: 400, vh: 300, px: 1 },
+      layout,
+      touched: new Set<number>(),
+    },
+    d3: undefined,
+  }
+  const state = { view3d: false, zoomed: true, cam3d: VIEW_STATE0.cam3d }
+  const drag = mapGesture(
+    { kind: 'drag', press: 1, sfx: 0.2, sfy: 0.2, fx: 0.4, fy: 0.3 },
+    state,
+    GESTURE0,
+    frames,
+    { now: 100, hoverNames: false },
+  )
+  const background = mapGesture(
+    { kind: 'click', fx: 0.5, fy: 0.5, right: true },
+    state,
+    GESTURE0,
+    frames,
+    { now: 100, hoverNames: false },
+  )
+  const wheel = mapWheel(1, false, { fx: 0.5, fy: 0.5 }, frames)
+  const toolbar = plan(
+    { kind: 'zoom-2d', fx: 0.5, fy: 0.5, f: 1.8 },
+    { now: 100, frames },
+  )
+  for (const steps of [drag.steps, background.steps, wheel, toolbar]) {
+    const follow = steps.find((step) => step.key === 'zoomed')
+    expect(follow?.key === 'zoomed' && follow.next(true)).toBe(false)
+    expect(steps.some((step) => step.key === 'camera')).toBe(true)
+  }
+  expect(mapWheel(0, false, { fx: 0.5, fy: 0.5 }, frames)).toEqual([])
+  expect(
+    mapWheel(1, false, { fx: 0.5, fy: 0.5 }, { d2: undefined, d3: undefined }),
+  ).toEqual([])
 })

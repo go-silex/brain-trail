@@ -180,32 +180,46 @@ export async function captureBrowserScene(
     }
     await page.locator('button[data-key="spin"]').click()
     const canvas = await page.locator('.bt-scene3d canvas').elementHandle()
-    const pickedFiles = await canvas.evaluate((element) => {
-      const rect = element.getBoundingClientRect()
-      const tip = element.parentElement?.querySelector('.bt-tip')
-      const found = new Map()
-      for (let y = rect.top + 3; y < rect.bottom - 3; y += 6) {
-        for (let x = rect.left + 3; x < rect.right - 3; x += 6) {
-          element.dispatchEvent(
-            new PointerEvent('pointermove', {
-              clientX: x,
-              clientY: y,
-              bubbles: true,
-            }),
-          )
-          if (
-            tip &&
-            !tip.hidden &&
-            tip.textContent &&
-            !found.has(tip.textContent)
-          )
-            found.set(tip.textContent, { x, y })
+    const scanFiles = () =>
+      canvas.evaluate((element) => {
+        const rect = element.getBoundingClientRect()
+        const tip = element.parentElement?.querySelector('.bt-tip')
+        const found = new Map()
+        for (let y = rect.top + 3; y < rect.bottom - 3; y += 6) {
+          for (let x = rect.left + 3; x < rect.right - 3; x += 6) {
+            element.dispatchEvent(
+              new PointerEvent('pointermove', {
+                clientX: x,
+                clientY: y,
+                bubbles: true,
+              }),
+            )
+            if (tip && !tip.hidden && tip.textContent) {
+              const points = found.get(tip.textContent) ?? []
+              points.push({ x, y })
+              found.set(tip.textContent, points)
+            }
+          }
         }
-      }
-      return [...found]
-    })
+        return [...found].map(([name, points]) => {
+          const mean = points.reduce(
+            (sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }),
+            { x: 0, y: 0 },
+          )
+          mean.x /= points.length
+          mean.y /= points.length
+          const point = points.reduce((best, candidate) =>
+            Math.hypot(candidate.x - mean.x, candidate.y - mean.y) <
+            Math.hypot(best.x - mean.x, best.y - mean.y)
+              ? candidate
+              : best,
+          )
+          return [name, point]
+        })
+      })
+    const fittedFiles = await scanFiles()
     for (const name of layout.layout.paths)
-      if (!pickedFiles.some(([file]) => file === name))
+      if (!fittedFiles.some(([file]) => file === name))
         throw new Error(`default scene did not fit pickable file ${name}`)
     const measure = async () =>
       page.evaluate(() => {
@@ -248,6 +262,103 @@ export async function captureBrowserScene(
       throw new Error(
         `invalid initial browser layout: ${JSON.stringify(initial)}`,
       )
+    const bounds = await canvas.boundingBox()
+    if (!bounds) throw new Error('WebGL canvas has no bounds')
+    await page.mouse.move(
+      bounds.x + bounds.width / 2,
+      bounds.y + bounds.height / 2,
+    )
+    await page.mouse.wheel(0, -360)
+    const projected = () =>
+      canvas.evaluate((element) =>
+        [
+          ...element.parentElement.querySelectorAll('.bt-scene-labels span'),
+        ].map((label) => {
+          const parent = label.parentElement.getBoundingClientRect()
+          return {
+            text: label.textContent,
+            left: label.style.left,
+            top: label.style.top,
+            parent: [parent.x, parent.y, parent.width, parent.height],
+            hidden: label.hidden,
+          }
+        }),
+      )
+    const settled = await canvas.evaluate(async (element) => {
+      const sample = () =>
+        JSON.stringify(
+          [
+            ...element.parentElement.querySelectorAll('.bt-scene-labels span'),
+          ].map((label) => {
+            const parent = label.parentElement.getBoundingClientRect()
+            return [
+              label.textContent,
+              label.style.left,
+              label.style.top,
+              parent.x,
+              parent.y,
+              parent.width,
+              parent.height,
+              label.hidden,
+            ]
+          }),
+        )
+      let previous = ''
+      let unchanged = 0
+      for (let frame = 0; frame < 1200; frame++) {
+        await new Promise((resolve) => requestAnimationFrame(resolve))
+        const current = sample()
+        unchanged = current === previous ? unchanged + 1 : 0
+        if (unchanged >= 30 && current !== '[]') return true
+        previous = current
+      }
+      return false
+    })
+    if (!settled)
+      throw new Error('projected WebGL labels did not settle after zoom')
+    const projectionBefore = await projected()
+    if (projectionBefore.length < 2)
+      throw new Error(
+        'WebGL camera proof needs at least two projected landmarks',
+      )
+    const pickedFiles = await scanFiles()
+    if (
+      !pickedFiles.length ||
+      !pickedFiles.some(([name, point]) => {
+        const before = fittedFiles.find(([file]) => file === name)?.[1]
+        return before && Math.hypot(point.x - before.x, point.y - before.y) > 8
+      })
+    )
+      throw new Error(
+        'WebGL zoom did not move the camera away from default fit',
+      )
+    const spinControl = await page
+      .locator('button[data-key="spin"]')
+      .textContent()
+    const inspectPicks = () =>
+      canvas.evaluate((element, coordinates) => {
+        const tip = element.parentElement?.querySelector('.bt-tip')
+        return coordinates.map(([name, point]) => ({
+          name,
+          point,
+          neighbors: [
+            [0, 0],
+            [-2, 0],
+            [2, 0],
+            [0, -2],
+            [0, 2],
+          ].map(([dx, dy]) => {
+            element.dispatchEvent(
+              new PointerEvent('pointermove', {
+                clientX: point.x + dx,
+                clientY: point.y + dy,
+                bubbles: true,
+              }),
+            )
+            return { dx, dy, hit: tip && !tip.hidden ? tip.textContent : null }
+          }),
+        }))
+      }, pickedFiles)
     const stale = {
       ...snapshot,
       generation: snapshot.generation - 1,
@@ -267,6 +378,8 @@ export async function captureBrowserScene(
         meter: { ...snapshot.facts.meter, percent: 43 },
       },
     }
+    for (const client of clients)
+      client.write(`data: ${JSON.stringify(layout)}\n\n`)
     for (const client of clients)
       client.write(`data: ${JSON.stringify(ordinary)}\n\n`)
     await page
@@ -288,13 +401,78 @@ export async function captureBrowserScene(
         return tip && !tip.hidden && tip.textContent === name
       })
     }, pickedFiles)
-    if (!cameraStable)
+    const projectionAfter = await projected()
+    if (
+      !cameraStable ||
+      JSON.stringify(projectionBefore) !== JSON.stringify(projectionAfter)
+    ) {
+      const rescanned = await scanFiles()
       throw new Error(
-        'ordinary meter update moved the camera or picking geometry',
+        `ordinary meter update changed camera/picking: ${JSON.stringify({
+          pickedFiles,
+          rescanned,
+          projectionBefore,
+          projectionAfter,
+          spinControl,
+          action: 'wheel zoom then equal-layout and meter snapshot',
+          neighborhoods: await inspectPicks(),
+        })}`,
       )
-    const hiddenNames = {
+    }
+    const second = await fetch(`${origin}/events`)
+    if (!second.ok || !second.body)
+      throw new Error('second SSE client could not connect')
+    for (const client of clients)
+      client.write(`data: ${JSON.stringify(layout)}\n\n`)
+    const secondPublish = {
       ...ordinary,
       revision: ordinary.revision + 1,
+      facts: {
+        ...ordinary.facts,
+        meter: { ...ordinary.facts.meter, percent: 44 },
+      },
+    }
+    for (const client of clients)
+      client.write(`data: ${JSON.stringify(secondPublish)}\n\n`)
+    await page
+      .getByText('44 %', { exact: false })
+      .first()
+      .waitFor({ state: 'visible' })
+    const secondStable = await canvas.evaluate((element, coordinates) => {
+      const tip = element.parentElement?.querySelector('.bt-tip')
+      return coordinates.every(([name, point]) => {
+        element.dispatchEvent(
+          new PointerEvent('pointermove', {
+            clientX: point.x,
+            clientY: point.y,
+            bubbles: true,
+          }),
+        )
+        return tip && !tip.hidden && tip.textContent === name
+      })
+    }, pickedFiles)
+    const projectionSecond = await projected()
+    if (
+      !secondStable ||
+      JSON.stringify(projectionBefore) !== JSON.stringify(projectionSecond)
+    )
+      throw new Error(
+        `second SSE client publication changed camera/picking: ${JSON.stringify(
+          {
+            pickedFiles,
+            rescanned: await scanFiles(),
+            projectionBefore,
+            projectionSecond,
+            spinControl,
+            action: 'wheel zoom then second SSE publication',
+            neighborhoods: await inspectPicks(),
+          },
+        )}`,
+      )
+    await second.body.cancel()
+    const hiddenNames = {
+      ...ordinary,
+      revision: ordinary.revision + 2,
       facts: {
         ...ordinary.facts,
         settings: { ...ordinary.facts.settings, hover: false },
@@ -307,7 +485,7 @@ export async function captureBrowserScene(
     )
     const restoredNames = {
       ...ordinary,
-      revision: ordinary.revision + 2,
+      revision: ordinary.revision + 3,
       facts: {
         ...ordinary.facts,
         settings: { ...ordinary.facts.settings, hover: true },
@@ -333,6 +511,27 @@ export async function captureBrowserScene(
     )
     if (!(await canvas.evaluate((el) => el.isConnected)))
       throw new Error('ordinary settings update replaced the WebGL canvas')
+    if (
+      !snapshot.facts.breakdown?.memoryFiles?.some(
+        (file) => file.path === '/work/demo/CLAUDE.md' && file.tokens === 900,
+      )
+    )
+      throw new Error('native feed omitted the host startup memory breakdown')
+    await page.locator('[data-key="t-context"]').click()
+    await page.locator('button[data-key="more-context"]').click()
+    await page
+      .locator('[data-key="open-mem-/work/demo/CLAUDE.md"]')
+      .waitFor({ state: 'visible' })
+    await page.locator('[data-key="t-files"]').click()
+    const start = page.locator('[data-key="kpi-start"]')
+    if (!/\b1\b/.test(await start.innerText()))
+      throw new Error('Files did not count the host startup memory file')
+    await page.locator('[data-key="kpi-open-start"]').click()
+    await page
+      .locator('[data-key="kd-open-CLAUDE.md"]')
+      .waitFor({ state: 'visible' })
+    await page.locator('[data-key="t-map"]').click()
+    await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
     await page.setViewportSize({ width: 700, height: 900 })
     await page.waitForTimeout(100)
     const resized = await measure()

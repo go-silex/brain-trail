@@ -114,6 +114,7 @@ export class WebGLScene {
     this.fit()
     this.resize()
     this.follow()
+    this.positionLabels()
     this.frame = requestAnimationFrame(this.tick)
   }
 
@@ -154,6 +155,7 @@ export class WebGLScene {
     )
       this.fit()
     this.follow()
+    this.positionLabels()
   }
 
   private makeHalo() {
@@ -787,6 +789,24 @@ export class WebGLScene {
   private blur = () => {
     this.keys.clear()
   }
+  private positionLabels() {
+    this.camera.updateMatrixWorld()
+    const projected = new THREE.Vector3()
+    for (const item of this.labelItems) {
+      projected.copy(item.position).project(this.camera)
+      const visible =
+        projected.z >= -1 &&
+        projected.z <= 1 &&
+        Math.abs(projected.x) <= 1 &&
+        Math.abs(projected.y) <= 1
+      item.element.hidden = !visible
+      if (visible) {
+        item.element.style.left = `${(projected.x + 1) * 50}%`
+        item.element.style.top = `${(1 - projected.y) * 50}%`
+      }
+    }
+  }
+
   private tick = (now: number) => {
     if (this.disposed) return
     const dt = this.last ? Math.min(0.05, (now - this.last) / 1000) : 0
@@ -847,20 +867,7 @@ export class WebGLScene {
         ((now / 1000) * comet.speed + comet.offset) % 1,
         comet.sprite.position,
       )
-    const projected = new THREE.Vector3()
-    for (const item of this.labelItems) {
-      projected.copy(item.position).project(this.camera)
-      const visible =
-        projected.z >= -1 &&
-        projected.z <= 1 &&
-        Math.abs(projected.x) <= 1 &&
-        Math.abs(projected.y) <= 1
-      item.element.hidden = !visible
-      if (visible) {
-        item.element.style.left = `${(projected.x + 1) * 50}%`
-        item.element.style.top = `${(1 - projected.y) * 50}%`
-      }
-    }
+    this.positionLabels()
     if (this.width && this.height) this.composer.render()
     this.frame = requestAnimationFrame(this.tick)
   }

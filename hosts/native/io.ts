@@ -30,7 +30,10 @@ export async function relayBinary($: EngineInterface): Promise<string> {
   return `${$.plugin.root}/hosts/relay/bin/brain-trail-relay-${os}-${cpu}${windows ? '.exe' : ''}`
 }
 
-export function relayIO($: EngineInterface, binary: string): RelayIO {
+export function relayIO(
+  $: EngineInterface,
+  isCurrent: (generation: number) => boolean,
+): RelayIO {
   return {
     async start(executable, args, stdin, onChunk, onExit) {
       const stream = $.process.spawn({
@@ -73,13 +76,15 @@ export function relayIO($: EngineInterface, binary: string): RelayIO {
       })
       return { status: result.status, body: result.text }
     },
-    async open(path) {
-      const result = await $.process.run([binary, 'open', path])
-      if (result.exitCode !== 0) throw new Error('Unable to open browser')
-    },
     schedule(callback, ms) {
       const timer = $.clock.after(ms, callback)
       return () => timer.cancel()
+    },
+    onLaunchOutcome(outcome) {
+      if (isCurrent(outcome.generation))
+        void $.ui.toast(
+          `Brain Trail: Opener process exited with an error (code ${outcome.code}).`,
+        )
     },
     onFailure(error) {
       const detail =

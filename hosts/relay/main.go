@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,7 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inl
 
 type relay struct {
 	mu                                  sync.Mutex
+	launchMu                            sync.Mutex
 	hostToken, token, host, assets, dir string
 	launch                              string
 	launchExpiry                        time.Time
@@ -38,7 +40,9 @@ type relay struct {
 	clients                             map[chan []byte]struct{}
 	pending                             map[string]chan json.RawMessage
 	out                                 chan []byte
+	outputFailure                       chan struct{}
 	files                               *FileAuthority
+	observers                           int
 }
 type limitedListener struct {
 	net.Listener
@@ -84,6 +88,13 @@ func secret() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
+func validLaunchIdentity(id string, generation *int64) bool {
+	if len(id) != 43 || generation == nil || *generation < 0 || *generation > 9007199254740991 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(id)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == id
+}
 func ascii(v any) ([]byte, error) {
 	b, e := json.Marshal(v)
 	if e != nil {
@@ -114,6 +125,50 @@ func (s *relay) frame(v any) bool {
 	default:
 		return false
 	}
+}
+
+// startLaunch owns the only Wait call for each successfully started child.
+func (s *relay) startLaunch(command *exec.Cmd, id string, generation int64) (string, error) {
+	return s.startLaunchForCode(command, id, generation, "")
+}
+
+func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int64, launchCode string) (string, error) {
+	s.mu.Lock()
+	if s.observers >= 32 {
+		s.mu.Unlock()
+		return "", errors.New("too many active launches")
+	}
+	s.observers++
+	s.mu.Unlock()
+	if err := command.Start(); err != nil {
+		s.mu.Lock()
+		s.observers--
+		s.mu.Unlock()
+		return "", err
+	}
+	go func() {
+		err := command.Wait()
+		code := 0
+		if err != nil {
+			code = -1
+			if command.ProcessState != nil {
+				code = command.ProcessState.ExitCode()
+			}
+		}
+		if !s.frame(map[string]any{"t": "launch-exit", "id": id, "generation": generation, "code": code}) {
+			select {
+			case s.outputFailure <- struct{}{}:
+			default:
+			}
+		}
+		s.mu.Lock()
+		if code != 0 && launchCode != "" && s.launch == launchCode {
+			s.launch = ""
+		}
+		s.observers--
+		s.mu.Unlock()
+	}()
+	return "spawned", nil
 }
 func (s *relay) broadcast(b []byte) {
 	for ch := range s.clients {
@@ -267,6 +322,24 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, map[string]bool{"ok": true})
 	case "/h/launch":
+		var q struct {
+			Open       bool   `json:"open"`
+			ID         string `json:"id"`
+			Generation *int64 `json:"generation"`
+		}
+		if json.Unmarshal(b, &q) != nil || (q.Open && !validLaunchIdentity(q.ID, q.Generation)) {
+			w.WriteHeader(400)
+			return
+		}
+		s.launchMu.Lock()
+		defer s.launchMu.Unlock()
+		s.mu.Lock()
+		busy := s.launch != "" && time.Now().Before(s.launchExpiry)
+		s.mu.Unlock()
+		if busy {
+			jsonOut(w, map[string]any{"ok": false, "error": "busy"})
+			return
+		}
 		code, err := secret()
 		if err != nil {
 			w.WriteHeader(500)
@@ -280,7 +353,26 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		data := []byte(`<!doctype html><meta http-equiv="refresh" content="0;url=` + u + `"><title>Opening Brain Trail</title>`)
 		p := filepath.Join(s.dir, "open.html")
 		if err = os.WriteFile(p, data, 0600); err != nil {
+			s.mu.Lock()
+			if s.launch == code {
+				s.launch = ""
+			}
+			s.mu.Unlock()
 			w.WriteHeader(500)
+			return
+		}
+		if q.Open {
+			status, err := s.openPath(p, "", q.ID, *q.Generation, code)
+			if err != nil {
+				s.mu.Lock()
+				if s.launch == code {
+					s.launch = ""
+				}
+				s.mu.Unlock()
+				jsonOut(w, map[string]any{"ok": false, "error": "launch-failed"})
+				return
+			}
+			jsonOut(w, map[string]any{"ok": true, "status": status})
 			return
 		}
 		jsonOut(w, map[string]bool{"ok": true})
@@ -330,19 +422,26 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, map[string]bool{"ok": true})
 	case "/h/file/open":
 		var q struct {
-			ID  string `json:"id"`
-			App string `json:"app"`
+			ID         string `json:"id"`
+			App        string `json:"app"`
+			LaunchID   string `json:"launchId"`
+			Generation *int64 `json:"generation"`
 		}
-		json.Unmarshal(b, &q)
+		if json.Unmarshal(b, &q) != nil || q.ID == "" || !validLaunchIdentity(q.LaunchID, q.Generation) {
+			w.WriteHeader(400)
+			return
+		}
 		p, err := s.files.Verify(q.ID)
-		if err == nil {
-			err = openPath(p, q.App)
-		}
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		jsonOut(w, map[string]bool{"ok": true})
+		status, err := s.openPath(p, q.App, q.LaunchID, *q.Generation, "")
+		if err != nil {
+			jsonOut(w, map[string]any{"ok": false, "error": "launch-failed"})
+			return
+		}
+		jsonOut(w, map[string]any{"ok": true, "status": status})
 	default:
 		w.WriteHeader(404)
 	}
@@ -580,7 +679,7 @@ func serve(assets string) error {
 	if e != nil {
 		return e
 	}
-	s := &relay{hostToken: cfg.HostToken, token: token, host: tcp.Addr().String(), assets: assets, dir: dir, clients: make(map[chan []byte]struct{}), pending: make(map[string]chan json.RawMessage), out: make(chan []byte, 64), files: NewFileAuthority()}
+	s := &relay{hostToken: cfg.HostToken, token: token, host: tcp.Addr().String(), assets: assets, dir: dir, clients: make(map[chan []byte]struct{}), pending: make(map[string]chan json.RawMessage), out: make(chan []byte, 64), outputFailure: make(chan struct{}, 1), files: NewFileAuthority()}
 	defer s.files.Close()
 	done := make(chan error, 3)
 	go func() {
@@ -613,6 +712,8 @@ func serve(assets string) error {
 			return nil
 		case e := <-done:
 			return e
+		case <-s.outputFailure:
+			return errors.New("launch exit frame not queued")
 		case <-ticker.C:
 			if !s.frame(map[string]any{"t": "ping"}) {
 				return errors.New("output busy")
@@ -624,10 +725,8 @@ func main() {
 	var e error
 	if len(os.Args) == 3 && os.Args[1] == "serve" {
 		e = serve(os.Args[2])
-	} else if len(os.Args) == 3 && os.Args[1] == "open" {
-		e = openPath(os.Args[2], "")
 	} else {
-		e = errors.New("usage: brain-trail-relay serve ASSETS | open PATH")
+		e = errors.New("usage: brain-trail-relay serve ASSETS")
 	}
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)

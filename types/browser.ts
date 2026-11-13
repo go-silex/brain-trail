@@ -8,6 +8,7 @@ import type {
   TrailSettings,
 } from './model'
 import type {
+  BreakdownFacts,
   CompactOutcome,
   CostHistory,
   InstructionFile,
@@ -22,6 +23,7 @@ export type FactsWire = {
   meter: Meter
   events: TrailEvent[]
   settings: TrailSettings
+  breakdown?: BreakdownFacts
   coach: Coach
   workspace:
     | { kind: 'loading'; since: number }
@@ -65,8 +67,9 @@ export type HostCommand =
         | 'coach-analyse'
         | 'coach-apply'
     }
+export type LaunchReceipt = { status: 'spawned' | 'dispatched' }
 export type CommandReplies = {
-  open: { ok: true }
+  open: { ok: true; launch: LaunchReceipt }
   'preview-read': { ok: true; text: string | null }
   settings: { ok: true }
   view: { ok: true }
@@ -85,6 +88,7 @@ export type CommandRefusal = {
     | 'invalid'
     | 'forbidden'
     | 'unsupported'
+    | 'launch-failed'
     | 'busy'
     | 'timeout'
     | 'too-large'
