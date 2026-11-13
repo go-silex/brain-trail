@@ -56,11 +56,13 @@ test('the files tab shows figures, the folders as a tree, and a file in the pane
     value: {
       exitCode: 0,
       stdout:
-        e.argv[0] === 'git'
-          ? 'notes/a.md\nnotes/deep/b.md\nnotes/c.md\nsrc/app.ts\n'
-          : e.argv[0] === 'uname'
-            ? 'Linux x86_64\n'
-            : '',
+        e.argv[0] === 'git' && e.argv[1] === 'rev-parse'
+          ? 'GIT_DIR\nGIT_WORK_TREE\nGIT_CONFIG\n'
+          : e.argv[0] === 'env' && e.argv.includes('ls-files')
+            ? 'notes/a.md\nnotes/deep/b.md\nnotes/c.md\nsrc/app.ts\n'
+            : e.argv[0] === 'uname'
+              ? 'Linux x86_64\n'
+              : '',
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,

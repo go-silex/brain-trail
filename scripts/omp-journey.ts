@@ -411,11 +411,26 @@ async function until<T>(
       assert.deepEqual(await response.json(), { ok: true })
     }
     const initial = await until(snapshot, changed)
-    await until(
+    const ready = await until(
       () =>
         snapshot()?.facts.workspace.kind === 'ready' ? snapshot() : undefined,
       changed,
     )
+    if (ready.facts.workspace.kind !== 'ready')
+      throw new Error('workspace is not ready')
+    const readyLayoutRev = ready.facts.workspace.layoutRev
+    const inventory = await until(
+      () =>
+        events.findLast(
+          (event) =>
+            event.kind === 'layout' &&
+            event.generation === ready.generation &&
+            event.layout.layoutRev === readyLayoutRev,
+        ),
+      changed,
+    )
+    if (inventory.kind !== 'layout') throw new Error('workspace layout missing')
+    assert.deepEqual(inventory.layout.paths, ['child.txt', 'root.txt'])
     await session.prompt(
       'Read root.txt, then delegate the child file to a task agent.',
     )
@@ -439,27 +454,71 @@ async function until<T>(
       changed,
     )
     assert.ok(playing.shared.play.playing)
-    const firstStep = playing.shared.play.step
-    if (typeof firstStep !== 'number')
-      throw new Error('replay did not start at a numeric step')
-    const replayEvents = events.length
-    for (let pulse = 0; pulse < 8; pulse++) {
-      await page.waitForTimeout(160)
-      await succeeded(playing.generation, {
-        kind: 'view',
-        intent: { kind: 'preview', ref: null },
-      })
+    const bounded = async <T>(operation: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          operation,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('replay cadence proof exceeded 400ms')),
+              400,
+            )
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
     }
-    await page.waitForTimeout(100)
+    let previousStart: number | undefined
+    let firstStart = 0
+    let baselineStep: number | undefined
+    let progressed = false
+    for (let pulse = 0; pulse < 12; pulse++) {
+      await page.waitForTimeout(160)
+      const started = performance.now()
+      if (previousStart !== undefined)
+        assert.ok(
+          started - previousStart < 400,
+          'replay pulse gap exceeded 400ms',
+        )
+      else firstStart = started
+      previousStart = started
+      const revision = snapshot()?.revision ?? 0
+      const expectedZoomed = pulse % 2 === 1
+      const published = await bounded(
+        (async () => {
+          await succeeded(playing.generation, {
+            kind: 'view',
+            intent: { kind: 'follow', following: !expectedZoomed },
+          })
+          return until(() => {
+            const current = snapshot()
+            return current &&
+              current.revision > revision &&
+              current.shared.zoomed === expectedZoomed
+              ? current
+              : undefined
+          }, changed)
+        })(),
+      )
+      assert.ok(
+        performance.now() - started < 400,
+        'replay pulse exceeded 400ms',
+      )
+      const step = published.shared.play.step
+      if (typeof step !== 'number')
+        throw new Error('replay stopped during cadence proof')
+      if (pulse === 0) baselineStep = step
+      else if (pulse >= 2 && baselineStep !== undefined && step > baselineStep)
+        progressed = true
+    }
     assert.ok(
-      events
-        .slice(replayEvents)
-        .some(
-          (event) =>
-            event.kind === 'snapshot' &&
-            event.shared.play.step !== null &&
-            event.shared.play.step > firstStep,
-        ),
+      performance.now() - firstStart > 900,
+      'replay proof window too short',
+    )
+    assert.ok(
+      progressed,
       'unrelated view intents restarted the host replay clock',
     )
     await page.locator('button[data-key="live"]').click()

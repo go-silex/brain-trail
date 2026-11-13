@@ -127,11 +127,7 @@ func (s *relay) frame(v any) bool {
 	}
 }
 
-// startLaunch owns the only Wait call for each successfully started child.
-func (s *relay) startLaunch(command *exec.Cmd, id string, generation int64) (string, error) {
-	return s.startLaunchForCode(command, id, generation, "")
-}
-
+// startLaunchForCode owns the only Wait call for each successfully started child.
 func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int64, launchCode string) (string, error) {
 	s.mu.Lock()
 	if s.observers >= 32 {

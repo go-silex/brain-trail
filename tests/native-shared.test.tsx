@@ -2,7 +2,15 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 import type { ServerEvent } from '../types/browser'
-import { CWD, mountReady, type ViewCase } from './fixtures/views'
+import { mapSource, viewBoxOf } from './fixtures/mounted'
+import {
+  CWD,
+  installHost,
+  mountReady,
+  mountTarget,
+  NOTE_BODY,
+  type ViewCase,
+} from './fixtures/views'
 
 const MAP: ViewCase = {
   id: 'native-shared',
@@ -29,7 +37,7 @@ const snapshot = (events: unknown[]) =>
     )
 
 test(
-  'a current startup memory file reaches held-file consent without a read event',
+  'a current startup memory reference reaches held-file preparation without a read event',
   { timeoutMs: 20_000 },
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, {
@@ -108,6 +116,12 @@ test(
       ).toEqual({ ok: true })
       host.releaseFork()
       expect(await coach).toEqual({ ok: false, error: 'stale-generation' })
+      await host.clock.settle()
+      const current = snapshot(host.browserEvents)
+      expect(current?.generation).toBeGreaterThan(initial!.generation)
+      expect(
+        await host.command(current!.generation, { kind: 'coach-analyse' }),
+      ).toEqual({ ok: true })
     } finally {
       host.releaseFork()
       host.disconnectRelay()
@@ -152,6 +166,57 @@ test(
       await ui.redraw()
       expect(snapshot(host.browserEvents)?.shared.zoomed).toBe(true)
       expect((await ui.find({ key: 'follow' }))?.text).toBe(following)
+    } finally {
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
+  '2D wheel changes the local camera without republishing inactive follow',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, MAP)
+    try {
+      await ui.press({ key: 'open-3d' })
+      await host.browserReady
+      await ui.press({ key: 'view-3d' })
+      await host.clock.settle()
+      await ui.redraw()
+      expect(snapshot(host.browserEvents)?.shared.zoomed).toBe(false)
+      const initial = snapshot(host.browserEvents)
+      expect(initial).toBeDefined()
+      const revision = initial!.revision
+      await ui.resize({ columns: 80, rows: 24, in: 'map-hit' })
+      await ui.pointer({ type: 'move', x: 20, y: 8, in: 'map-hit' })
+      const before = viewBoxOf(await mapSource(ui))
+      for (let i = 0; i < 2; i++) {
+        await $.ui.scroll({
+          component: 'Pane',
+          requestId: 'brain-trail-v2',
+          offset: 0,
+          by: -1,
+          bodyRows: 40,
+          contentRows: 80,
+          origin: { kind: 'person' },
+          pointer: { column: 1, row: 1 },
+        })
+      }
+      await host.clock.settle()
+      await ui.redraw()
+      const after = viewBoxOf(await mapSource(ui))
+      expect(before).toBeDefined()
+      expect(after!.w).toBeLessThan(before!.w)
+      expect(snapshot(host.browserEvents)?.revision).toBe(revision)
+      expect(
+        await host.command(initial!.generation, {
+          kind: 'preview-read',
+          ref: { p: 'notes/a.md' },
+        }),
+      ).toEqual({ ok: true, text: NOTE_BODY })
+      await host.clock.settle()
+      expect(snapshot(host.browserEvents)?.revision).toBe(revision)
     } finally {
       host.disconnectRelay()
       await ui.unmount()
@@ -236,6 +301,149 @@ test(
       expect(snapshots[snapshots.length - 1]?.facts.lang).toBe('fr')
     } finally {
       host.releasePreviewRead()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
+  'a refused second Coach request does not invalidate the active request',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, MAP)
+    host.holdFork()
+    try {
+      await ui.press({ key: 'open-3d' })
+      await host.browserReady
+      const initial = snapshot(host.browserEvents)
+      expect(initial).toBeDefined()
+      const first = host.command(initial!.generation, { kind: 'coach-analyse' })
+      await host.forkStarted
+      expect(
+        await host.command(initial!.generation, { kind: 'coach-analyse' }),
+      ).toEqual({ ok: false, error: 'busy' })
+      host.releaseFork()
+      expect(await first).toEqual({ ok: true })
+    } finally {
+      host.releaseFork()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
+  'Files opens current unindexed startup memory but rejects unknown and stale references',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const host = installHost(on, MAP)
+    const settings = {
+      openMd: 'preview',
+      openOther: 'default',
+      hover: true,
+      band: true,
+    }
+    host.setMemoryFiles([`${CWD}/CLAUDE.local.md`])
+    host.seed('settings', settings)
+    host.store.set('settings', settings)
+    const ui = await $.ui.mount(mountTarget(MAP))
+    try {
+      await host.settled()
+      await ui.redraw()
+      await ui.press({ key: 'open-3d' })
+      await host.browserReady
+      const initial = snapshot(host.browserEvents)
+      expect(initial).toBeDefined()
+      await ui.press({ key: 't-files' })
+      await ui.redraw()
+      await ui.press({ key: 'kpi-open-start' })
+      await ui.redraw()
+      await ui.press({ key: 'kd-open-CLAUDE.local.md' })
+      await host.fileRead
+      expect(host.readFiles).toEqual([`${CWD}/CLAUDE.local.md`])
+      expect(host.preparedFiles).toEqual(host.readFiles)
+      expect(
+        await host.command(initial!.generation, {
+          kind: 'preview-read',
+          ref: { p: '/outside/unknown.md', out: true },
+        }),
+      ).toEqual({ ok: false, error: 'forbidden' })
+      host.setMemoryFiles([])
+      expect(
+        await host.command(initial!.generation, {
+          kind: 'preview-read',
+          ref: { p: 'CLAUDE.local.md' },
+        }),
+      ).toEqual({ ok: false, error: 'forbidden' })
+      expect(host.attemptedFiles).toEqual([`${CWD}/CLAUDE.local.md`])
+    } finally {
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
+  'app discovery recovers after a later success and after a new session',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const scenario: ViewCase = { ...MAP, tab: 'settings' }
+    const host = installHost(on, scenario)
+    host.setAppCatalog(null)
+    const ui = await $.ui.mount(mountTarget(scenario))
+    try {
+      await host.waitForAppRequests(1)
+      await host.browserReady
+      await host.clock.settle()
+      await ui.redraw()
+      expect(
+        await ui.find({ type: 'Text', text: /App discovery is unavailable/ }),
+      ).toBeDefined()
+      const initial = snapshot(host.browserEvents)
+      expect(initial).toBeDefined()
+      host.setAppCatalog(['Editor'])
+      expect(
+        await host.command(initial!.generation, {
+          kind: 'settings',
+          patch: { band: false },
+        }),
+      ).toEqual({ ok: true })
+      await host.clock.settle()
+      await ui.redraw()
+      expect(
+        await ui.find({ type: 'Text', text: /App discovery is unavailable/ }),
+      ).toBeUndefined()
+      expect(await ui.find({ key: 'openMd-Editor' })).toBeDefined()
+
+      host.setAppCatalog(null)
+      await $.session.start({
+        cwd: CWD,
+        surface: 'desktop',
+        isInteractive: true,
+      })
+      await ui.redraw()
+      await host.waitForAppRequests(3)
+      await host.clock.settle()
+      await ui.redraw()
+      expect(
+        await ui.find({ type: 'Text', text: /App discovery is unavailable/ }),
+      ).toBeDefined()
+      host.setAppCatalog(['Editor'])
+      await $.session.start({
+        cwd: CWD,
+        surface: 'desktop',
+        isInteractive: true,
+      })
+      await ui.redraw()
+      await host.waitForAppRequests(4)
+      await host.clock.settle()
+      await ui.redraw()
+      expect(
+        await ui.find({ type: 'Text', text: /App discovery is unavailable/ }),
+      ).toBeUndefined()
+      expect(await ui.find({ key: 'openMd-Editor' })).toBeDefined()
+    } finally {
       host.disconnectRelay()
       await ui.unmount()
     }

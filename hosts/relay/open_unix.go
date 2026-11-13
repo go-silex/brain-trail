@@ -39,25 +39,33 @@ func applicationPath(app application) string {
 	return ""
 }
 
-func (s *relay) openPath(path, app, id string, generation int64, launchCode string) (string, error) {
+func openCommand(path, app string) (*exec.Cmd, error) {
 	if app == "" {
 		if runtime.GOOS == "darwin" {
-			return s.startLaunchForCode(exec.Command("/usr/bin/open", "--", path), id, generation, launchCode)
+			return exec.Command("/usr/bin/open", "--", path), nil
 		}
-		return s.startLaunchForCode(exec.Command("/usr/bin/xdg-open", path), id, generation, launchCode)
+		return exec.Command("xdg-open", path), nil
 	}
 	selected, executable, err := selectedApp(app)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if selected.name == "Obsidian" {
 		path = obsidianURL(path)
 		if executable == "obsidian-handler" {
-			return s.startLaunchForCode(exec.Command("/usr/bin/xdg-open", path), id, generation, launchCode)
+			return exec.Command("xdg-open", path), nil
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		return s.startLaunchForCode(exec.Command("/usr/bin/open", "-a", executable, "--", path), id, generation, launchCode)
+		return exec.Command("/usr/bin/open", "-a", executable, "--", path), nil
 	}
-	return s.startLaunchForCode(exec.Command(executable, path), id, generation, launchCode)
+	return exec.Command(executable, path), nil
+}
+
+func (s *relay) openPath(path, app, id string, generation int64, launchCode string) (string, error) {
+	command, err := openCommand(path, app)
+	if err != nil {
+		return "", err
+	}
+	return s.startLaunchForCode(command, id, generation, launchCode)
 }

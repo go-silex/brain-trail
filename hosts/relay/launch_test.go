@@ -62,7 +62,7 @@ func launchExit(t *testing.T, output <-chan []byte, id string, generation int64,
 func TestLaunchReceiptsAndTerminalOutcomes(t *testing.T) {
 	s := &relay{out: make(chan []byte, 64), outputFailure: make(chan struct{}, 1)}
 	missing := exec.Command(filepath.Join(t.TempDir(), "missing-executable"))
-	if _, err := s.startLaunch(missing, "missing", 1); err == nil {
+	if _, err := s.startLaunchForCode(missing, "missing", 1, ""); err == nil {
 		t.Fatal("failed spawn returned a receipt")
 	}
 	select {
@@ -72,7 +72,7 @@ func TestLaunchReceiptsAndTerminalOutcomes(t *testing.T) {
 	}
 
 	fast := launchFixture("nonzero")
-	status, err := s.startLaunch(fast, "quick", 2)
+	status, err := s.startLaunchForCode(fast, "quick", 2, "")
 	if err != nil || status != "spawned" {
 		t.Fatalf("quick launch: %q %v", status, err)
 	}
@@ -89,7 +89,7 @@ func TestLaunchReceiptsAndTerminalOutcomes(t *testing.T) {
 		err    error
 	}
 	resultCh := make(chan result, 1)
-	go func() { status, err := s.startLaunch(slow, "running", 3); resultCh <- result{status, err} }()
+	go func() { status, err := s.startLaunchForCode(slow, "running", 3, ""); resultCh <- result{status, err} }()
 	select {
 	case got := <-resultCh:
 		if got.err != nil || got.status != "spawned" {
@@ -116,7 +116,7 @@ func TestLaunchReceiptsAndTerminalOutcomes(t *testing.T) {
 
 func TestLaunchOutcomeQueueFailureDisconnects(t *testing.T) {
 	s := &relay{out: make(chan []byte), outputFailure: make(chan struct{}, 1)}
-	status, err := s.startLaunch(launchFixture("nonzero"), "undelivered", 1)
+	status, err := s.startLaunchForCode(launchFixture("nonzero"), "undelivered", 1, "")
 	if err != nil || status != "spawned" {
 		t.Fatalf("launch: %q %v", status, err)
 	}
@@ -182,7 +182,7 @@ func TestLaunchObserverCapacityPrecedesProcessStart(t *testing.T) {
 			t.Fatal(err)
 		}
 		inputs = append(inputs, input)
-		status, err := s.startLaunch(cmd, "live", 1)
+		status, err := s.startLaunchForCode(cmd, "live", 1, "")
 		if err != nil || status != "spawned" {
 			t.Fatalf("starting observer: %q %v", status, err)
 		}
@@ -190,7 +190,7 @@ func TestLaunchObserverCapacityPrecedesProcessStart(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	extra := launchFixture("marker")
 	extra.Env = append(extra.Env, "BRAIN_RELAY_LAUNCH_MARKER="+marker)
-	if _, err := s.startLaunch(extra, "overflow", 1); err == nil {
+	if _, err := s.startLaunchForCode(extra, "overflow", 1, ""); err == nil {
 		t.Fatal("observer limit accepted another process")
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {

@@ -26,11 +26,11 @@ Install the optional local Lefthook checks with `bun run prepare`. The guarded i
 
 Runtime source changes require a newer plugin version and a matching marketplace entry. With an OMP manifest, the root package version must match them. Changes to root `omp`, `files`, `exports`, `dependencies`, `optionalDependencies`, `peerDependencies` or `engines` count as runtime changes; scripts and dev dependencies alone do not. The baseline is `VIEW_BASE`, then `RELEASE_BASE`, then `origin/main`. CI supplies the event's baseline; an all-zero default-branch baseline is refused rather than compared to the candidate itself.
 
-The quality workflow validates and tests an archived source copy without `.git` or `node_modules`. Its production relay matrix runs Go tests and an archived-package SDK fixture across six hosted OS/architecture targets and Claude CLI 2.1.321/2.1.322. The production proof must exercise the no-runtime distribution path and real cross-account isolation on hosted Linux, macOS and Windows. Windows archive extraction now uses `SystemRoot`'s `System32/tar.exe` and retains failure diagnostics; fresh CI has not yet proved that change. The fixture is not real Desktop native-policy proof.
+The quality workflow validates and tests an archived source copy without `.git` or `node_modules`. Its production relay matrix runs Go tests and an archived-package SDK fixture across six hosted OS/architecture targets and Claude CLI 2.1.321/2.1.322. The production proof must exercise the no-runtime distribution path and real cross-account isolation on hosted Linux, macOS and Windows. Windows archive extraction uses `SystemRoot`'s `System32/tar.exe` and retains failure diagnostics; require a fresh matrix for the candidate rather than inferring success from a rebuild. The fixture is not real Desktop native-policy proof.
 
 Before merge or tag, execute the production matrix and exercise the final candidate in real Claude Desktop: graph fit, resize, 2D/3D, browser opening, common tabs and settings, shared selection/follow/replay, context memory facts, consent and fail-closed lifecycle. Leave a native consent prompt unanswered while an unrelated browser action succeeds. This actual Desktop interaction is a release gate, not an implementation prerequisite; the SDK runner cannot hold `ui.ask` for that concurrency proof. Record actual results and unresolved limitations; cross-compilation, SDK fixtures or source-only packaging do not establish Desktop behavior.
 
-Launch tests use controlled child processes and exercise receipts and eventual exit handling; they do not prove a desktop application opened a document. The relay does not wait synchronously for `xdg-open` or promise a process-tree lifetime.
+Launch tests use controlled child processes and exercise receipts and eventual exit handling; a controlled Linux PATH-opener test covers selection, execution and outcome, not full `openPath` end-to-end behavior or a desktop application opening a document. On Linux the default opener resolves `xdg-open` through PATH. The relay does not wait synchronously for it or promise a process-tree lifetime.
 
 ## View parity
 
@@ -73,6 +73,8 @@ These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.
 | `hosts/omp/`, `hosts/relay/` | OMP capture, lifecycle and persistence; Go relay, file authority and SDK-safe client shared by hosts. |
 
 The host owns replay and shared preview, zoomed and play state. Tabs and WebGL camera remain surface-local. Hosts retain separate durable stores.
+
+Workspace discovery removes Git-reported repository-local environment variables before listing files in the workspace, so inherited `GIT_DIR` or `GIT_INDEX_FILE` cannot redirect that listing to another repository. If discovery cannot use Git, it falls back to filesystem enumeration.
 
 ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT host adapter.
 

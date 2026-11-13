@@ -333,6 +333,7 @@ export type Host = {
   browserReady: Promise<void>
   relayStarted: () => boolean
   preparedFiles: string[]
+  attemptedFiles: string[]
   readFiles: string[]
   fileRead: Promise<void>
   filePrepared: Promise<void>
@@ -353,6 +354,9 @@ export type Host = {
   settled: () => Promise<void>
   forget: () => void
   seed: (key: string, value: unknown) => void
+  setMemoryFiles: (paths: string[]) => void
+  setAppCatalog: (apps: string[] | null) => void
+  waitForAppRequests: (count: number) => Promise<void>
   store: Map<string, unknown>
 }
 
@@ -369,6 +373,14 @@ const runOf = (
 } => {
   const cmd = argv[0] ?? ''
   const script = argv[1] ?? ''
+  if (cmd === 'git' && script === 'rev-parse')
+    return {
+      exitCode: 0,
+      stdout: 'GIT_DIR\nGIT_WORK_TREE\nGIT_CONFIG\n',
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    }
   if (cmd === 'uname')
     return {
       exitCode: 0,
@@ -393,10 +405,10 @@ const runOf = (
       isStdoutTruncated: false,
       isStderrTruncated: false,
     }
-  if (cmd === 'git' || cmd === 'find') {
+  if ((cmd === 'env' && argv.includes('ls-files')) || cmd === 'find') {
     if (listing === 'empty')
       return {
-        exitCode: cmd === 'git' ? 1 : 0,
+        exitCode: cmd === 'env' ? 1 : 0,
         stdout: '',
         stderr: '',
         isStdoutTruncated: false,
@@ -420,7 +432,7 @@ const runOf = (
 }
 
 const isList = (argv: readonly string[]) =>
-  argv[0] === 'git' || argv[0] === 'find'
+  (argv[0] === 'env' && argv.includes('ls-files')) || argv[0] === 'find'
 
 export const installHost = (
   on: On,
@@ -435,6 +447,9 @@ export const installHost = (
   const opened: string[][] = []
   const logs: { text: string; to: 'transcript' | 'debug' }[] = []
   const browserEvents: unknown[] = []
+  let appCatalog: string[] | null = []
+  let appRequests = 0
+  const appWaiters: { count: number; resolve: () => void }[] = []
   let relayStarted = false
   let resolveBrowserReady = () => {}
   const browserReady = new Promise<void>((resolve) => {
@@ -450,6 +465,7 @@ export const installHost = (
     wakeRelay()
   }
   const preparedFiles: string[] = []
+  const attemptedFiles: string[] = []
   let resolveFilePrepared = () => {}
   const filePrepared = new Promise<void>((resolve) => {
     resolveFilePrepared = resolve
@@ -704,7 +720,15 @@ export const installHost = (
     let response: unknown = { ok: true }
     if (e.url.endsWith('/launch') && request.open === true)
       response = { ok: true, status: 'dispatched' }
-    if (e.url.endsWith('/apps')) response = { apps: [] }
+    if (e.url.endsWith('/apps')) {
+      appRequests++
+      for (const waiter of appWaiters)
+        if (appRequests >= waiter.count) waiter.resolve()
+      response =
+        appCatalog === null
+          ? { ok: false, error: 'unsupported' }
+          : { apps: appCatalog }
+    }
     if (e.url.endsWith('/event')) browserEvents.push(request)
     if (e.url.endsWith('/reply') && request.id !== undefined) {
       replies.get(request.id)?.(request.body)
@@ -726,9 +750,13 @@ export const installHost = (
     }
     if (e.url.endsWith('/file/prepare')) {
       const path = request.path ?? ''
+      attemptedFiles.push(path)
       if (
         request.root !== CWD ||
-        !files.some((file) => path === `${CWD}/${file}`)
+        (!files.some((file) => path === `${CWD}/${file}`) &&
+          !usage.value.context.breakdown.memoryFiles.some(
+            (file) => file.path === path,
+          ))
       )
         response = { ok: false, error: 'forbidden' }
       else {
@@ -817,6 +845,7 @@ export const installHost = (
     browserReady,
     relayStarted: () => relayStarted,
     preparedFiles,
+    attemptedFiles,
     readFiles,
     fileRead,
     filePrepared,
@@ -847,6 +876,22 @@ export const installHost = (
     },
     previewReadBlocked,
     releasePreviewRead,
+    setMemoryFiles: (paths) => {
+      usage.value.context.breakdown.memoryFiles = paths.map((path) => ({
+        path,
+        type: 'Project' as const,
+        tokens: 900,
+      }))
+    },
+    setAppCatalog: (apps) => {
+      appCatalog = apps
+    },
+    waitForAppRequests: (count) =>
+      appRequests >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            appWaiters.push({ count, resolve })
+          }),
     langStored,
     get listing() {
       return ctl.listing

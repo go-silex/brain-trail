@@ -4,6 +4,7 @@ import {
   type ExtensionContext,
 } from '@oh-my-pi/pi-coding-agent'
 import type { SubagentEventPayload } from '@oh-my-pi/pi-coding-agent/task/types'
+import * as Bun from 'bun'
 import { realpath, stat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -220,12 +221,46 @@ export function registerCapture(
       const shallow = isShallow(canonical, home)
       let raw = ''
       if (!shallow) {
-        const git = await pi.exec(GIT_LS[0]!, GIT_LS.slice(1), {
-          cwd: canonical,
-          timeout: 20000,
-          signal,
-        })
-        if (git.code === 0) raw = git.stdout
+        const localEnv = await pi.exec(
+          'git',
+          ['rev-parse', '--local-env-vars'],
+          {
+            cwd: canonical,
+            timeout: 20000,
+            signal,
+          },
+        )
+        if (localEnv.code === 0) {
+          const names = localEnv.stdout.trim().split(/\r?\n/)
+          if (
+            names.length > 0 &&
+            names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name))
+          ) {
+            const excluded = new Set(names)
+            const env = Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) =>
+                  !excluded.has(
+                    process.platform === 'win32' ? name.toUpperCase() : name,
+                  ),
+              ),
+            )
+            const git = Bun.spawn([...GIT_LS], {
+              cwd: canonical,
+              env,
+              timeout: 20000,
+              signal,
+              stdin: 'ignore',
+              stdout: 'pipe',
+              stderr: 'ignore',
+            })
+            const [stdout, code] = await Promise.all([
+              new Response(git.stdout).text(),
+              git.exited,
+            ])
+            if (code === 0) raw = stdout
+          }
+        }
       }
       if (!raw.trim()) {
         const args = findArgv(shallow)

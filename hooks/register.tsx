@@ -12,7 +12,7 @@ import type { Cam, SpinView } from './spin'
 import type { Layout, Palette } from './map'
 import { sliceToStep } from './fold'
 import { assembleCapture, needsMcpScan, needsTouch } from './acts'
-import { costStats, keepCosts, limitOf, usd, zoneOf } from './readout'
+import { costStats, keepCosts, limitOf, projectFiles, usd, zoneOf } from './readout'
 import type { CostEntry } from './readout'
 import { DEFAULT_SETTINGS, findArgv, fromFind, GIT_LS, hash, initialSettings, isShallow, pickFiles, vaultProbe } from './workspace'
 import { cameraDuringGesture, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
@@ -105,10 +105,18 @@ const cacheFile = async ($: EngineInterface, root: string) => `${await homeDir($
 const listFiles = async ($: EngineInterface, root: string) => {
   const h = await homeDir($)
   shallow = isShallow(root, h)
-  const git = shallow ? undefined : await $.process.run(GIT_LS, { cwd: root, timeoutMs: 20000 }).catch(() => undefined)
+  const windows = (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
+  const localVars = shallow ? undefined : await $.process.run(['git', 'rev-parse', '--local-env-vars'], { cwd: root, timeoutMs: 20000 }).catch(() => undefined)
+  const reported = localVars?.exitCode === 0 ? localVars.stdout.trim().split(/\r?\n/) : []
+  const valid = reported.length > 0 && reported.every(name => /^GIT_[A-Z0-9_]+$/.test(name))
+  const names = reported
+  const gitArgv = windows
+    ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+        `${names.map(name => `Remove-Item Env:${name} -ErrorAction SilentlyContinue`).join('; ')}; & git ${GIT_LS.slice(1).map(arg => `'${arg.replace(/'/g, "''")}'`).join(' ')}; exit $LASTEXITCODE`]
+    : ['env', ...names.flatMap(name => ['-u', name]), ...GIT_LS]
+  const git = valid ? await $.process.run(gitArgv, { cwd: root, timeoutMs: 20000 }).catch(() => undefined) : undefined
   let raw = git !== undefined && git.exitCode === 0 ? git.stdout : ''
   if (raw === '') {
-    const windows = (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
     const argv = windows
       ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `$root=(Get-Location).Path; Get-ChildItem -File -Recurse ${shallow ? '-Depth 2' : ''} | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\\','/') }`]
       : findArgv(shallow)
@@ -256,23 +264,33 @@ let apps: string[] | undefined
 let appDiscovery: Promise<string[]> | undefined
 let appsFailed = false
 let appsLoading = false
+let appsEpoch = 0
+const resetApps = () => {
+  appsEpoch++
+  apps = undefined; appDiscovery = undefined; appsFailed = false; appsLoading = false
+}
 const discoverApps = ($: EngineInterface) => {
   if (relay?.isClosed()) appsFailed = true
   if (apps !== undefined || appsFailed || appsLoading) return
   appsLoading = true
-  void installedApps($).then(() => { appsFailed = false }, () => { appsFailed = true }).finally(() => {
+  const owner = appsEpoch
+  void installedApps($).then(() => { if (owner === appsEpoch) appsFailed = false }, () => { if (owner === appsEpoch && apps === undefined) appsFailed = true }).finally(() => {
+    if (owner !== appsEpoch) return
     appsLoading = false
     $.ui.invalidate('ui.render')
   })
 }
 const installedApps = async ($: EngineInterface) => {
+  const owner = appsEpoch
   const client = await ensureRelay($)
+  if (owner !== appsEpoch) throw new Error('stale-generation')
   if (apps !== undefined) return apps
   appDiscovery ??= client.listApps()
   const pending = appDiscovery
   try {
     const found = await pending
-    if (relay !== client || (appDiscovery !== pending && apps !== found)) throw new Error('Relay disconnected')
+    if (owner !== appsEpoch || relay !== client || (appDiscovery !== pending && apps !== found)) throw new Error('Relay disconnected')
+    if (appsFailed) { appsFailed = false; $.ui.invalidate('ui.render') }
     if (apps === undefined) { apps = found; queuePublish($) }
     return apps
   } finally { if (appDiscovery === pending) appDiscovery = undefined }
@@ -438,7 +456,7 @@ const miniGauge = (P: Palette, pct: number) => {
 
 let opened = false
 
-// The relay is started only when a person opens the browser surface.
+// Start the relay on demand for browser access or native app discovery.
 let relay: RelayClient | undefined
 let startingRelay: Promise<RelayClient> | undefined
 let generation = 1
@@ -455,6 +473,14 @@ const serial = <T,>(work: () => Promise<T>): Promise<T> => {
   mutations = result.catch(() => {})
   return result
 }
+const invalidateCoach = ($: EngineInterface) => {
+  const invalidation = ++coachOperation
+  void serial(async () => {
+    if (invalidation !== coachOperation) return
+    await update($, coachA, coach => ({ ...coach, busy: false }))
+    queuePublish($)
+  }).catch(() => {})
+}
 const emit = (event: ServerEvent) => { for (const listener of feedListeners) listener(event) }
 const shared = async ($: EngineInterface): Promise<SharedView> => ({
   preview: await read($, previewA), zoomed: await read($, zoomed), play: await read($, playA),
@@ -470,6 +496,8 @@ const checkSession = async ($: EngineInterface) => {
   else if (sessionId !== id) {
     sessionId = id
     generation++
+    invalidateCoach($)
+    resetApps()
     revision = 0
     lastLayout = undefined
     breakdown = undefined
@@ -533,9 +561,11 @@ const queuePublish = ($: EngineInterface) => {
 const knownRef = async ($: EngineInterface, ref: { p: string; out?: boolean }) => {
   if (!ref.out && I?.ids.has(ref.p)) return true
   if ((await read($, events)).some(e => (e.k === 'read' || e.k === 'write') && e.p === ref.p && !!e.out === !!ref.out)) return true
-  if (!ref.out) return false
   const current = await getBreakdown($, await $.clock.now(), true)
-  return current?.memoryFiles.some(file => file.path === ref.p) === true
+  if (!current) return false
+  if (ref.out && current.memoryFiles.some(file => file.path === ref.p)) return true
+  const entry = projectFiles([], current.memoryFiles, I?.root ?? '').get(ref.p)
+  return entry?.start === true && !!entry.out === !!ref.out
 }
 const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: string; out?: boolean }, action: { kind: 'preview' } | { kind: 'open'; app: string }, use: (client: RelayClient, id: string) => Promise<T>): Promise<T> => {
   if (!relay || !I) throw new Error('forbidden')
@@ -544,6 +574,7 @@ const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: st
 }
 const invalidateTrail = ($: EngineInterface) => {
   generation++; revision = 0; lastLayout = undefined; browserPreview = undefined; breakdown = undefined
+  invalidateCoach($)
   syncReplayClock($, false)
 }
 const clearTrailState = async ($: EngineInterface) => {
@@ -613,8 +644,15 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
         const lang = await read($, langA)
         const root = I?.root ?? await rootDir($)
         const file = await $.fs.exists(`${root}/AGENTS.md`).catch(() => false) ? 'AGENTS.md' : 'CLAUDE.md'
-        const operation = ++coachOperation
-        await serial(async () => { await guard(); await update($, coachA, coachBusy); queuePublish($) })
+        const operation = await serial(async () => {
+          await guard()
+          if ((await read($, coachA)).busy) return undefined
+          await guard()
+          const accepted = ++coachOperation
+          await update($, coachA, coachBusy); queuePublish($)
+          return accepted
+        })
+        if (operation === undefined) return { ok: false, error: 'busy' }
         const result = await $.model.fork({ prompt: coachPrompt(lang, file, 'Claude') }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
         await serial(async () => {
           await guard()
@@ -647,7 +685,7 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
   }
 }
 const ensureRelay = async ($: EngineInterface, reopen = false) => {
-  if (reopen) appsFailed = false
+  if (reopen) { appsEpoch++; appsLoading = false; appDiscovery = undefined; appsFailed = false }
   if (relay?.isClosed()) {
     if (!reopen) throw new Error('Relay disconnected; reopen the browser from Brain Trail')
     relay = undefined
@@ -741,14 +779,16 @@ const nativeActions = ($: EngineInterface, snap: ViewSnapshot): ViewActions<UiPr
   open3d: () => open3d($).catch(error => { void $.ui.toast(`Brain Trail: ${String(error)}`); return false }),
   analyseCoach: async (lang, file) => {
     await checkSession($)
-    const expected = generation, operation = ++coachOperation
-    const started = await serial(async () => {
+    const expected = generation
+    const operation = await serial(async () => {
       await checkSession($)
-      if (expected !== generation || operation !== coachOperation) return false
+      if (expected !== generation || (await read($, coachA)).busy) return undefined
+      if (expected !== generation) return undefined
+      const accepted = ++coachOperation
       await update($, coachA, coachBusy); queuePublish($)
-      return true
+      return accepted
     })
-    if (!started) return
+    if (operation === undefined) return
     const result = await $.model.fork({ prompt: coachPrompt(lang, file, snap.assistant) }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
     await serial(async () => {
       await checkSession($)
@@ -767,8 +807,9 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     generation++; revision = 0; sessionId = await $.session.id(); lastLayout = undefined; breakdown = undefined
+    invalidateCoach($)
     syncReplayClock($, false)
-    apps = undefined; appDiscovery = undefined
+    resetApps()
     browserPreview = undefined
     await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } })
     await $.command.register({ name: COMMAND, description: 'Show what this session puts in its context, in a pane' })
@@ -786,8 +827,9 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     generation++
+    invalidateCoach($)
     relay?.close(); relay = undefined; startingRelay = undefined
-    apps = undefined; appDiscovery = undefined
+    resetApps()
     syncReplayClock($, false)
     meterTimer?.cancel(); meterTimer = undefined
     feedListeners.clear(); currentFeed = undefined; sessionId = undefined
@@ -802,6 +844,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'clear' }, async ($, e, next) => {
     generation++; revision = 0; lastLayout = undefined; browserPreview = undefined; breakdown = undefined
+    invalidateCoach($)
     syncReplayClock($, false)
     const result = await next(e)
     sessionId = await $.session.id()
@@ -951,7 +994,16 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const result = mapGesture(parseGesture(e.data), state, gesture, drawnFrames(), { now, hoverNames: settings.hover })
     gesture = result.memory
-    await serial(async () => { for (const step of result.steps) await applyStep($, step); if (result.steps.some(step => step.key === 'zoomed')) queuePublish($) })
+    await serial(async () => {
+      let sharedChanged = false
+      for (const step of result.steps) {
+        if (step.key === 'zoomed') {
+          const prior = await read($, zoomed), nextZoomed = step.next(prior)
+          if (nextZoomed !== prior) { await update($, zoomed, () => nextZoomed); sharedChanged = true }
+        } else await applyStep($, step)
+      }
+      if (sharedChanged) queuePublish($)
+    })
     if (result.open !== undefined) void openFile($, result.open.p, result.open.out ? true : undefined).catch(error => { void $.ui.toast(`Brain Trail: ${String(error)}`) })
     const hitBox = hitBoxes.get(e.surface)
     return { props: { tip: result.tip, ...hitBox } }
@@ -968,8 +1020,14 @@ export const register: Register = (on, options) => {
     if ((await read($, tabA)) !== 'map') return next(e)
     await serial(async () => {
       const steps = mapWheel(e.by, await read($, view3dA), gesture.hover!, drawnFrames())
-      for (const step of steps) await applyStep($, step)
-      if (steps.some(step => step.key === 'zoomed')) queuePublish($)
+      let sharedChanged = false
+      for (const step of steps) {
+        if (step.key === 'zoomed') {
+          const prior = await read($, zoomed), nextZoomed = step.next(prior)
+          if (nextZoomed !== prior) { await update($, zoomed, () => nextZoomed); sharedChanged = true }
+        } else await applyStep($, step)
+      }
+      if (sharedChanged) queuePublish($)
     })
     return {}
   }).catch(($, e, next) => next(e))
