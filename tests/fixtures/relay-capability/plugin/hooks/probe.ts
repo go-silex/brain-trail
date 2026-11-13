@@ -128,19 +128,46 @@ export const register: Register = (on) => {
         const metadataArgv = JSON.parse(
           await $.fs.read(`${$.plugin.root}/metadata-argv.json`),
         ) as string[]
-        const wrappedArgv = nativeGitInventoryArgv(true, names)
-        // This explores explicit transcription, not policy-enforced transcription.
+        const systemRoot = await $.env.get('SystemRoot').catch(() => undefined)
+        const wrappedArgv = nativeGitInventoryArgv(true, names, systemRoot)
+        const foreign = `${cwd}/git-foreign`
+        const foreignEnv = {
+          GIT_DIR: `${foreign}/.git`,
+          GIT_WORK_TREE: foreign,
+          GIT_INDEX_FILE: `${foreign}/.git/index`,
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'core.worktree',
+          GIT_CONFIG_VALUE_0: foreign,
+        }
+        // Historical PowerShell baseline only; explicit transcription is not
+        // equivalent to policy-enforced transcription of the cmd wrapper.
         const transcriptPath = `${$.plugin.root}/git-transcript.txt`.replace(
           /'/g,
           "''",
         )
-        const transcriptArgv = [...wrappedArgv]
-        transcriptArgv[4] = `try { Start-Transcript -Path '${transcriptPath}' -ErrorAction Stop | Out-Null } catch { exit 97 }; ${wrappedArgv[4]}`
+        const baseline = `${names.map((name) => `Remove-Item Env:${name} -ErrorAction SilentlyContinue`).join('; ')}; $env:GIT_NO_LAZY_FETCH='1'; & git ${gitLs
+          .slice(1)
+          .map((arg) => `'${arg.replace(/'/g, "''")}'`)
+          .join(' ')}; exit $LASTEXITCODE`
+        const transcriptArgv = [
+          'powershell.exe',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `try { Start-Transcript -Path '${transcriptPath}' -ErrorAction Stop | Out-Null } catch { exit 97 }; ${baseline}`,
+        ]
+        const invalidGit = [...gitLs, '--brain-trail-invalid-option']
+        const invalidCmdArgv = [...wrappedArgv]
+        invalidCmdArgv[5] += ' "--brain-trail-invalid-option"'
         await persist()
         if (snapshotFailure)
           throw new Error(`Diagnostic snapshot failed: ${snapshotFailure}`)
         evidence.stage = 'collecting-independent-calls'
-        const execute = async (stage: string, argv: string[]) => {
+        const execute = async (
+          stage: string,
+          argv: string[],
+          env?: Record<string, string>,
+        ) => {
           evidence[stage] = { status: 'running', argv }
           await persist()
           if (snapshotFailure) return undefined
@@ -148,6 +175,7 @@ export const register: Register = (on) => {
             const result = await $.process.run(argv, {
               cwd: gitCwd,
               timeoutMs: 20000,
+              ...(env ? { env } : {}),
             })
             evidence[stage] = { status: 'completed', argv, ...result }
             await persist()
@@ -159,45 +187,127 @@ export const register: Register = (on) => {
             return undefined
           }
         }
-        const [metadata, direct, wrapped, transcribed] = await Promise.all([
+        const [
+          metadata,
+          direct,
+          wrapped,
+          transcribed,
+          invalidDirect,
+          invalidCmd,
+          foreignDirect,
+          foreignWrapped,
+        ] = await Promise.all([
           execute('powershell-metadata', metadataArgv),
           execute('direct-git', gitLs),
           execute('production-wrapper', wrappedArgv),
-          execute('explicit-transcript', transcriptArgv),
+          execute('powershell-baseline-explicit-transcript', transcriptArgv),
+          execute('invalid-direct-git', invalidGit),
+          execute('invalid-production-wrapper', invalidCmdArgv),
+          execute('foreign-direct-git', gitLs, foreignEnv),
+          execute('foreign-production-wrapper', wrappedArgv, foreignEnv),
         ])
-        if (!metadata || !direct || !wrapped || !transcribed)
+        // Install after the control calls, so only this invocation can execute
+        // the disposable current-directory sentinel.
+        await $.fs.write(
+          `${gitCwd}/git.cmd`,
+          '@echo sentinel>"%~dp0sentinel-invoked.txt"\r\n@exit /b 77\r\n',
+        )
+        // An inert invalid PE fails if cwd is wrongly searched for cmd.exe.
+        await $.fs.write(`${gitCwd}/cmd.exe`, 'not an executable')
+        const sentinelWrapped = await execute(
+          'production-wrapper-with-cwd-sentinel',
+          wrappedArgv,
+          foreignEnv,
+        )
+        const sentinelInvoked = await $.fs.exists(
+          `${gitCwd}/sentinel-invoked.txt`,
+        )
+        evidence.productionVerdict = {
+          unicodeMatchesDirect:
+            !!wrapped &&
+            !!direct &&
+            wrapped.exitCode === 0 &&
+            wrapped.stdout === direct.stdout,
+          errorExitMatchesDirect:
+            !!invalidCmd &&
+            !!invalidDirect &&
+            invalidDirect.exitCode !== 0 &&
+            invalidCmd.exitCode === invalidDirect.exitCode,
+        }
+        evidence.foreignEnvironment = {
+          controlRedirected:
+            !!foreignDirect &&
+            foreignDirect.exitCode === 0 &&
+            foreignDirect.stdout.includes('foreign-canary.txt'),
+          wrapperMatchesClean:
+            !!foreignWrapped &&
+            !!direct &&
+            foreignWrapped.exitCode === 0 &&
+            foreignWrapped.stdout === direct.stdout,
+        }
+        evidence.cwdSentinel = {
+          invoked: sentinelInvoked,
+          outputMatchesDirect:
+            !!sentinelWrapped &&
+            !!direct &&
+            sentinelWrapped.exitCode === 0 &&
+            sentinelWrapped.stdout === direct.stdout,
+        }
+        await persist()
+        if (
+          !direct ||
+          !wrapped ||
+          !invalidDirect ||
+          !invalidCmd ||
+          !sentinelWrapped ||
+          !foreignDirect ||
+          !foreignWrapped
+        )
           throw new Error(
             'Windows Git discriminator process call failed; see stages',
           )
         let transcribedProductPaths: string[] | undefined
         try {
-          transcribedProductPaths = pickFiles(transcribed.stdout, false, gitCwd)
+          if (transcribed)
+            transcribedProductPaths = pickFiles(
+              transcribed.stdout,
+              false,
+              gitCwd,
+            )
         } catch {}
         gitEncoding = {
           ...evidence,
           stage: 'complete',
-          metadata: metadata.stdout.trim(),
-          metadataExit: metadata.exitCode,
+          metadata: metadata?.stdout.trim(),
+          metadataExit: metadata?.exitCode,
           directExit: direct.exitCode,
           wrappedExit: wrapped.exitCode,
           directStdout: direct.stdout,
           wrappedStdout: wrapped.stdout,
-          transcribedExit: transcribed.exitCode,
-          transcribedStdout: transcribed.stdout,
-          transcribedStderr: transcribed.stderr,
-          transcribedTruncated: transcribed.isStdoutTruncated,
+          transcribedExit: transcribed?.exitCode,
+          transcribedStdout: transcribed?.stdout,
+          transcribedStderr: transcribed?.stderr,
+          transcribedTruncated: transcribed?.isStdoutTruncated,
           transcribedProductPaths,
-          transcribedMatchesDirect: transcribed.stdout === direct.stdout,
+          transcribedMatchesDirect: transcribed
+            ? transcribed.stdout === direct.stdout
+            : undefined,
           transcription:
-            'explicit Start-Transcript; not policy-enforced transcription',
+            'historical PowerShell baseline with explicit Start-Transcript; not policy-enforced transcription of cmd',
           directTruncated: direct.isStdoutTruncated,
           wrappedTruncated: wrapped.isStdoutTruncated,
         }
         const expected = JSON.stringify(['ascii.txt', 'café-漢-😀.txt'].sort())
         if (
-          metadata.exitCode !== 0 ||
-          !/"version"\s*:\s*"5\.1\./.test(metadata.stdout) ||
-          !/"outputCodePage"\s*:\s*\d+/.test(metadata.stdout) ||
+          invalidDirect.exitCode === 0 ||
+          foreignDirect.exitCode !== 0 ||
+          !foreignDirect.stdout.includes('foreign-canary.txt') ||
+          foreignWrapped.exitCode !== 0 ||
+          foreignWrapped.stdout !== direct.stdout ||
+          sentinelInvoked ||
+          sentinelWrapped.exitCode !== 0 ||
+          sentinelWrapped.stdout !== direct.stdout ||
+          invalidCmd.exitCode !== invalidDirect.exitCode ||
           direct.exitCode !== 0 ||
           wrapped.exitCode !== 0 ||
           direct.isStdoutTruncated ||
@@ -207,7 +317,7 @@ export const register: Register = (on) => {
             expected ||
           JSON.stringify(pickFiles(wrapped.stdout, false, gitCwd)) !== expected
         )
-          throw new Error('Windows PowerShell Git Unicode discriminator failed')
+          throw new Error('Windows Git Unicode or exit discriminator failed')
       }
       const binary = (
         await $.fs.read(`${$.plugin.root}/relay-binary.txt`)

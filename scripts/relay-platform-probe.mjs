@@ -192,6 +192,29 @@ try {
           `Isolated Git fixture setup failed: ${result.stderr || result.error || result.status}`,
         )
     }
+    writeFileSync(
+      join(gitWork, '.git', 'info', 'exclude'),
+      'git.cmd\ncmd.exe\nsentinel-invoked.txt\n',
+    )
+    const foreign = join(work, 'git-foreign')
+    mkdirSync(foreign)
+    writeFileSync(join(foreign, 'foreign-canary.txt'), 'foreign fixture\n')
+    for (const args of [
+      ['init', '-q'],
+      ['add', '--', 'foreign-canary.txt'],
+    ]) {
+      const result = spawnSync('git', args, {
+        cwd: foreign,
+        env: gitEnv,
+        encoding: 'utf8',
+        timeout: 20000,
+        windowsHide: true,
+      })
+      if (result.error || result.status !== 0)
+        fail(
+          `Foreign Git fixture setup failed: ${result.stderr || result.error || result.status}`,
+        )
+    }
     const metadataArgv = [
       'powershell.exe',
       '-NoProfile',
@@ -216,6 +239,44 @@ try {
       stdout: nodeMetadata.stdout,
       stderr: nodeMetadata.stderr,
       error: nodeMetadata.error?.message,
+    }
+    // Distinguish PowerShell startup from metadata evaluation and from the
+    // isolated child environment; do not record or expose inherited values.
+    const minimalPowerShell = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'],
+      {
+        cwd: gitWork,
+        env,
+        encoding: 'utf8',
+        timeout: 20000,
+        windowsHide: true,
+      },
+    )
+    summary.nodePowerShellMinimal = {
+      exit: minimalPowerShell.status,
+      signal: minimalPowerShell.signal,
+      stdout: minimalPowerShell.stdout,
+      stderr: minimalPowerShell.stderr,
+      error: minimalPowerShell.error?.message,
+    }
+    const inheritedMetadata = spawnSync(
+      metadataArgv[0],
+      metadataArgv.slice(1),
+      {
+        cwd: gitWork,
+        env: process.env,
+        encoding: 'utf8',
+        timeout: 20000,
+        windowsHide: true,
+      },
+    )
+    summary.nodePowerShellInheritedEnvironment = {
+      exit: inheritedMetadata.status,
+      signal: inheritedMetadata.signal,
+      stdout: inheritedMetadata.stdout,
+      stderr: inheritedMetadata.stderr,
+      error: inheritedMetadata.error?.message,
     }
   }
   if (override) {

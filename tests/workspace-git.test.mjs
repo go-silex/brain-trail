@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -40,7 +41,7 @@ test('native Git inventory ignores hostile repository and inherited Git context'
     const sentinel = join(root, '.bt-fsmonitor-sentinel')
     for (const dir of [root, foreign, template]) mkdirSync(dir)
     writeFileSync(config, '')
-    writeFileSync(excludes, 'excluded.txt\n')
+    writeFileSync(excludes, 'excluded.txt\ncmd.exe\ngit.exe\n')
     writeFileSync(hook, '#!/bin/sh\nprintf invoked > .bt-fsmonitor-sentinel\n')
 
     const env = Object.fromEntries(
@@ -79,6 +80,11 @@ test('native Git inventory ignores hostile repository and inherited Git context'
     const names = run(['git', 'rev-parse', '--local-env-vars'], root, env)
       .trim()
       .split(/\r?\n/)
+    if (process.platform === 'win32') {
+      const decoy = join(process.env.SystemRoot, 'System32', 'where.exe')
+      copyFileSync(decoy, join(root, 'cmd.exe'))
+      copyFileSync(decoy, join(root, 'git.exe'))
+    }
     const hostile = {
       ...env,
       GIT_DIR: join(foreign, '.git'),
@@ -89,7 +95,11 @@ test('native Git inventory ignores hostile repository and inherited Git context'
       GIT_CONFIG_VALUE_0: hookCommand,
       GIT_NO_LAZY_FETCH: '0',
     }
-    const argv = nativeGitInventoryArgv(process.platform === 'win32', names)
+    const argv = nativeGitInventoryArgv(
+      process.platform === 'win32',
+      names,
+      process.env.SystemRoot,
+    )
     const output = run(argv, root, hostile)
     expect(output.trim().split(/\r?\n/).sort()).toEqual([
       'tracked.txt',
@@ -98,5 +108,21 @@ test('native Git inventory ignores hostile repository and inherited Git context'
     expect(existsSync(sentinel)).toBe(false)
   } finally {
     rmSync(sandbox, { recursive: true, force: true })
+  }
+})
+
+test('Windows inventory refuses an absent or unsafe system root', () => {
+  for (const root of [
+    undefined,
+    null,
+    '',
+    'relative',
+    'C:\\Windows\\..\\evil',
+    ...Array.from(
+      { length: 32 },
+      (_, code) => `C:\\Win${String.fromCharCode(code)}dows`,
+    ),
+  ]) {
+    expect(() => nativeGitInventoryArgv(true, ['GIT_DIR'], root)).toThrow()
   }
 })

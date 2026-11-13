@@ -41,23 +41,35 @@ export const gitInventoryArgv = (windows: boolean): string[] => [
   '-co',
   '--exclude-standard',
 ]
+export const windowsSystemRoot = (systemRoot?: string): string | undefined => {
+  const path = systemRoot?.replace(/\//g, '\\').replace(/\\+$/, '')
+  if (path !== undefined)
+    for (let i = 0; i < path.length; i++)
+      if (path.charCodeAt(i) < 32) return undefined
+  return path &&
+    /^[A-Za-z]:\\[^\\/:*?"<>|]+(?:\\[^\\/:*?"<>|]+)*$/.test(path) &&
+    !path.split('\\').some((part) => part === '.' || part === '..')
+    ? path
+    : undefined
+}
 export const nativeGitInventoryArgv = (
   windows: boolean,
   names: readonly string[],
+  systemRoot?: string,
 ): string[] => {
   if (!names.length || !names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name)))
     throw new Error('Invalid Git local environment names')
+  const systemPath = windowsSystemRoot(systemRoot)
+  if (windows && !systemPath) throw new Error('Invalid SystemRoot')
   const gitArgs = gitInventoryArgv(windows)
   return windows
     ? [
-        'powershell.exe',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `${names.map((name) => `Remove-Item Env:${name} -ErrorAction SilentlyContinue`).join('; ')}; $env:GIT_NO_LAZY_FETCH='1'; & git ${gitArgs
-          .slice(1)
-          .map((arg) => `'${arg.replace(/'/g, "''")}'`)
-          .join(' ')}; exit $LASTEXITCODE`,
+        `${systemPath}\\System32\\cmd.exe`,
+        '/d',
+        '/v:off',
+        '/s',
+        '/c',
+        `${names.map((name) => `set ${name}=`).join('&')}&set GIT_NO_LAZY_FETCH=1&set NoDefaultCurrentDirectoryInExePath=1&git ${gitArgs.slice(1).join(' ')}`,
       ]
     : [
         'env',

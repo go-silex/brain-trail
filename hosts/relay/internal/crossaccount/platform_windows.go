@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -128,6 +129,7 @@ func execute(stage string, r request) (result error) {
 	if err != nil {
 		return err
 	}
+	var serviceProcess windows.Handle
 	defer func() {
 		_, stopErr := service.Control(svc.Stop)
 		if stopErr != nil && !errors.Is(stopErr, windows.ERROR_SERVICE_NOT_ACTIVE) && result == nil {
@@ -149,6 +151,23 @@ func execute(stage string, r request) (result error) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+		if serviceProcess != 0 {
+			remaining := time.Until(deadline)
+			var ms uint32
+			if remaining > 0 {
+				ms = uint32((remaining + time.Millisecond - 1) / time.Millisecond)
+			}
+			state, e := windows.WaitForSingleObject(serviceProcess, ms)
+			if e != nil && result == nil {
+				result = phase("service-process-wait", e)
+			}
+			if e == nil && state != windows.WAIT_OBJECT_0 && result == nil {
+				result = phase("service-process-exit-timeout", errors.New("service process did not exit"))
+			}
+			if e = windows.CloseHandle(serviceProcess); e != nil && result == nil {
+				result = phase("service-process-close", e)
+			}
+		}
 		if !stopped && result == nil {
 			result = phase("scm-stop-timeout", errors.New("service did not stop"))
 		}
@@ -166,6 +185,20 @@ func execute(stage string, r request) (result error) {
 	stageName = "service-report"
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
+		status, queryErr := service.Query()
+		if queryErr != nil {
+			return phase("scm-query", queryErr)
+		}
+		if status.State == svc.Running && status.ProcessId != 0 && serviceProcess == 0 {
+			serviceProcess, err = openServiceProcess(status.ProcessId, exe)
+			if err != nil {
+				return phase("service-process", err)
+			}
+		}
+		if serviceProcess == 0 && status.State != svc.Stopped {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		data, e := os.ReadFile(filepath.Join(stage, "report.json"))
 		if e == nil {
 			var answer report
@@ -178,14 +211,13 @@ func execute(stage string, r request) (result error) {
 				}
 				return &remoteDiagnostic{value: answer.Error}
 			}
+			if serviceProcess == 0 {
+				return phase("service-process-missing", errors.New("no verified service process"))
+			}
 			return nil
 		}
 		if !errors.Is(e, os.ErrNotExist) {
 			return e
-		}
-		status, queryErr := service.Query()
-		if queryErr != nil {
-			return phase("scm-query", queryErr)
 		}
 		if status.State == svc.Stopped {
 			switch status.ServiceSpecificExitCode {
@@ -205,6 +237,45 @@ func execute(stage string, r request) (result error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return phase("timeout", errors.New("LocalService report timed out"))
+}
+
+// Retain a handle to the SCM-reported process, after verifying its image.
+// The handle keeps the identity stable across stop and prevents PID reuse.
+func openServiceProcess(pid uint32, expected string) (h windows.Handle, result error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
+	if err != nil {
+		return 0, phase("open", err)
+	}
+	defer func() {
+		if result != nil {
+			_ = windows.CloseHandle(h)
+			h = 0
+		}
+	}()
+	buffer := make([]uint16, 32768)
+	size := uint32(len(buffer))
+	if err = windows.QueryFullProcessImageName(h, 0, &buffer[0], &size); err != nil {
+		return h, phase("image-name", err)
+	}
+	actual, err := filepath.EvalSymlinks(windows.UTF16ToString(buffer[:size]))
+	if err != nil {
+		return h, phase("image-path", err)
+	}
+	want, err := filepath.EvalSymlinks(expected)
+	if err != nil {
+		return h, phase("expected-path", err)
+	}
+	if !strings.EqualFold(filepath.Clean(actual), filepath.Clean(want)) {
+		return h, phase("image-mismatch", errors.New("service image mismatch"))
+	}
+	state, err := windows.WaitForSingleObject(h, 0)
+	if err != nil {
+		return h, phase("liveness", err)
+	}
+	if state != uint32(windows.WAIT_TIMEOUT) {
+		return h, phase("not-running", errors.New("service process not running"))
+	}
+	return h, nil
 }
 
 type proofService struct {

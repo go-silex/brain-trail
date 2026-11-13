@@ -14,7 +14,7 @@ import { sliceToStep } from './fold'
 import { assembleCapture, needsMcpScan, needsTouch } from './acts'
 import { costStats, keepCosts, limitOf, projectFiles, usd, zoneOf } from './readout'
 import type { CostEntry } from './readout'
-import { DEFAULT_SETTINGS, findArgv, fromFind, nativeGitInventoryArgv, hash, initialSettings, isShallow, pickFiles, vaultProbe } from './workspace'
+import { DEFAULT_SETTINGS, findArgv, fromFind, nativeGitInventoryArgv, hash, initialSettings, isShallow, pickFiles, vaultProbe, windowsSystemRoot } from './workspace'
 import { cameraDuringGesture, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
 import type { Drawn2d, DrawnFrames, FoldFacts, Step, TabSnapshot, ViewActions, ViewChild, ViewIntent, ViewProps, ViewRuntime, ViewSnapshot, ViewTag } from '../types/view'
 import type { DashboardFeed, FactsWire, HostCommand, CommandReplies, CommandRefusal, LayoutWire, ServerEvent } from '../types/browser'
@@ -109,11 +109,18 @@ const listFiles = async ($: EngineInterface, root: string) => {
   const localVars = shallow ? undefined : await $.process.run(['git', 'rev-parse', '--local-env-vars'], { cwd: root, timeoutMs: 20000 }).catch(() => undefined)
   const reported = localVars?.exitCode === 0 ? localVars.stdout.trim().split(/\r?\n/) : []
   const valid = reported.length > 0 && reported.every(name => /^GIT_[A-Z0-9_]+$/.test(name))
-  const git = valid ? await $.process.run(nativeGitInventoryArgv(windows, reported), { cwd: root, timeoutMs: 20000 }).catch(() => undefined) : undefined
+  const systemRoot = windows ? await $.env.get('SystemRoot').catch(() => undefined) : undefined
+  let gitArgv: string[] | undefined
+  if (valid) {
+    try { gitArgv = nativeGitInventoryArgv(windows, reported, systemRoot) } catch { /* use filesystem fallback */ }
+  }
+  const git = gitArgv ? await $.process.run(gitArgv, { cwd: root, timeoutMs: 20000 }).catch(() => undefined) : undefined
   let raw = git !== undefined && git.exitCode === 0 ? git.stdout : ''
   if (raw === '') {
+    const systemPath = windows ? windowsSystemRoot(systemRoot) : undefined
+    if (windows && !systemPath) throw new Error('Cannot list workspace: invalid SystemRoot')
     const argv = windows
-      ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `$root=(Get-Location).Path; Get-ChildItem -File -Recurse ${shallow ? '-Depth 2' : ''} | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\\','/') }`]
+      ? [`${systemPath}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, '-NoProfile', '-NonInteractive', '-Command', `$root=(Get-Location).Path; Get-ChildItem -File -Recurse ${shallow ? '-Depth 2' : ''} | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\\','/') }`]
       : findArgv(shallow)
     const found = await $.process.run(argv, { cwd: root, timeoutMs: 30000 }).catch(() => undefined)
     raw = fromFind(found?.stdout ?? '').replace(/\r/g, '')

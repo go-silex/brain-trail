@@ -185,8 +185,8 @@ export async function captureBrowserScene(
         const rect = element.getBoundingClientRect()
         const tip = element.parentElement?.querySelector('.bt-tip')
         const found = new Map()
-        for (let y = rect.top + 3; y < rect.bottom - 3; y += 6) {
-          for (let x = rect.left + 3; x < rect.right - 3; x += 6) {
+        for (let y = Math.ceil(rect.top); y < rect.bottom; y++) {
+          for (let x = Math.ceil(rect.left); x < rect.right; x++) {
             element.dispatchEvent(
               new PointerEvent('pointermove', {
                 clientX: x,
