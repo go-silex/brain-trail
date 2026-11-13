@@ -158,7 +158,7 @@ export const register: Register = (on) => {
         ]
         const invalidGit = [...gitLs, '--brain-trail-invalid-option']
         const invalidCmdArgv = [...wrappedArgv]
-        invalidCmdArgv[5] += ' "--brain-trail-invalid-option"'
+        invalidCmdArgv[5] += ' --brain-trail-invalid-option'
         await persist()
         if (snapshotFailure)
           throw new Error(`Diagnostic snapshot failed: ${snapshotFailure}`)
