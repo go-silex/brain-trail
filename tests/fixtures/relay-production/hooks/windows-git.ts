@@ -91,29 +91,53 @@ export async function proveWindowsGit(
     '@echo sentinel>"%~dp0sentinel-invoked.txt"\r\n@exit /b 77\r\n',
   )
   await $.fs.write(`${gitCwd}/cmd.exe`, 'not an executable')
-  const decoyed = await run(wrapped, hostile)
+  const original = await run(wrapped, hostile)
+  const originalInvoked = await $.fs.exists(`${gitCwd}/sentinel-invoked.txt`)
+  if (
+    original.exitCode !== 0 ||
+    original.isStdoutTruncated ||
+    original.isStderrTruncated ||
+    original.stdout !== clean.stdout ||
+    originalInvoked
+  )
+    throw new Error(
+      `windows git: original decoy control (exit=${original.exitCode}, sentinel=${originalInvoked}, stdoutTruncated=${original.isStdoutTruncated}, stderrTruncated=${original.isStderrTruncated})`,
+    )
+  const decoyed = await run(
+    [
+      ...wrapped.slice(0, -1),
+      `set NoDefaultCurrentDirectoryInExePath=&${body}`,
+    ],
+    hostile,
+  )
+  const decoyInvoked = await $.fs.exists(`${gitCwd}/sentinel-invoked.txt`)
   if (
     decoyed.exitCode !== 0 ||
     decoyed.isStdoutTruncated ||
     decoyed.isStderrTruncated ||
     decoyed.stdout !== clean.stdout ||
-    (await $.fs.exists(`${gitCwd}/sentinel-invoked.txt`))
+    decoyInvoked
   )
-    throw new Error('windows git: current-directory decoys')
+    throw new Error(
+      `windows git: current-directory decoys (exit=${decoyed.exitCode}, sentinel=${decoyInvoked}, stdoutTruncated=${decoyed.isStdoutTruncated}, stderrTruncated=${decoyed.isStderrTruncated})`,
+    )
   const reach = await run([
     `${systemPath}\\System32\\cmd.exe`,
     '/d',
     '/v:off',
     '/s',
     '/c',
-    'git --version',
+    'set NoDefaultCurrentDirectoryInExePath=&git --version',
   ])
+  const reachInvoked = await $.fs.exists(`${gitCwd}/sentinel-invoked.txt`)
   if (
     reach.exitCode !== 77 ||
     reach.isStdoutTruncated ||
     reach.isStderrTruncated ||
-    !(await $.fs.exists(`${gitCwd}/sentinel-invoked.txt`))
+    !reachInvoked
   )
-    throw new Error('windows git: decoy reachability control')
+    throw new Error(
+      `windows git: decoy reachability control (exit=${reach.exitCode}, sentinel=${reachInvoked}, stdoutTruncated=${reach.isStdoutTruncated}, stderrTruncated=${reach.isStderrTruncated})`,
+    )
   return 'passed'
 }
