@@ -8,13 +8,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const version = process.env.RELAY_CLAUDE_VERSION || '2.1.322'
@@ -114,6 +115,9 @@ const temp = mkdtempSync(
 const work = join(temp, 'work'),
   plugin = join(temp, 'plugin'),
   bin = join(temp, 'bin')
+let unicodeRoot
+let localAppData = join(temp, 'local')
+let unicodeLocal
 let child,
   gateway,
   stream,
@@ -122,15 +126,32 @@ let child,
   pid,
   gatewayCalls = 0
 try {
+  if (process.platform === 'win32')
+    assert(
+      [...temp].every((char) => char.codePointAt(0) < 128),
+      'Windows non-socket fixture root is not ASCII',
+    )
+  if (process.platform === 'win32') {
+    unicodeRoot = mkdtempSync(join(tmpdir(), 'btr-proof-é'))
+    localAppData = join(unicodeRoot, 'local')
+  }
   for (const path of [
     work,
     bin,
     join(temp, 'home'),
     join(temp, 'config'),
     join(temp, 'tmp'),
-    join(temp, 'local'),
+    localAppData,
   ])
     mkdirSync(path, { recursive: true, mode: 0o700 })
+  if (unicodeRoot) {
+    unicodeLocal = realpathSync.native(localAppData)
+    const budget = Buffer.byteLength(unicodeLocal, 'utf8') + 32
+    assert(
+      budget <= 100,
+      `Unicode LocalAppData exceeds socket budget: ${budget} bytes`,
+    )
+  }
   if (process.platform !== 'win32' && process.env.RELAY_CROSS_ACCOUNT_HELPER) {
     chmodSync(temp, 0o711)
     chmodSync(join(temp, 'tmp'), 0o711)
@@ -188,6 +209,17 @@ try {
     )
   if (process.platform !== 'win32')
     symlinkSync('/usr/bin/uname', join(bin, 'uname'))
+  const gitDir =
+    process.platform === 'win32'
+      ? (process.env.PATH || '')
+          .split(';')
+          .map((entry) => entry.replace(/^"|"$/g, ''))
+          .find(
+            (entry) => isAbsolute(entry) && existsSync(join(entry, 'git.exe')),
+          )
+      : undefined
+  if (process.platform === 'win32')
+    assert(gitDir, 'Git executable not found on runner PATH')
   gateway = createServer((req, res) => {
     gatewayCalls++
     req.resume()
@@ -201,12 +233,12 @@ try {
   const env = {
     PATH:
       process.platform === 'win32'
-        ? `${bin};${process.env.SystemRoot}\\System32`
+        ? [bin, gitDir, join(systemRoot, 'System32')].join(';')
         : bin,
     HOME: join(temp, 'home'),
     USERPROFILE: join(temp, 'home'),
     CLAUDE_CONFIG_DIR: join(temp, 'config'),
-    LOCALAPPDATA: join(temp, 'local'),
+    LOCALAPPDATA: localAppData,
     TMPDIR: join(temp, 'tmp'),
     TMP: join(temp, 'tmp'),
     TEMP: join(temp, 'tmp'),
@@ -225,6 +257,50 @@ try {
     'PROCESSOR_ARCHITEW6432',
   ])
     if (process.env[key]) env[key] = process.env[key]
+  for (const entry of env.PATH.split(
+    process.platform === 'win32' ? ';' : ':',
+  )) {
+    for (const name of ['node', 'node.exe', 'bun', 'bun.exe']) {
+      assert(!existsSync(join(entry, name)), `child PATH exposes ${name}`)
+    }
+  }
+  if (process.platform === 'win32') {
+    const git = join(gitDir, 'git.exe')
+    const gitEnv = { ...env, GIT_CONFIG_NOSYSTEM: '1' }
+    const repositories = [
+      {
+        dir: join(work, 'git-unicode'),
+        names: ['ascii.txt', 'café-漢-😀.txt'],
+      },
+      { dir: join(work, 'git-foreign'), names: ['foreign-canary.txt'] },
+    ]
+    for (const repository of repositories) {
+      mkdirSync(repository.dir)
+      for (const name of repository.names)
+        writeFileSync(join(repository.dir, name), 'isolated fixture\n')
+      for (const args of [
+        ['init', '-q'],
+        ['add', '--', ...repository.names],
+      ]) {
+        const result = spawnSync(git, args, {
+          cwd: repository.dir,
+          env: gitEnv,
+          encoding: 'utf8',
+          timeout: 20000,
+          maxBuffer: 65536,
+          windowsHide: true,
+        })
+        assert(
+          result.status === 0,
+          `Git fixture setup failed: status=${result.status} error=${result.error?.code || 'none'} stderr=${result.stderr || ''}`,
+        )
+      }
+    }
+    writeFileSync(
+      join(work, 'git-unicode', '.git', 'info', 'exclude'),
+      'git.cmd\ncmd.exe\nsentinel-invoked.txt\n',
+    )
+  }
   if (process.env.RELAY_CLI_EXECUTABLE) {
     const actual = spawnSync(claude, ['--version'], {
       env,
@@ -278,11 +354,28 @@ try {
     report?.phase === 'ready',
     `SDK fixture did not initialize: ${report?.error || 'no report'}`,
   )
+  assert(
+    process.platform === 'win32'
+      ? report.windowsGit === 'passed'
+      : report.windowsGit === undefined,
+    'Windows SDK Git proof missing or unexpectedly present',
+  )
   socket = report.socket
   assert(
     typeof socket === 'string' && typeof report.launch === 'string',
     'missing private socket or launch file',
   )
+  if (process.platform === 'win32') {
+    const socketBytes = Buffer.byteLength(socket, 'utf8')
+    const socketBase = realpathSync.native(dirname(dirname(socket)))
+    assert(
+      socket.includes('é') &&
+        socketBytes <= 100 &&
+        socketBase.toLowerCase() === unicodeLocal.toLowerCase(),
+      `Unicode socket path proof failed: ${socketBytes} bytes`,
+    )
+    console.log(JSON.stringify({ unicodeSocketBytes: socketBytes }))
+  }
   const os = process.platform === 'win32' ? 'windows' : process.platform
   const runnerArch = (process.env.RUNNER_ARCH || process.arch).toLowerCase()
   const arch =
@@ -525,5 +618,12 @@ try {
     process.exitCode = 1
   }
   if (gateway) await new Promise((ok) => gateway.close(ok))
+  if (unicodeRoot)
+    rmSync(unicodeRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    })
   rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
 }

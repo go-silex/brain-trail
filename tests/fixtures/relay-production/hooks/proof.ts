@@ -2,6 +2,7 @@ import type { Register } from 'claude-code'
 import { relayBinary, relayIO } from '../../../../hosts/native/io'
 import { startRelay } from '../../../../hosts/relay/client'
 import type { DashboardFeed } from '../../../../types/browser'
+import { proveWindowsGit } from './windows-git'
 
 export const register: Register = (on) => {
   let passed = false
@@ -68,7 +69,10 @@ export const register: Register = (on) => {
       },
     } as unknown as DashboardFeed
     let timer: { cancel(): void } | undefined
+    let windowsGit: 'passed' | undefined
     try {
+      if ((await $.env.get('OS').catch(() => undefined)) === 'Windows_NT')
+        windowsGit = await proveWindowsGit($, cwd)
       const client = await startRelay(
         port,
         binary,
@@ -78,7 +82,7 @@ export const register: Register = (on) => {
       launch = await client.prepareBrowser()
       await $.fs.write(
         `${cwd}/relay-production.json`,
-        JSON.stringify({ phase: 'ready', launch, socket, binary }),
+        JSON.stringify({ phase: 'ready', launch, socket, binary, windowsGit }),
       )
       await Promise.race([
         done,
