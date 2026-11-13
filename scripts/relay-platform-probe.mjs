@@ -33,7 +33,7 @@ const summary = {
   platform,
   claude: version,
   distribution: 'CI-built fixture; not packaged release proof',
-  minimumClaude: '2.1.275 (README); not tested by this probe',
+  declaredMinimumClaude: '2.1.275 (README)',
   result: 'failed',
   gatewayRequests: [],
   windowsAcl: 'not-applicable',
@@ -216,6 +216,8 @@ try {
   })
   const deadline = Date.now() + 75000
   while (!closed && Date.now() < deadline) {
+    if (summary.gatewayRequestCount)
+      fail('Unexpected inert gateway request attempted')
     report = readJson(join(work, 'probe-report.json')) || report
     if (!socketDir && report?.socketPath) {
       socketDir = dirname(resolve(report.socketPath))
@@ -224,39 +226,7 @@ try {
         !basename(socketDir).startsWith('btr-')
       )
         fail('Socket directory outside isolated temporary root')
-      if (process.platform === 'win32') {
-        // Report only counts, never usernames, paths, or raw ACL output.
-        const ps =
-          "$a=Get-Acl -LiteralPath $env:RELAY_ACL_PATH; $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $safe=@($me,'S-1-5-18','S-1-5-32-544'); $rules=$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); $other=@($rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $safe }); Write-Output $other.Count"
-        const acl = spawnSync(
-          'powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-Command', ps],
-          {
-            env: { ...env, RELAY_ACL_PATH: socketDir },
-            encoding: 'utf8',
-            timeout: 10000,
-            windowsHide: true,
-          },
-        )
-        const count =
-          acl.status === 0 && /^\s*\d+\s*$/.test(acl.stdout)
-            ? Number(acl.stdout.trim())
-            : null
-        summary.windowsAcl =
-          count === null
-            ? 'inspection-failed'
-            : count === 0
-              ? 'no-other-allow-entries-observed'
-              : 'other-allow-entries-observed'
-        summary.windowsOtherAllowEntries = count
-        if (count === null)
-          summary.windowsAclError = redact(
-            `${acl.error?.message || ''}\n${acl.stderr || ''}\n${acl.stdout || ''}`.slice(
-              0,
-              4096,
-            ),
-          )
-      } else {
+      if (process.platform !== 'win32') {
         summary.socketDirectoryMode = (
           statSync(socketDir).mode & 0o777
         ).toString(8)
@@ -265,6 +235,8 @@ try {
     await pause(100)
   }
   report = readJson(join(work, 'probe-report.json')) || report
+  if (process.platform === 'win32')
+    summary.windowsAcl = report?.privacy ?? 'missing'
   const end = readJson(join(work, 'probe-end.json'))
   if (summary.gatewayRequestCount)
     fail('Unexpected inert gateway request attempted')
@@ -310,11 +282,20 @@ try {
   if (alive(report.pid)) fail('Relay still present after Claude exited')
   if (process.platform !== 'win32' && summary.socketDirectoryMode !== '700')
     fail('Socket directory is not mode 0700')
-  if (
-    process.platform === 'win32' &&
-    summary.windowsAcl !== 'no-other-allow-entries-observed'
-  )
-    fail('Windows socket directory ACL privacy not established')
+  if (process.platform === 'win32') {
+    const privacy = report?.privacy
+    if (
+      privacy?.kind !== 'windows' ||
+      privacy.directory?.ownerSelf !== true ||
+      privacy.directory?.protected !== true ||
+      privacy.directory?.allowedEntries !== 2 ||
+      privacy.directory?.unexpectedEntries !== 0 ||
+      privacy.socket?.ownerSelf !== true ||
+      privacy.socket?.allowedEntries !== 2 ||
+      privacy.socket?.unexpectedEntries !== 0
+    )
+      fail('Windows directory/socket ACL privacy not established')
+  }
   summary.result = 'passed'
 } catch (error) {
   summary.reason = redact(error.message)

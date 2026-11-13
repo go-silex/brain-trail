@@ -47,6 +47,22 @@ export const register: Register = (on) => {
     const cwd = await $.session.cwd()
     let socketPath = ''
     let pid = 0
+    let privacy:
+      | {
+          kind: string
+          directory: {
+            ownerSelf: boolean
+            protected: boolean
+            allowedEntries: number
+            unexpectedEntries: number
+          }
+          socket: {
+            ownerSelf: boolean
+            allowedEntries: number
+            unexpectedEntries: number
+          }
+        }
+      | undefined
     const acknowledgements: Array<{
       id: string
       status: string
@@ -95,6 +111,25 @@ export const register: Register = (on) => {
                   throw new Error('invalid hello')
                 socketPath = frame.socketPath
                 pid = Number(frame.pid)
+                if (frame.privacyError)
+                  throw new Error(
+                    `privacy inspection: ${String(frame.privacyError).slice(0, 400)}`,
+                  )
+                if (frame.privacy) privacy = JSON.parse(frame.privacy)
+                if (
+                  binary.endsWith('.exe') &&
+                  (privacy?.kind !== 'windows' ||
+                    privacy.directory?.ownerSelf !== true ||
+                    privacy.directory?.protected !== true ||
+                    privacy.directory?.allowedEntries !== 2 ||
+                    privacy.directory?.unexpectedEntries !== 0 ||
+                    privacy.socket?.ownerSelf !== true ||
+                    privacy.socket?.allowedEntries !== 2 ||
+                    privacy.socket?.unexpectedEntries !== 0)
+                )
+                  throw new Error(
+                    `privacy mismatch: ${JSON.stringify(privacy)}`,
+                  )
                 // Preserve cleanup coordinates even if the subsequent transport fails.
                 await $.fs.write(
                   `${cwd}/probe-report.json`,
@@ -102,6 +137,7 @@ export const register: Register = (on) => {
                     phase: 'running',
                     pid,
                     socketPath,
+                    privacy,
                     acknowledgements,
                   }),
                 )
@@ -164,6 +200,7 @@ export const register: Register = (on) => {
         phase: 'passed-awaiting-session-end',
         pid,
         socketPath,
+        privacy,
         acknowledgements,
       }
       await $.fs.write(`${cwd}/probe-report.json`, JSON.stringify(report))
@@ -173,6 +210,7 @@ export const register: Register = (on) => {
         phase: 'failed',
         pid,
         socketPath,
+        privacy,
         acknowledgements,
         error: String(error).slice(0, 500),
       }

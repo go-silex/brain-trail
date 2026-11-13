@@ -115,7 +115,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
-	if err := frame(map[string]string{"type": "hello", "socketPath": socket, "pid": strconv.Itoa(os.Getpid())}); err != nil {
+	hello := map[string]string{"type": "hello", "socketPath": socket, "pid": strconv.Itoa(os.Getpid())}
+	privacy, privacyErr := privacyEvidence(dir, socket)
+	if privacyErr != nil {
+		hello["privacyError"] = privacyErr.Error()
+	} else if privacy != "" {
+		hello["privacy"] = privacy
+	}
+	if err := frame(hello); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
