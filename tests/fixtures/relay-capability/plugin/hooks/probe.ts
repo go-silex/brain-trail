@@ -136,7 +136,7 @@ export const register: Register = (on) => {
               if (frame.id === 'stale') {
                 if (
                   acknowledgements.length !== 2 ||
-                  acknowledgements[0].id !== 'valid' ||
+                  acknowledgements[0]?.id !== 'valid' ||
                   status !== 'refused-generation' ||
                   value !== 'é😀'
                 )
