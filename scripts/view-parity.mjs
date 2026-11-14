@@ -1020,21 +1020,16 @@ const compareCase = async (
   }
   if (scenario.browser3d === true) {
     const leftBrowser = browserPair(baseline)
-    if (leftBrowser.error || !leftBrowser.files)
-      item.errors.push(
-        `baseline browser artifacts: ${leftBrowser.error ?? 'missing historical scene'}`,
-      )
+    if (leftBrowser.error)
+      item.errors.push(`baseline browser artifacts: ${leftBrowser.error}`)
     else if (!browser) item.errors.push('browser scene: playwright unavailable')
     else {
       try {
         const sceneDir = path.join(dir, 'browser')
         await mkdir(sceneDir, { recursive: true })
-        const leftShot = await rasterScene(
-          browser,
-          sceneDir,
-          'baseline',
-          leftBrowser.files,
-        )
+        const leftShot = leftBrowser.files
+          ? await rasterScene(browser, sceneDir, 'baseline', leftBrowser.files)
+          : await captureBrowserScene(browser, baselineRoot, baseline, scenario)
         const rightShot = await captureBrowserScene(
           browser,
           candidateRoot,
