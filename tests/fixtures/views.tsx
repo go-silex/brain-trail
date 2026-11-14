@@ -269,7 +269,7 @@ const SHAPES: Record<string, string> = {
   totals: 'totals-1',
   meter: 'meter-1',
   camera: 'camera-1',
-  cam3d: 'cam3d-1',
+  cam3d: 'cam3d-2',
   play: 'play-1',
   preview: 'preview-1',
   coach: 'coach-1',

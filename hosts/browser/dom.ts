@@ -3,6 +3,12 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import { marked } from 'marked'
 import { WebGLScene } from './scene3d'
+import {
+  heldIn,
+  pointerButton,
+  wheelRows,
+  type PointerButton,
+} from '../../hooks/pointer'
 import type {
   MapGesture,
   Scene3dProps,
@@ -423,7 +429,7 @@ export class DomRenderer {
             y: number
             fx: number
             fy: number
-            right: boolean
+            button: PointerButton
             press: number
           }
         | undefined,
@@ -445,19 +451,37 @@ export class DomRenderer {
         tip.style.top = `${Math.max(0, t.y - 16)}px`
       }
     }
+    // A press ends once: on its release, a cancel or a lost capture, or, when its release was
+    // lost, at the next press or the first move that no longer holds its button.
+    // Only a release that never dragged is a click.
+    const release = () => {
+      if (dragging) show(this.map.gesture({ kind: 'dragend' }))
+      down = undefined
+      dragging = false
+    }
     el.oncontextmenu = (event) => event.preventDefault()
+    // The middle button zooms the map: no autoscroll, no paste, no middle click.
+    el.onmousedown = (event) => {
+      if (event.button === 1) event.preventDefault()
+    }
+    el.onauxclick = (event) => event.preventDefault()
     el.onpointerdown = (event) => {
+      const button = pointerButton(event.button)
+      if (button === undefined) return
+      release()
+      if (button === 'middle') event.preventDefault()
       const p = point(event)
       this.mapPressSequence =
         this.mapPressSequence >= Number.MAX_SAFE_INTEGER
           ? 1
           : this.mapPressSequence + 1
-      down = { ...p, right: event.button === 2, press: this.mapPressSequence }
+      down = { ...p, button, press: this.mapPressSequence }
       dragging = false
       el.setPointerCapture(event.pointerId)
     }
     el.onpointermove = (event) => {
       const p = point(event)
+      if (down !== undefined && !heldIn(down.button, event.buttons)) release()
       if (down !== undefined) {
         if (
           dragging ||
@@ -469,6 +493,7 @@ export class DomRenderer {
             this.map.gesture({
               kind: 'drag',
               press: down.press,
+              button: down.button,
               fx: p.fx,
               fy: p.fy,
               sfx: down.fx,
@@ -479,23 +504,18 @@ export class DomRenderer {
       } else show(this.map.gesture({ kind: 'hover', ...p }))
     }
     el.onpointerup = (event) => {
-      const p = point(event)
-      if (down !== undefined)
-        show(
-          this.map.gesture(
-            dragging
-              ? { kind: 'dragend' }
-              : { kind: 'click', fx: p.fx, fy: p.fy, right: down.right },
-          ),
-        )
+      if (down === undefined) return
+      if (dragging) {
+        release()
+        return
+      }
+      const p = point(event),
+        button = down.button
       down = undefined
-      dragging = false
+      show(this.map.gesture({ kind: 'click', fx: p.fx, fy: p.fy, button }))
     }
-    el.onpointercancel = () => {
-      if (dragging) show(this.map.gesture({ kind: 'dragend' }))
-      down = undefined
-      dragging = false
-    }
+    el.onpointercancel = () => release()
+    el.onlostpointercapture = () => release()
     el.onpointerleave = () => {
       if (down === undefined) show(this.map.gesture({ kind: 'leave' }))
     }
@@ -503,12 +523,7 @@ export class DomRenderer {
       'wheel',
       (event) => {
         const p = point(event),
-          by =
-            event.deltaMode === 1
-              ? event.deltaY
-              : event.deltaMode === 2
-                ? event.deltaY * 16
-                : event.deltaY / 16
+          by = wheelRows(event.deltaY, event.deltaMode)
         if (by !== 0 && this.map.wheel(by, p.fx, p.fy)) event.preventDefault()
       },
       { passive: false },

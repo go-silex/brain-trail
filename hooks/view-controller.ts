@@ -11,8 +11,30 @@ import type {
 } from '../types/view'
 import type { Strings } from './i18n'
 import { BANNER_ASPECT, BANNER_MAX, fileName, SIZE, tilt } from './map'
-import { panFrame, pickAt, zoomFrame } from './pointer'
-import { CAM0, PITCH_MAX, PITCH_MIN, pickSpin, yawAt } from './spin'
+import {
+  dragAction,
+  dragZoom,
+  panFrame,
+  pickAt,
+  usableFrame,
+  wheelZoom,
+  zoomFrame,
+  type PointerButton,
+} from './pointer'
+import {
+  CAM0,
+  PITCH_MAX,
+  PITCH_MIN,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  panSpin,
+  pickSpin,
+  yawAt,
+  yawOf,
+  zoomSpin,
+  type Cam,
+  type SpinView,
+} from './spin'
 
 export const STEP_MS = 900
 export const VIEW_STATE0: ViewState = {
@@ -57,6 +79,12 @@ export const mapCells = (pane: Cells, chrome: Cells): Cells => ({
 export const cellAspect = (box: Cells) =>
   ((Math.max(0, box.rows) + 0.5) * CELL_RATIO) /
   (Math.max(0, box.columns) + 0.5)
+// The 3D picture back on the brain's middle, the way a reset returns the 2D map to its whole.
+const centred = (k: Cam): Cam =>
+  k.pan.x === 0 && k.pan.y === 0 ? k : { ...k, pan: { x: 0, y: 0 } }
+// Leaving a followed note by hand starts from the picture it showed: its turn, zoom and pan.
+const fromDrawn = (k: Cam, v: SpinView | undefined, now: number): Cam =>
+  v?.follow ? { ...k, yaw: v.yaw, at: now, zoom: v.zoom, pan: v.pan } : k
 export const absOf = (index: { root: string } | undefined, ref: PreviewRef) =>
   ref.out || index === undefined ? ref.p : `${index.root}/${ref.p}`
 export type OpenTarget =
@@ -150,11 +178,13 @@ export const plan = (
     case 'follow':
       return [
         { key: 'camera', next: () => null },
+        { key: 'cam3d', next: centred },
         { key: 'zoomed', next: () => !i.following },
       ]
     case 'whole':
       return [
         { key: 'camera', next: () => null },
+        { key: 'cam3d', next: centred },
         { key: 'zoomed', next: () => false },
       ]
     case 'zoom-2d': {
@@ -171,14 +201,19 @@ export const plan = (
             },
           ]
     }
-    case 'turn-3d':
+    case 'turn-3d': {
+      const v = c.frames.d3?.view
       return [
         { key: 'zoomed', next: () => false },
         {
           key: 'cam3d',
-          next: (k) => ({ ...k, yaw: yawAt(k, c.now) + i.by, at: c.now }),
+          next: (k) => {
+            const from = fromDrawn(k, v, c.now)
+            return { ...from, yaw: yawAt(from, c.now) + i.by, at: c.now }
+          },
         },
       ]
+    }
     case 'spin-3d':
       return [
         {
@@ -191,19 +226,26 @@ export const plan = (
           }),
         },
       ]
-    case 'zoom-3d':
+    // Zooming by hand stops following Claude, as in 2D.
+    case 'zoom-3d': {
+      const v = c.frames.d3?.view
       return [
+        { key: 'zoomed', next: () => false },
         {
           key: 'cam3d',
-          next: (k) => ({
-            ...k,
-            zoom:
-              i.dir === 'in'
-                ? Math.min(12, k.zoom * 1.5)
-                : Math.max(0.6, k.zoom / 1.5),
-          }),
+          next: (k) => {
+            const from = fromDrawn(k, v, c.now)
+            return {
+              ...from,
+              zoom:
+                i.dir === 'in'
+                  ? Math.min(ZOOM_MAX, from.zoom * 1.5)
+                  : Math.max(ZOOM_MIN, from.zoom / 1.5),
+            }
+          },
         },
       ]
+    }
   }
 }
 export const isSharedViewIntent = (i: ViewIntent): i is SharedViewIntent =>
@@ -300,25 +342,30 @@ export const parseBox = (
     pane: { columns: columns!, rows: rows! },
   }
 }
+const finite = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isFinite(v)
+const buttonOf = (v: unknown): PointerButton | undefined =>
+  v === 'left' || v === 'middle' || v === 'right' ? v : undefined
 export const parseGesture = (data: unknown): MapGesture | undefined => {
   if (typeof data !== 'object' || data === null) return undefined
   const d: Record<string, unknown> = Object.fromEntries(Object.entries(data))
   if (d.kind === 'leave' || d.kind === 'dragend') return { kind: d.kind }
-  if (typeof d.fx !== 'number' || typeof d.fy !== 'number') return undefined
+  if (!finite(d.fx) || !finite(d.fy)) return undefined
   if (d.kind === 'hover')
     return {
       kind: 'hover',
       fx: d.fx,
       fy: d.fy,
-      x: typeof d.x === 'number' ? d.x : 0,
-      y: typeof d.y === 'number' ? d.y : 0,
+      x: finite(d.x) ? d.x : 0,
+      y: finite(d.y) ? d.y : 0,
     }
-  if (d.kind === 'click')
-    return { kind: 'click', fx: d.fx, fy: d.fy, right: d.right === true }
+  const button = buttonOf(d.button)
+  if (button === undefined) return undefined
+  if (d.kind === 'click') return { kind: 'click', fx: d.fx, fy: d.fy, button }
   if (
     d.kind === 'drag' &&
-    typeof d.sfx === 'number' &&
-    typeof d.sfy === 'number' &&
+    finite(d.sfx) &&
+    finite(d.sfy) &&
     typeof d.press === 'number' &&
     Number.isSafeInteger(d.press) &&
     d.press > 0
@@ -326,6 +373,7 @@ export const parseGesture = (data: unknown): MapGesture | undefined => {
     return {
       kind: 'drag',
       press: d.press,
+      button,
       fx: d.fx,
       fy: d.fy,
       sfx: d.sfx,
@@ -333,7 +381,7 @@ export const parseGesture = (data: unknown): MapGesture | undefined => {
     }
   return undefined
 }
-// Spin intent lives in the camera; a drag pauses only its rendered projection.
+// Spin intent lives in the camera; a drag of any button pauses only its rendered projection.
 export const cameraDuringGesture = (
   camera: ViewState['cam3d'],
   memory: GestureMemory,
@@ -346,31 +394,29 @@ export const mapGesture = (
   frames: DrawnFrames,
   c: { now: number; hoverNames: boolean },
 ): GestureResult => {
+  // The wheel zooms around the last point the pointer was seen at over the map.
   let memory =
     g?.kind === 'leave'
       ? { ...m, hover: undefined }
-      : g?.kind === 'hover'
+      : g?.kind === 'hover' || g?.kind === 'click' || g?.kind === 'drag'
         ? { ...m, hover: { fx: g.fx, fy: g.fy } }
         : m
   const steps: Step[] = []
-  if (
+  const concludes =
     g?.kind === 'dragend' ||
     g?.kind === 'hover' ||
     g?.kind === 'click' ||
     g?.kind === 'leave'
-  )
-    memory = { ...memory, drag2d: undefined }
+  if (concludes) memory = { ...memory, drag2d: undefined }
+  // Moving the camera by hand (a press's first drag, a click that zooms) stops following Claude.
+  const unfollow = () => {
+    if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
+  }
   let tip: GestureResult['tip'] = null
   let open: PreviewRef | undefined
   if (s.view3d) {
     // A later non-drag message can replace an undelivered dragend in the client transport.
-    if (
-      memory.drag3d !== undefined &&
-      (g?.kind === 'dragend' ||
-        g?.kind === 'hover' ||
-        g?.kind === 'click' ||
-        g?.kind === 'leave')
-    ) {
+    if (memory.drag3d !== undefined && concludes) {
       memory = { ...memory, drag3d: undefined }
       steps.push({ key: 'cam3d', next: (k) => ({ ...k, at: c.now }) })
     }
@@ -383,49 +429,74 @@ export const mapGesture = (
         if (n !== undefined)
           tip = { text: fileName(frame.layout.files[n]![0]), x: g.x, y: g.y }
       } else if (g.kind === 'drag') {
+        // A press continues from the drawing it started on, at the turn shown then.
         let base = memory.drag3d
         if (base === undefined || base.press !== g.press) {
           base = {
             press: g.press,
-            yaw: frame.view.yaw,
+            yaw: yawOf(frame.view, c.now),
             pitch: s.cam3d.pitch,
+            view: frame.view,
           }
           memory = { ...memory, drag3d: base }
-          if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
+          if (usableFrame(base.view)) unfollow()
         }
         const b = base,
+          v = b.view,
+          action = dragAction(g.button, true),
           dx = g.fx - g.sfx,
           dy = g.fy - g.sfy
-        steps.push({
-          key: 'cam3d',
-          next: (k) => ({
-            ...k,
-            yaw: b.yaw + dx * Math.PI * 1.3,
-            pitch: Math.max(PITCH_MIN, Math.min(PITCH_MAX, b.pitch + dy * 1.4)),
-            at: c.now,
-          }),
-        })
-      } else if (g.kind === 'click') {
-        const n = g.right
-          ? undefined
-          : pickSpin(frame.layout, frame.view, c.now, g.fx, g.fy, frame.touched)
-        if (n !== undefined) open = { p: frame.layout.files[n]![0] }
-        else
+        if (usableFrame(v))
           steps.push({
             key: 'cam3d',
             next: (k) => ({
               ...k,
-              zoom: g.right
-                ? Math.max(0.6, k.zoom / 1.5)
-                : Math.min(12, k.zoom * 1.5),
+              yaw: action === 'orbit' ? b.yaw + dx * Math.PI * 1.3 : b.yaw,
+              pitch:
+                action === 'orbit'
+                  ? Math.max(PITCH_MIN, Math.min(PITCH_MAX, b.pitch + dy * 1.4))
+                  : b.pitch,
+              ...(action === 'zoom'
+                ? zoomSpin(v, 0.5, 0.5, dragZoom(dy))
+                : {
+                    zoom: v.zoom,
+                    pan: action === 'pan' ? panSpin(v, dx, dy) : v.pan,
+                  }),
+              at: c.now,
             }),
           })
+      } else if (g.kind === 'click' && g.button !== 'middle') {
+        // Only the left button opens a note; elsewhere it zooms in, the right button out.
+        const n =
+          g.button === 'left'
+            ? pickSpin(
+                frame.layout,
+                frame.view,
+                c.now,
+                g.fx,
+                g.fy,
+                frame.touched,
+              )
+            : undefined
+        if (n !== undefined) open = { p: frame.layout.files[n]![0] }
+        else if (usableFrame(frame.view)) {
+          const v = frame.view,
+            f = g.button === 'right' ? 1.5 : 1 / 1.5
+          unfollow()
+          steps.push({
+            key: 'cam3d',
+            next: (k) => ({
+              ...fromDrawn(k, v, c.now),
+              ...zoomSpin(v, g.fx, g.fy, f),
+            }),
+          })
+        }
       }
     }
   } else {
     const frame = frames.d2
     if (frame !== undefined && g !== undefined) {
-      if (g.kind === 'hover' || g.kind === 'click') {
+      if (g.kind === 'hover' || (g.kind === 'click' && g.button !== 'middle')) {
         const tilted = tilt(frame.layout),
           hit = pickAt(
             tilted.files,
@@ -442,49 +513,73 @@ export const mapGesture = (
               x: g.x,
               y: g.y,
             }
-        } else if (!g.right && hit.file !== undefined)
+        } else if (g.button === 'left' && hit.file !== undefined)
           open = { p: frame.layout.files[hit.file]![0] }
-        else {
-          if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
+        else if (usableFrame(frame.view)) {
+          unfollow()
           steps.push({
             key: 'camera',
             next: () =>
-              zoomFrame(frame.view, g.fx, g.fy, g.right ? 1.8 : 1 / 1.8, SIZE),
+              zoomFrame(
+                frame.view,
+                g.fx,
+                g.fy,
+                g.button === 'right' ? 1.8 : 1 / 1.8,
+                SIZE,
+              ),
           })
         }
       } else if (g.kind === 'drag') {
-        const base =
-          memory.drag2d?.press === g.press
-            ? memory.drag2d.view
-            : { ...frame.view }
+        // A press continues from the frame it started on; the middle button zooms around its middle.
+        const held =
+          memory.drag2d?.press === g.press ? memory.drag2d.view : undefined
+        const base = held ?? { ...frame.view }
         memory = { ...memory, drag2d: { press: g.press, view: base } }
-        if (s.zoomed && (g.fx !== g.sfx || g.fy !== g.sfy))
-          steps.push({ key: 'zoomed', next: () => false })
-        steps.push({
-          key: 'camera',
-          next: () => panFrame(base, g.fx - g.sfx, g.fy - g.sfy),
-        })
+        if (usableFrame(base)) {
+          if (held === undefined) unfollow()
+          const dx = g.fx - g.sfx,
+            dy = g.fy - g.sfy,
+            zoom = dragAction(g.button, false) === 'zoom'
+          steps.push({
+            key: 'camera',
+            next: () =>
+              zoom
+                ? zoomFrame(base, 0.5, 0.5, dragZoom(dy), SIZE)
+                : panFrame(base, dx, dy),
+          })
+        }
       }
     }
   }
   return { memory, steps, tip, open }
 }
+// The wheel zooms toward the pointer (`hover`, as a fraction of the map), `by` rows at a time.
 export const mapWheel = (
   by: number,
   view3d: boolean,
   hover: { fx: number; fy: number },
   frames: DrawnFrames,
+  now: number,
 ): Step[] => {
-  const f = Math.pow(1.18, Math.max(-4, Math.min(4, by)))
-  if (view3d)
+  if (by === 0 || !Number.isFinite(by)) return []
+  const f = wheelZoom(by)
+  if (view3d) {
+    const frame = frames.d3
+    if (frame === undefined || !usableFrame(frame.view)) return []
+    const v = frame.view
     return [
+      { key: 'zoomed', next: () => false },
       {
         key: 'cam3d',
-        next: (k) => ({ ...k, zoom: Math.max(0.6, Math.min(12, k.zoom / f)) }),
+        next: (k) => ({
+          ...fromDrawn(k, v, now),
+          ...zoomSpin(v, hover.fx, hover.fy, f),
+        }),
       },
     ]
+  }
   const frame = frames.d2
-  return frame === undefined || by === 0
+  return frame === undefined || !usableFrame(frame.view)
     ? []
     : [
         { key: 'zoomed', next: () => false },

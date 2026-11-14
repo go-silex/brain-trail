@@ -1,6 +1,6 @@
 import type { Index } from '../hooks/files'
 import type { Layout, Palette } from '../hooks/map'
-import type { MapFrame } from '../hooks/pointer'
+import type { MapFrame, PointerButton } from '../hooks/pointer'
 import type { FigureId } from '../hooks/readout'
 import type { Cam, SpinView } from '../hooks/spin'
 import type { SceneSemantics } from '../hooks/scene3d'
@@ -315,10 +315,11 @@ export type ViewActions<Press> = {
 export type MapGesture =
   | { kind: 'hover'; fx: number; fy: number; x: number; y: number }
   | { kind: 'leave' }
-  | { kind: 'click'; fx: number; fy: number; right: boolean }
+  | { kind: 'click'; fx: number; fy: number; button: PointerButton }
   | {
       kind: 'drag'
       press: number
+      button: PointerButton
       fx: number
       fy: number
       sfx: number
@@ -335,7 +336,10 @@ export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
 export type GestureMemory = {
   hover: { fx: number; fy: number } | undefined
   drag2d: { press: number; view: MapFrame } | undefined
-  drag3d: { press: number; yaw: number; pitch: number } | undefined
+  // the drawing a 3D press started on, and the turn it showed then
+  drag3d:
+    | { press: number; yaw: number; pitch: number; view: SpinView }
+    | undefined
 }
 export type GestureResult = {
   memory: GestureMemory

@@ -314,7 +314,7 @@ export function startPage(
     },
     wheel: (by, fx, fy) => {
       if (ended || state.tab !== 'map') return false
-      const steps = mapWheel(by, state.view3d, { fx, fy }, frames)
+      const steps = mapWheel(by, state.view3d, { fx, fy }, frames, Date.now())
       if (!steps.length) return false
       if (steps.some((step) => step.key === 'zoomed') && state.zoomed)
         void command({ kind: 'view', intent: { kind: 'whole' } })

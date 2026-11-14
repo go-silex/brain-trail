@@ -1,5 +1,61 @@
 // Map pointer geometry in the frame the map last drew. The gauge SVG stays in the adapter.
 
+// One gesture policy for every map, applied by each renderer with its own projection:
+// the wheel and a middle drag zoom, a right drag pans, a left drag pans a plane and turns a scene.
+export type PointerButton = 'left' | 'middle' | 'right'
+export type DragAction = 'pan' | 'orbit' | 'zoom'
+export const dragAction = (
+  button: PointerButton,
+  scene: boolean,
+): DragAction =>
+  button === 'middle' ? 'zoom' : button === 'right' || !scene ? 'pan' : 'orbit'
+// a DOM pointer's `button` index
+export const pointerButton = (index: number): PointerButton | undefined =>
+  index === 0
+    ? 'left'
+    : index === 1
+      ? 'middle'
+      : index === 2
+        ? 'right'
+        : undefined
+// whether a DOM pointer's `buttons` still holds this button
+export const heldIn = (button: PointerButton, buttons: number) =>
+  (buttons & (button === 'left' ? 1 : button === 'right' ? 2 : 4)) !== 0
+
+// A notch of the wheel is one row, wherever it turns: the pane counts rows itself,
+// a browser reports about 100 pixels, 3 lines or 1 page.
+export const wheelRows = (deltaY: number, deltaMode: number) =>
+  deltaMode === 1 ? deltaY / 3 : deltaMode === 2 ? deltaY : deltaY / 100
+// A row scales the view by this much; rows toward the person (positive) zoom out.
+const ROW_ZOOM = 1.18
+const WHEEL_ROWS = 4
+export const wheelZoom = (rows: number) =>
+  Number.isFinite(rows)
+    ? Math.pow(ROW_ZOOM, Math.max(-WHEEL_ROWS, Math.min(WHEEL_ROWS, rows)))
+    : 1
+// A middle drag down the whole map zooms out as much as this many rows; up zooms in.
+// A captured pointer reports past the map's edges: a few map heights at most count.
+const DRAG_ROWS = 8
+const DRAG_REACH = 3
+export const dragZoom = (dy: number) =>
+  Number.isFinite(dy)
+    ? Math.pow(
+        ROW_ZOOM,
+        Math.max(-DRAG_REACH, Math.min(DRAG_REACH, dy)) * DRAG_ROWS,
+      )
+    : 1
+
+type Box = { vx: number; vy: number; vw: number; vh: number }
+// a drawn frame a gesture can be measured in: finite, with an area
+export const usableFrame = (v: Box & { cameraFrame?: Box }): boolean =>
+  Number.isFinite(v.vx) &&
+  Number.isFinite(v.vy) &&
+  Number.isFinite(v.vw) &&
+  Number.isFinite(v.vh) &&
+  v.vw > 0 &&
+  v.vh > 0 &&
+  (v.cameraFrame === undefined || usableFrame(v.cameraFrame))
+
 export type MapFrame = {
   vx: number
   vy: number
