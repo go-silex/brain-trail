@@ -22,14 +22,62 @@ export const isShallow = (root: string, home: string) =>
   root === '/' ||
   root === '/Users' ||
   root === '/home'
-export const GIT_LS = [
+export const gitInventoryArgv = (windows: boolean): string[] => [
   'git',
+  '--no-pager',
   '-c',
   'core.quotePath=false',
+  '-c',
+  'core.fsmonitor=',
+  '-c',
+  `core.hooksPath=${windows ? '\\\\.\\NUL' : '/dev/null'}`,
+  '-c',
+  'protocol.ext.allow=never',
+  '-c',
+  'core.askPass=',
+  '-c',
+  'submodule.recurse=false',
   'ls-files',
   '-co',
   '--exclude-standard',
 ]
+export const windowsSystemRoot = (systemRoot?: string): string | undefined => {
+  const path = systemRoot?.replace(/\//g, '\\').replace(/\\+$/, '')
+  if (path !== undefined)
+    for (let i = 0; i < path.length; i++)
+      if (path.charCodeAt(i) < 32) return undefined
+  return path &&
+    /^[A-Za-z]:\\[^\\/:*?"<>|]+(?:\\[^\\/:*?"<>|]+)*$/.test(path) &&
+    !path.split('\\').some((part) => part === '.' || part === '..')
+    ? path
+    : undefined
+}
+export const nativeGitInventoryArgv = (
+  windows: boolean,
+  names: readonly string[],
+  systemRoot?: string,
+): string[] => {
+  if (!names.length || !names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name)))
+    throw new Error('Invalid Git local environment names')
+  const systemPath = windowsSystemRoot(systemRoot)
+  if (windows && !systemPath) throw new Error('Invalid SystemRoot')
+  const gitArgs = gitInventoryArgv(windows)
+  return windows
+    ? [
+        `${systemPath}\\System32\\cmd.exe`,
+        '/d',
+        '/v:off',
+        '/s',
+        '/c',
+        `${names.map((name) => `set ${name}=`).join('&')}&set GIT_NO_LAZY_FETCH=1&set NoDefaultCurrentDirectoryInExePath=1&git ${gitArgs.slice(1).join(' ')}`,
+      ]
+    : [
+        'env',
+        ...names.flatMap((name) => ['-u', name]),
+        'GIT_NO_LAZY_FETCH=1',
+        ...gitArgs,
+      ]
+}
 export const findArgv = (shallow: boolean): string[] => {
   const heavy = [
     'node_modules',
@@ -129,30 +177,4 @@ export const EDITORS = [
   'Xcode',
   'BBEdit',
   'Nova',
-]
-export const appsArgv = (home: string): string[] => [
-  'ls',
-  '/Applications',
-  `${home}/Applications`,
-  '/System/Applications',
-]
-export const appsIn = (stdout: string): string[] => {
-  const found = new Set(
-    stdout.split('\n').map((x) => x.trim().replace(/\.app$/, '')),
-  )
-  return EDITORS.filter((a) => found.has(a))
-}
-export const openAttempts = (abs: string, app: string): string[][] => [
-  ...(app === 'Obsidian'
-    ? [
-        [
-          'open',
-          `obsidian://open?path=${encodeURIComponent(abs.normalize('NFD'))}`,
-        ],
-      ]
-    : app !== 'default'
-      ? [['open', '-a', app, abs]]
-      : []),
-  ['open', abs],
-  ['xdg-open', abs],
 ]

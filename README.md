@@ -30,7 +30,7 @@ You see why Claude answers the way it does, what it never looked at, and when it
 claude plugin install brain-trail-v2 --marketplace go-silex/brain-trail
 ```
 
-Answer `y` to add the marketplace, then Enter for your user scope. Needs Claude Code 2.1.275 or later.
+Answer `y` to add the marketplace, then Enter for your user scope. The native CLI API has been exercised with Claude Code 2.1.321 and 2.1.322; earlier compatibility has not been established. Desktop end-to-end verification is a separate release gate.
 
 </details>
 
@@ -44,6 +44,8 @@ Answer `y` to add the marketplace, then Enter for your user scope. Needs Claude 
 3. **Add plugin**: Brain Trail.
 
 </details>
+
+The plugin ships its browser assets and a Go relay for Linux, macOS and Windows on x64 and arm64. Claude users do not need to install Node, Bun or Go, or run an install-time build.
 
 <details>
 <summary><b>Update or remove</b></summary>
@@ -76,9 +78,7 @@ With Oh My Pi 18.18.9, install a local checkout and start a new session:
 omp install /path/to/brain-trail
 ```
 
-Type `/brain-trail` to open the full dashboard in your browser. The OMP dashboard uses the same shared views as the Claude pane. Its browser assets are committed; you do not need to build them. An optional context and cost band appears above the input; you can turn it on or off in Settings.
-
-Protected file previews and Coach instruction-file reads require Linux; they are unsupported on other operating systems.
+Type `/brain-trail` to open the dashboard in your browser. Claude and OMP use the same views and controller: the native pane uses SVG and the browser offers WebGL. Both use the Go relay's application registry and the same opening-settings model, while each host retains its own settings. An optional context and cost band appears above the OMP input; you can turn it on or off in Settings.
 
 ChatGPT is not supported yet.
 
@@ -96,7 +96,11 @@ Your folder as one disc: one circle per folder, one dot per file. Every file tha
 
 The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc with their logo and their call count. The legend under the map counts each colour; click it to list the files.
 
-Follow Claude as it works, replay the session step by step, zoom with the wheel. The **3D** button turns the map into a brain; **Full screen** opens it in your browser.
+Follow the session as it works, replay it step by step, and zoom with the wheel. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
+
+Browser 3D adapts to the theme: dark mode uses restrained ambient connections and activity glows; light mode retains its point rendering without bloom.
+
+Opening the browser or a file reports that the launch was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
 
 In a docked Claude Desktop pane, every tab stays within the available height:
 the header and footer remain fixed, and the map fits the space between them.
@@ -129,7 +133,7 @@ English and French.
 
 For Claude Code, Brain Trail keeps its local state in `~/.claude/brain-trail-v2`. For Oh My Pi, it stores settings, costs and captured tool-call data in its own SQLite database under the active agent profile's `brain-trail` directory, not in the host's authentication database. Captured inputs and results may contain session content; the same directory also holds workspace layout caches. Clearing the trail resets what is shown, not the stored data. No Brain Trail account or tracking.
 
-When you ask for Coach analysis, the assistant analyzes the session on your own plan. The 3D view loads its existing Three.js and font dependencies from public CDNs. See [SECURITY.md](SECURITY.md) for the OMP dashboard's local access and file boundaries.
+When you ask for Coach analysis, the assistant analyzes the session on your own plan. Three.js 0.160.0 and the browser assets are bundled locally; the browser UI does not load Three or fonts from a CDN. See [SECURITY.md](SECURITY.md) for local access and file boundaries.
 
 ## How it measures
 
@@ -154,4 +158,4 @@ Report vulnerabilities privately using the contact in [SECURITY.md](SECURITY.md)
 
 </details>
 
-MIT license. `hooks/vendor/d3-hierarchy` is ISC.
+MIT license. `hooks/vendor/d3-hierarchy` is ISC. The browser bundle includes its third-party licenses; Go and x/sys licenses are in `hosts/relay/bin/`.

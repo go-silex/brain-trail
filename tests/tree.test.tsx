@@ -42,8 +42,13 @@ test('the files tab shows figures, the folders as a tree, and a file in the pane
     return next(e)
   })
   on('clock.now', () => ({ value: 10_000 }))
+  on('env.get', (_$, e) => ({
+    value: e.name === 'HOME' ? '/Users/me' : undefined,
+  }))
   on('config.list', () => ({ value: [] }))
   on('session.cwd', () => ({ value: '/w' }))
+  on('session.id', () => ({ value: 'tree-session' }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
   on('session.usage', () => ({
     value: { startedAt: 0, rateLimits: [], context: { window: 200000 } },
   }))
@@ -51,20 +56,73 @@ test('the files tab shows figures, the folders as a tree, and a file in the pane
     value: {
       exitCode: 0,
       stdout:
-        e.argv[0] === 'git'
-          ? 'notes/a.md\nnotes/deep/b.md\nnotes/c.md\nsrc/app.ts\n'
-          : '',
+        e.argv[0] === 'git' && e.argv[1] === 'rev-parse'
+          ? 'GIT_DIR\nGIT_WORK_TREE\nGIT_CONFIG\n'
+          : e.argv[0] === 'env' && e.argv.includes('ls-files')
+            ? 'notes/a.md\nnotes/deep/b.md\nnotes/c.md\nsrc/app.ts\n'
+            : e.argv[0] === 'uname'
+              ? 'Linux x86_64\n'
+              : '',
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
     },
   }))
+  const relayHeld = new Promise<void>(() => {})
+  let fileHeld = false
+  on('process.spawn', async function* (_$, e, next) {
+    if (!e.argv[0]?.includes('brain-trail-relay')) return yield* next(e)
+    yield {
+      stream: 'stdout' as const,
+      text: '{"t":"hello","protocol":1,"socket":"/tmp/tree-fixture/relay.sock"}\n',
+    }
+    await relayHeld
+    return { value: { code: 0, signal: null } }
+  })
+  on('http.fetch', (_$, e, next) => {
+    if (!e.url.startsWith('http://localhost/h/')) return next(e)
+    const request = JSON.parse(String(e.init?.body)) as {
+      root?: string
+      path?: string
+      id?: string
+    }
+    let response: unknown
+    if (e.url.endsWith('/apps')) response = { apps: [] }
+    else if (e.url.endsWith('/file/prepare')) {
+      if (request.root !== '/w' || request.path !== '/w/notes/a.md')
+        throw new Error('Unexpected file preparation')
+      fileHeld = true
+      response = { id: 'note', path: '/w/notes/a.md', inside: true }
+    } else if (e.url.endsWith('/file/verify')) {
+      if (!fileHeld || request.id !== 'note')
+        throw new Error('Invalid file handle')
+      response = { ok: true }
+    } else if (e.url.endsWith('/file/read')) {
+      if (!fileHeld || request.id !== 'note')
+        throw new Error('Invalid file handle')
+      response = { text: '# Note A\n\nHello' }
+    } else if (e.url.endsWith('/file/release')) {
+      if (!fileHeld || request.id !== 'note')
+        throw new Error('Invalid file handle')
+      fileHeld = false
+      response = { ok: true }
+    } else throw new Error(`Unexpected relay request: ${e.url}`)
+    return {
+      value: {
+        status: 200,
+        ok: true,
+        headers: {},
+        text: JSON.stringify(response),
+      },
+    }
+  })
   on('fs.read', (_: unknown, e: { path: string }) => ({
     value: String(e.path).endsWith('a.md') ? '# Note A\n\nHello' : '',
   }))
   on('fs.exists', () => ({ value: false }))
   on('fs.write', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
   on('store.get', () => ({ value: undefined }))
   on('store.set', () => ({ value: undefined }))
   const first = await $.ui.mount({ ...PANE, surface: 'desktop' })

@@ -4,37 +4,40 @@ import {
   type ExtensionContext,
 } from '@oh-my-pi/pi-coding-agent'
 import type { SubagentEventPayload } from '@oh-my-pi/pi-coding-agent/task/types'
+import * as Bun from 'bun'
 import { realpath, stat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import { base3d, data3d, page3d } from '../../hooks/brain3d'
 import { makeIndex, linksIn, pairKey, type Index } from '../../hooks/files'
-import { replay } from '../../hooks/fold'
+import { isStep } from '../../hooks/fold'
 import { coachPrompt, strings } from '../../hooks/i18n'
-import { LOGOS } from '../../hooks/logos'
 import { packFiles } from '../../hooks/map'
-import { coachBusy, coachDone, coachFailed } from '../../hooks/view-controller'
 import {
-  appsArgv,
-  appsIn,
+  coachBusy,
+  coachDone,
+  coachFailed,
+  reduceSharedView,
+  replayTick,
+  sharedView,
+  STEP_MS,
+  timerEffect,
+  VIEW_STATE0,
+} from '../../hooks/view-controller'
+import { applySettingsPatch } from '../../hooks/view-settings'
+import {
   DEFAULT_SETTINGS,
   findArgv,
   fromFind,
-  GIT_LS,
+  gitInventoryArgv,
   hash,
   initialSettings,
   isShallow,
-  openAttempts,
   pickFiles,
   vaultProbe,
 } from '../../hooks/workspace'
 import type { PreviewRef, TrailEvent, TrailSettings } from '../../types/model'
+import { RelayRefusal, type RelayClient } from '../relay/client'
 import { captureTool, connectedTools, type CapturedTool } from './facts'
-import {
-  FileAuthorityError,
-  readPrefix,
-  withOpenedFile,
-} from './file-authority'
 import { TrailStore } from './store'
 import type {
   CommandRefusal,
@@ -44,7 +47,7 @@ import type {
   HostCommand,
   LayoutWire,
   ServerEvent,
-} from './wire'
+} from '../../types/browser'
 
 type Lifecycle = {
   onRootStart(
@@ -53,6 +56,7 @@ type Lifecycle = {
     autoOpen: boolean,
   ): Promise<void>
   onRootStop(): Promise<void>
+  authority(): Promise<RelayClient>
 }
 const object = (x: unknown): x is Record<string, unknown> =>
   typeof x === 'object' && x !== null && !Array.isArray(x)
@@ -76,7 +80,7 @@ const refusal = (error: CommandRefusal['error']): CommandRefusal => ({
 export function registerCapture(
   pi: ExtensionAPI,
   lifecycle: Lifecycle,
-): DashboardFeed {
+): DashboardFeed & { refreshApps(): Promise<void> } {
   let ctx: ExtensionContext | undefined
   let store: TrailStore | undefined
   let generation = 0,
@@ -86,8 +90,10 @@ export function registerCapture(
   let timer: ReturnType<ExtensionContext['setInterval']> | undefined
   let unsubscribe: (() => void) | undefined
   let index: Index | undefined, layout: LayoutWire | undefined
-  let root = '',
-    vault = false
+  let replayTimer: ReturnType<ExtensionContext['setInterval']> | undefined
+  let replayEpoch = 0
+  let shared = sharedView(VIEW_STATE0)
+  let root = ''
   let connected = new Map<string, Set<string>>()
   let linked = new Set<string>()
   let accessed = new Set<string>()
@@ -121,7 +127,14 @@ export function registerCapture(
   }
   const publish = () => {
     revision++
-    emit({ v: 1, kind: 'snapshot', generation, revision, facts: { ...facts } })
+    emit({
+      v: 1,
+      kind: 'snapshot',
+      generation,
+      revision,
+      facts: { ...facts },
+      shared,
+    })
   }
   const current = (g: number) =>
     generation === g && !abort.signal.aborted && ctx !== undefined
@@ -208,12 +221,52 @@ export function registerCapture(
       const shallow = isShallow(canonical, home)
       let raw = ''
       if (!shallow) {
-        const git = await pi.exec(GIT_LS[0]!, GIT_LS.slice(1), {
-          cwd: canonical,
-          timeout: 20000,
-          signal,
-        })
-        if (git.code === 0) raw = git.stdout
+        const localEnv = await pi.exec(
+          'git',
+          ['rev-parse', '--local-env-vars'],
+          {
+            cwd: canonical,
+            timeout: 20000,
+            signal,
+          },
+        )
+        if (localEnv.code === 0) {
+          const names = localEnv.stdout.trim().split(/\r?\n/)
+          if (
+            names.length > 0 &&
+            names.every((name) => /^GIT_[A-Z0-9_]+$/.test(name))
+          ) {
+            const excluded = new Set(names)
+            const env = Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) =>
+                  !excluded.has(
+                    process.platform === 'win32' ? name.toUpperCase() : name,
+                  ) &&
+                  (process.platform !== 'win32' ||
+                    name.toUpperCase() !== 'GIT_NO_LAZY_FETCH'),
+              ),
+            )
+            env.GIT_NO_LAZY_FETCH = '1'
+            const git = Bun.spawn(
+              gitInventoryArgv(process.platform === 'win32'),
+              {
+                cwd: canonical,
+                env,
+                timeout: 20000,
+                signal,
+                stdin: 'ignore',
+                stdout: 'pipe',
+                stderr: 'ignore',
+              },
+            )
+            const [stdout, code] = await Promise.all([
+              new Response(git.stdout).text(),
+              git.exited,
+            ])
+            if (code === 0) raw = stdout
+          }
+        }
       }
       if (!raw.trim()) {
         const args = findArgv(shallow)
@@ -246,7 +299,12 @@ export function registerCapture(
       }
       if (!current(g)) return
       root = canonical
-      vault = isVault
+      const saved = store?.read('settings')
+      if (isVault && (!object(saved) || saved.openMd === undefined))
+        facts = {
+          ...facts,
+          settings: { ...facts.settings, openMd: 'Obsidian' },
+        }
       index = makeIndex(root, paths)
       linked = new Set()
       layout = { layoutRev: ++layoutRev, root, paths, layout: packed }
@@ -623,6 +681,10 @@ export function registerCapture(
   }
   const bind = async (context: ExtensionContext, first: boolean) => {
     if (context.agent.kind !== 'main') return
+    replayEpoch++
+    if (replayTimer !== undefined && ctx) ctx.clearTimer(replayTimer)
+    replayTimer = undefined
+    shared = sharedView(VIEW_STATE0)
     abort.abort()
     abort = new AbortController()
     generation++
@@ -631,7 +693,6 @@ export function registerCapture(
     index = undefined
     layout = undefined
     root = context.cwd
-    vault = false
     linked = new Set()
     accessed = new Set()
     calls = new Map()
@@ -692,27 +753,24 @@ export function registerCapture(
         publish()
       }
     })
-    appsReady = pi
-      .exec(
-        ...(() => {
-          const a = appsArgv(homedir())
-          return [
-            a[0]!,
-            a.slice(1),
-            { timeout: 5000, signal: abort.signal },
-          ] as const
-        })(),
-      )
-      .then((r) => {
-        if (current(g)) {
-          facts = { ...facts, apps: appsIn(r.stdout) }
+    const bindSignal = abort.signal
+    appsReady = lifecycle
+      .authority()
+      .then((authority) => authority.listApps())
+      .then((apps) => {
+        if (ctx === context && !bindSignal.aborted) {
+          facts = { ...facts, apps }
           publish()
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        pi.logger.error('Brain Trail app discovery failed', {
+          error: String(error),
+        })
+      })
     void stat(join(context.cwd, 'AGENTS.md')).then(
       () => {
-        if (current(g)) {
+        if (ctx === context && !bindSignal.aborted) {
           facts = { ...facts, instructionFile: 'AGENTS.md' }
           publish()
         }
@@ -767,7 +825,17 @@ export function registerCapture(
     if (!root) return undefined
     if (ref.out)
       return isAbsolute(ref.p) && accessed.has(ref.p) ? ref.p : undefined
-    if (isAbsolute(ref.p) || ref.p.split(/[\\/]/).includes('..'))
+    if (
+      isAbsolute(ref.p) ||
+      ref.p.split(/[\\/]/).includes('..') ||
+      (!index?.ids.has(ref.p) &&
+        !facts.events.some(
+          (event) =>
+            (event.k === 'read' || event.k === 'write') &&
+            !event.out &&
+            event.p === ref.p,
+        ))
+    )
       return undefined
     return resolve(root, ref.p)
   }
@@ -789,79 +857,118 @@ export function registerCapture(
           await appsReady
           if (!valid()) return refusal('stale-generation')
         }
-        if (
-          command.kind === 'open' &&
-          !['default', ...facts.apps].includes(command.app)
-        )
-          return refusal('forbidden')
+        let authority: RelayClient | undefined
+        let handle: string | undefined
         try {
-          return await withOpenedFile(
-            path,
-            command.ref.out ? undefined : root,
-            signal,
-            async (file, canonical) => {
-              if (!valid()) return refusal('stale-generation')
-              if (command.ref.out || command.kind === 'open') {
-                if (!context.hasUI) return refusal('forbidden')
-                const approved = await context.ui.confirm(
-                  'Brain Trail file access',
-                  `${command.kind === 'open' ? 'Open' : 'Preview'} ${canonical}?`,
-                )
-                if (!valid()) return refusal('stale-generation')
-                if (!approved) return refusal('forbidden')
-              }
-              if (command.kind === 'preview-read') {
-                const text = await readPrefix(file, signal, 40001)
-                if (!valid()) return refusal('stale-generation')
-                return { ok: true, text }
-              }
-              for (const args of openAttempts(canonical, command.app)) {
-                if (!valid()) return refusal('stale-generation')
-                const result = await pi
-                  .exec(args[0]!, args.slice(1), { timeout: 5000, signal })
-                  .catch(() => undefined)
-                if (!valid()) return refusal('stale-generation')
-                if (result?.code === 0) return { ok: true }
-              }
-              return refusal('forbidden')
-            },
+          authority = await lifecycle.authority()
+          if (!valid()) return refusal('stale-generation')
+          if (command.kind === 'open' && command.app !== 'default') {
+            const apps = await authority.listApps()
+            if (!valid()) return refusal('stale-generation')
+            facts = { ...facts, apps }
+            publish()
+            if (!apps.includes(command.app)) return refusal('forbidden')
+          }
+          const file = await authority.prepareFile(root, path)
+          handle = file.id
+          if (!valid()) return refusal('stale-generation')
+          if (!command.ref.out && !file.inside) return refusal('forbidden')
+          if (command.kind === 'preview-read') {
+            const text = await authority.readFile(file.id)
+            if (!valid()) return refusal('stale-generation')
+            return { ok: true, text: text.slice(0, 40001) }
+          }
+          const verified = await authority.verifyFile(file.id)
+          if (!valid()) return refusal('stale-generation')
+          if (!verified) return refusal('forbidden')
+          const launch = await authority.openFile(
+            file.id,
+            command.app === 'default' ? undefined : command.app,
+            g,
           )
+          return { ok: true, launch }
         } catch (error) {
           if (!valid()) return refusal('stale-generation')
-          if (
-            error instanceof FileAuthorityError &&
-            error.reason === 'unsupported'
-          )
-            return refusal('unsupported')
-          if (
-            error instanceof FileAuthorityError &&
-            error.reason === 'missing' &&
-            command.kind === 'preview-read'
-          )
-            return { ok: true, text: null }
+          if (error instanceof RelayRefusal) {
+            if (error.code === 'missing' && command.kind === 'preview-read')
+              return { ok: true, text: null }
+            if (error.code === 'missing') return refusal('forbidden')
+            if (error.code === 'http') return refusal('disconnected')
+            return refusal(error.code)
+          }
           return refusal('forbidden')
+        } finally {
+          if (authority && handle)
+            await authority.releaseFile(handle).catch(() => {})
         }
       }
-      case 'settings':
+      case 'settings': {
+        const next = applySettingsPatch(facts.settings, command.patch)
+        const allowed = ['default', 'preview', ...facts.apps]
         if (
-          !['default', 'preview', ...facts.apps].includes(
-            command.next.openMd,
-          ) ||
-          !['default', 'preview', ...facts.apps].includes(
-            command.next.openOther,
-          )
+          (command.patch.openMd !== undefined &&
+            !allowed.includes(command.patch.openMd)) ||
+          (command.patch.openOther !== undefined &&
+            !allowed.includes(command.patch.openOther))
         )
           return refusal('forbidden')
-        store.save('settings', command.next)
-        facts = { ...facts, settings: command.next }
+        store.save('settings', next)
+        facts = { ...facts, settings: next }
         publish()
         return { ok: true }
+      }
+      case 'view': {
+        if (
+          command.intent.kind === 'preview' &&
+          command.intent.ref &&
+          !resolveRef(command.intent.ref)
+        )
+          return refusal('forbidden')
+        shared = reduceSharedView(
+          shared,
+          command.intent,
+          facts.events.filter(isStep).length,
+        )
+        const effect = timerEffect(command.intent)
+        if (effect !== 'none') {
+          replayEpoch++
+          if (replayTimer !== undefined) context.clearTimer(replayTimer)
+          replayTimer = undefined
+          if (effect === 'start' && shared.play.playing) {
+            const clockEpoch = replayEpoch
+            replayTimer = context.setInterval(() => {
+              if (!current(g) || clockEpoch !== replayEpoch) return
+              shared = {
+                ...shared,
+                play: replayTick(facts.events.filter(isStep).length)(
+                  shared.play,
+                ),
+              }
+              if (!shared.play.playing && replayTimer !== undefined) {
+                context.clearTimer(replayTimer)
+                replayTimer = undefined
+                replayEpoch++
+              }
+              publish()
+            }, STEP_MS)
+          }
+        }
+        publish()
+        return { ok: true }
+      }
       case 'lang':
         store.save('lang', command.lang)
         facts = { ...facts, lang: command.lang }
         publish()
         return { ok: true }
       case 'clear-trail':
+        replayEpoch++
+        if (replayTimer !== undefined) context.clearTimer(replayTimer)
+        replayTimer = undefined
+        shared = sharedView(VIEW_STATE0)
+        generation++
+        revision = 0
+        if (layout) emit({ v: 1, kind: 'layout', generation, layout })
         captureEpoch++
         store.setClearLeaf(
           context.sessionManager.getSessionId(),
@@ -872,6 +979,10 @@ export function registerCapture(
         linked.clear()
         accessed.clear()
         facts.linked = []
+        if (facts.workspace.kind === 'loading') {
+          const nextGeneration = generation
+          ready = load(nextGeneration).then(() => {})
+        }
         publish()
         return { ok: true }
       case 'compact': {
@@ -887,6 +998,7 @@ export function registerCapture(
                 : { kind: 'skipped', reason: 'No compaction was performed' },
           }
         } catch {
+          if (!valid()) return refusal('stale-generation')
           return { ok: true, outcome: { kind: 'failed' } }
         }
       }
@@ -921,19 +1033,21 @@ export function registerCapture(
           try {
             let source = ''
             try {
-              source = await withOpenedFile(
-                join(context.cwd, file),
+              const authority = await lifecycle.authority()
+              if (!valid()) return
+              const held = await authority.prepareFile(
                 root,
-                signal,
-                (handle) => readPrefix(handle, signal, 40000),
+                join(context.cwd, file),
               )
+              try {
+                if (!valid()) return
+                if (!held.inside) throw new Error('forbidden')
+                source = (await authority.readFile(held.id)).slice(0, 40000)
+              } finally {
+                await authority.releaseFile(held.id).catch(() => {})
+              }
             } catch (error) {
-              if (
-                !(
-                  error instanceof FileAuthorityError &&
-                  error.reason === 'missing'
-                )
-              )
+              if (!(error instanceof RelayRefusal && error.code === 'missing'))
                 throw error
             }
             if (!valid()) return
@@ -984,8 +1098,17 @@ export function registerCapture(
       }
     }
   }
-  const feed: DashboardFeed = {
-    current: () => ({ generation, revision, facts, layout }),
+  const feed: DashboardFeed & { refreshApps(): Promise<void> } = {
+    current: () => ({ generation, revision, facts, layout, shared }),
+    async refreshApps() {
+      const g = generation
+      const authority = await lifecycle.authority()
+      if (!current(g)) return
+      const apps = await authority.listApps()
+      if (!current(g)) return
+      facts = { ...facts, apps }
+      publish()
+    },
     subscribe: (listener) => {
       listeners.add(listener)
       return () => {
@@ -994,29 +1117,6 @@ export function registerCapture(
     },
     execute: async <C extends HostCommand>(g: number, command: C) =>
       (await run(g, command)) as CommandReplies[C['kind']] | CommandRefusal,
-    threeD: () => {
-      if (!layout || !index) return undefined
-      const trail = replay(facts.events, index, linked, connected).trail
-      const prompt = [...facts.events].reverse().find((e) => e.k === 'prompt')
-      return {
-        page: page3d({
-          ...base3d(layout.layout, {
-            root,
-            vault,
-            lang: facts.lang,
-            assistant: facts.assistant,
-          }),
-          fileHrefPrefix: `../?generation=${generation}&file=`,
-          baseVersion: layout.layoutRev,
-        }),
-        data: data3d(trail, {
-          v: revision,
-          baseVersion: layout.layoutRev,
-          logos: LOGOS,
-          ...(prompt?.k === 'prompt' ? { prompt: prompt.text } : {}),
-        }),
-      }
-    },
   }
   pi.on('session_start', async (_event, context) => {
     await bind(context, true)
@@ -1090,6 +1190,9 @@ export function registerCapture(
     if (context.agent.kind !== 'main' || !ctx) return
     abort.abort()
     if (timer) context.clearTimer(timer)
+    replayEpoch++
+    if (replayTimer !== undefined) context.clearTimer(replayTimer)
+    replayTimer = undefined
     unsubscribe?.()
     emit({ v: 1, kind: 'ended', generation })
     ctx = undefined

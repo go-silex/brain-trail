@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { Database } from 'bun:sqlite'
 import { mkdir, writeFile, symlink, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { chromium, type Browser } from 'playwright'
 import {
   AuthStorage,
   ModelRegistry,
@@ -19,7 +21,23 @@ import {
 } from '@oh-my-pi/pi-ai/providers/mock'
 import factory from '../hosts/omp/index.ts'
 import { nameServer } from '../hooks/mcp.ts'
-import type { FactsWire, ServerEvent } from '../hosts/omp/wire.ts'
+import { brain } from '../hooks/scene3d.ts'
+import type { FactsWire, ServerEvent } from '../types/browser.ts'
+import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
+
+type BrowserDom = {
+  DOMParser: new () => {
+    parseFromString: (
+      source: string,
+      type: string,
+    ) => { documentElement: { getAttribute: (name: string) => string | null } }
+  }
+  document: {
+    querySelector: (selector: string) => {
+      getAttribute: (name: string) => string | null
+    } | null
+  }
+}
 
 const scratch = process.env.BRAIN_TRAIL_TEST_DIR
 if (!scratch || !process.env.PI_CODING_AGENT_DIR)
@@ -244,6 +262,7 @@ async function until<T>(
     return originalWrite.call(process.stderr, chunk, encoding, done)
   }
   let cancelReader: (() => Promise<void>) | undefined
+  let browser: Browser | undefined
   const sessionResult = await createAgentSession({
     cwd,
     agentDir: process.env.PI_CODING_AGENT_DIR,
@@ -283,12 +302,47 @@ async function until<T>(
       reportSendError: (action, error) => errors.push({ action, error }),
       reportRuntimeError: (error) => errors.push(error),
     })
-    const url = /Brain Trail: (http:\/\/127\.0\.0\.1:\d+\/s\/[^\s]+\/)/.exec(
-      stderr,
-    )?.[1]
-    if (!url)
-      throw new Error('Root session did not print its headless dashboard URL')
+    const launchFile = /^Brain Trail launch file: (.+)$/m.exec(stderr)?.[1]
+    if (!launchFile)
+      throw new Error('Root session did not provide its headless launch file')
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--enable-unsafe-swiftshader'],
+    })
+    const page = await browser.newPage()
+    const browserErrors: string[] = []
+    page.on('pageerror', (error) => browserErrors.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') browserErrors.push(message.text())
+    })
+    page.on('requestfailed', (request) => {
+      browserErrors.push(
+        `browser request failed: ${new URL(request.url()).pathname.replace(/\/(?:s|launch)\/[^/]+/g, '/[private]')} ${request.failure()?.errorText ?? ''}`,
+      )
+    })
+    await page.route('**/*', (route) => {
+      const target = new URL(route.request().url())
+      if (
+        target.protocol === 'file:' ||
+        target.protocol === 'data:' ||
+        target.protocol === 'blob:' ||
+        (target.protocol === 'http:' && target.hostname === '127.0.0.1')
+      )
+        return route.continue()
+      browserErrors.push('browser requested an external resource')
+      return route.abort()
+    })
+    await page.goto(pathToFileURL(launchFile).href)
+    await page.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/s\/[^/]+\/$/)
+    const url = page.url()
     const origin = new URL(url).origin
+    const reuse = await browser.newPage()
+    const refusedLaunch = reuse.waitForResponse((response) =>
+      new URL(response.url()).pathname.startsWith('/launch/'),
+    )
+    await reuse.goto(pathToFileURL(launchFile).href)
+    assert.equal((await refusedLaunch).status(), 404)
+    await reuse.close()
     const response = await fetch(new URL('events', url))
     assert.equal(response.status, 200)
     assert.ok(response.body)
@@ -342,12 +396,45 @@ async function until<T>(
         headers: { origin: requestOrigin, 'content-type': 'application/json' },
         body: JSON.stringify({ v: 1, generation, command }),
       })
+    const refused = async (
+      generation: number,
+      command: object,
+      error: string,
+    ) => {
+      const response = await post(generation, command)
+      assert.equal(response.status, 200)
+      assert.deepEqual(
+        await response.json(),
+        { ok: false, error },
+        JSON.stringify(command),
+      )
+    }
+    const succeeded = async (generation: number, command: object) => {
+      const response = await post(generation, command)
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), { ok: true })
+    }
     const initial = await until(snapshot, changed)
-    await until(
+    const ready = await until(
       () =>
         snapshot()?.facts.workspace.kind === 'ready' ? snapshot() : undefined,
       changed,
     )
+    if (ready.facts.workspace.kind !== 'ready')
+      throw new Error('workspace is not ready')
+    const readyLayoutRev = ready.facts.workspace.layoutRev
+    const inventory = await until(
+      () =>
+        events.findLast(
+          (event) =>
+            event.kind === 'layout' &&
+            event.generation === ready.generation &&
+            event.layout.layoutRev === readyLayoutRev,
+        ),
+      changed,
+    )
+    if (inventory.kind !== 'layout') throw new Error('workspace layout missing')
+    assert.deepEqual(inventory.layout.paths, ['child.txt', 'root.txt'])
     await session.prompt(
       'Read root.txt, then delegate the child file to a task agent.',
     )
@@ -359,6 +446,239 @@ async function until<T>(
       const s = snapshot()
       return s && readEvents(s.facts).length >= 2 ? s : undefined
     }, changed)
+    await page.locator('.bt-scene3d canvas').waitFor({ state: 'visible' })
+    await page.locator('button[data-key="follow"]').click()
+    await until(
+      () => (snapshot()?.shared.zoomed ? snapshot() : undefined),
+      changed,
+    )
+    await page.locator('button[data-key="play"]').click()
+    const playing = await until(
+      () => (snapshot()?.shared.play.step !== null ? snapshot() : undefined),
+      changed,
+    )
+    assert.ok(playing.shared.play.playing)
+    const bounded = async <T>(operation: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          operation,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('replay cadence proof exceeded 400ms')),
+              400,
+            )
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    let previousStart: number | undefined
+    let firstStart = 0
+    let baselineStep: number | undefined
+    let progressed = false
+    for (let pulse = 0; pulse < 12; pulse++) {
+      await page.waitForTimeout(160)
+      const started = performance.now()
+      if (previousStart !== undefined)
+        assert.ok(
+          started - previousStart < 400,
+          'replay pulse gap exceeded 400ms',
+        )
+      else firstStart = started
+      previousStart = started
+      const revision = snapshot()?.revision ?? 0
+      const expectedZoomed = pulse % 2 === 1
+      const published = await bounded(
+        (async () => {
+          await succeeded(playing.generation, {
+            kind: 'view',
+            intent: { kind: 'follow', following: !expectedZoomed },
+          })
+          return until(() => {
+            const current = snapshot()
+            return current &&
+              current.revision > revision &&
+              current.shared.zoomed === expectedZoomed
+              ? current
+              : undefined
+          }, changed)
+        })(),
+      )
+      assert.ok(
+        performance.now() - started < 400,
+        'replay pulse exceeded 400ms',
+      )
+      const step = published.shared.play.step
+      if (typeof step !== 'number')
+        throw new Error('replay stopped during cadence proof')
+      if (pulse === 0) baselineStep = step
+      else if (pulse >= 2 && baselineStep !== undefined && step > baselineStep)
+        progressed = true
+    }
+    assert.ok(
+      performance.now() - firstStart > 900,
+      'replay proof window too short',
+    )
+    assert.ok(
+      progressed,
+      'unrelated view intents restarted the host replay clock',
+    )
+    await page.locator('button[data-key="live"]').click()
+    await until(
+      () => (snapshot()?.shared.play.step === null ? snapshot() : undefined),
+      changed,
+    )
+    await page.locator('button[data-key="settings"]').click()
+    await page.locator('button[data-key="hover-off"]').click()
+    await until(
+      () =>
+        snapshot()?.facts.settings.hover === false ? snapshot() : undefined,
+      changed,
+    )
+    const budget = page.locator('[data-key="plan-usd"] input')
+    await budget.fill('123')
+    await budget.press('ArrowLeft')
+    assert.equal(await budget.inputValue(), '123')
+    await page.locator('button[data-key="hover-on"]').click()
+    await until(
+      () =>
+        snapshot()?.facts.settings.hover === true ? snapshot() : undefined,
+      changed,
+    )
+    await page.locator('button[data-key="openOther-preview"]').click()
+    await until(
+      () =>
+        snapshot()?.facts.settings.openOther === 'preview'
+          ? snapshot()
+          : undefined,
+      changed,
+    )
+    await page.locator('button[data-key="t-map"]').click()
+    await page.locator('.bt-scene3d canvas').waitFor({ state: 'visible' })
+    if (snapshot()?.shared.zoomed) {
+      await page.locator('button[data-key="follow"]').click()
+      await until(
+        () => (snapshot()?.shared.zoomed === false ? snapshot() : undefined),
+        changed,
+      )
+    }
+    const spin = page.locator('button[data-key="spin"]')
+    if ((await spin.textContent())?.trim() === '❚❚') await spin.click()
+    const scan = await findScenePoint(
+      page.locator('.bt-scene3d canvas'),
+      'root.txt',
+    )
+    if (!scan.point) {
+      const event = events.findLast((entry) => entry.kind === 'layout')
+      const geometry = event?.layout.layout
+      const shape = geometry && brain(geometry)
+      const screenshotDir = join(process.cwd(), '.artifacts', 'omp-journey')
+      await mkdir(screenshotDir, { recursive: true })
+      await page.screenshot({
+        path: join(screenshotDir, 'picking-failure.png'),
+      })
+      console.error(
+        'OMP picking diagnostics:',
+        JSON.stringify({
+          scan,
+          shared: snapshot()?.shared,
+          settings: snapshot()?.facts.settings,
+          layout: geometry && {
+            size: geometry.size,
+            files: geometry.files.map((file, index) => ({
+              file,
+              xyz: shape && [shape.X[index], shape.Y[index], shape.Z[index]],
+            })),
+          },
+          screenshot: '.artifacts/omp-journey/picking-failure.png',
+        }),
+      )
+    }
+    assert.ok(
+      scan.point,
+      `real WebGL picking did not find root.txt: ${JSON.stringify(scan)}`,
+    )
+    await page.mouse.click(scan.point.x, scan.point.y)
+    await until(
+      () =>
+        snapshot()?.shared.preview?.p === 'root.txt' ? snapshot() : undefined,
+      changed,
+    )
+    await page.locator('button[data-key="t-map"]').click()
+    await page.locator('button[data-key="view-3d"]').click()
+    const image = page.locator('img[data-key="map"]')
+    await image.waitFor({ state: 'visible' })
+    await succeeded(observed.generation, {
+      kind: 'view',
+      intent: { kind: 'follow', following: false },
+    })
+    await until(
+      () => (snapshot()?.shared.zoomed ? snapshot() : undefined),
+      changed,
+    )
+    const imageBounds = await image.boundingBox()
+    assert.ok(imageBounds)
+    await page.mouse.move(
+      imageBounds.x + imageBounds.width / 2,
+      imageBounds.y + imageBounds.height / 2,
+    )
+    await page.mouse.wheel(0, -280)
+    await until(
+      () => (snapshot()?.shared.zoomed === false ? snapshot() : undefined),
+      changed,
+    )
+    const viewBox = () =>
+      image.evaluate((element) => {
+        const source = element.getAttribute('src')
+        if (!source?.startsWith('data:image/svg+xml,')) return null
+        const { DOMParser } = globalThis as unknown as BrowserDom
+        return new DOMParser()
+          .parseFromString(
+            decodeURIComponent(source.slice('data:image/svg+xml,'.length)),
+            'image/svg+xml',
+          )
+          .documentElement.getAttribute('viewBox')
+      })
+    const manualView = await viewBox()
+    assert.ok(manualView)
+    await succeeded(observed.generation, {
+      kind: 'view',
+      intent: { kind: 'follow', following: false },
+    })
+    await until(
+      () => (snapshot()?.shared.zoomed ? snapshot() : undefined),
+      changed,
+    )
+    await page.waitForFunction((before) => {
+      const { document, DOMParser } = globalThis as unknown as BrowserDom
+      const source = document
+        .querySelector('img[data-key="map"]')
+        ?.getAttribute('src')
+      if (!source?.startsWith('data:image/svg+xml,')) return false
+      const svg = new DOMParser().parseFromString(
+        decodeURIComponent(source.slice('data:image/svg+xml,'.length)),
+        'image/svg+xml',
+      )
+      return svg.documentElement.getAttribute('viewBox') !== before
+    }, manualView)
+    const latestLayout = events.findLast((entry) => entry.kind === 'layout')
+    assert.ok(latestLayout && latestLayout.kind === 'layout')
+    const childFile = latestLayout.layout.layout.files.find(
+      ([name]) => name === 'child.txt',
+    )
+    assert.ok(childFile, 'child.txt is absent from the published layout')
+    const point2d = await svgFilePoint(image, {
+      x: childFile[1],
+      y: childFile[2],
+    })
+    await page.mouse.click(point2d.x, point2d.y)
+    await until(
+      () =>
+        snapshot()?.shared.preview?.p === 'child.txt' ? snapshot() : undefined,
+      changed,
+    )
     const reads = readEvents(observed.facts)
     assert.equal(
       reads.filter((e) => e.k === 'read' && e.p === 'root.txt' && !e.agent)
@@ -411,14 +731,13 @@ async function until<T>(
             JSON.stringify(entry.message.content).includes(canary),
         ),
     )
-    assert.equal(
-      (
-        await post(connector.generation, {
-          kind: 'preview-read',
-          ref: { p: canary, out: true },
-        })
-      ).status,
-      403,
+    await refused(
+      connector.generation,
+      {
+        kind: 'preview-read',
+        ref: { p: canary, out: true },
+      },
+      'forbidden',
     )
     assert.ok(
       session.sessionManager
@@ -448,41 +767,20 @@ async function until<T>(
     })
     assert.equal(preview.status, 200)
     assert.deepEqual(await preview.json(), { ok: true, text: 'root fixture' })
-    assert.equal(
-      (
-        await post(generation, {
-          kind: 'preview-read',
-          ref: { p: '../outside.txt' },
-        })
-      ).status,
-      403,
+    await refused(
+      generation,
+      { kind: 'preview-read', ref: { p: '../outside.txt' } },
+      'forbidden',
     )
-    assert.equal(
-      (
-        await post(generation, {
-          kind: 'preview-read',
-          ref: { p: 'escape.txt' },
-        })
-      ).status,
-      403,
+    await refused(
+      generation,
+      { kind: 'preview-read', ref: { p: 'escape.txt' } },
+      'forbidden',
     )
-    assert.equal(
-      (
-        await post(generation, {
-          kind: 'preview-read',
-          ref: { p: outside, out: true },
-        })
-      ).status,
-      403,
-    )
-    assert.equal(
-      (
-        await post(generation, {
-          kind: 'preview-read',
-          ref: { p: outsideDirectory, out: true },
-        })
-      ).status,
-      403,
+    await refused(
+      generation,
+      { kind: 'preview-read', ref: { p: outsideDirectory, out: true } },
+      'forbidden',
     )
     assert.equal(
       (
@@ -494,17 +792,16 @@ async function until<T>(
       ).status,
       403,
     )
-    assert.equal(
-      (await post(generation, { kind: 'execute', prompt: 'arbitrary prompt' }))
-        .status,
-      400,
+    await refused(
+      generation,
+      { kind: 'execute', prompt: 'arbitrary prompt' },
+      'invalid',
     )
     const instruction = join(cwd, 'CLAUDE.md')
     assert.equal(snapshot()?.facts.instructionFile, 'CLAUDE.md')
     await symlink(canary, instruction)
     const callsBeforeAttack = mock.calls.length
-    const attacked = await post(generation, { kind: 'coach-analyse' })
-    assert.ok(attacked.status === 200 || attacked.status === 403)
+    await succeeded(generation, { kind: 'coach-analyse' })
     const rejected = await until(() => {
       const s = snapshot()
       return s && !s.facts.coach.busy && s.facts.coach.error ? s : undefined
@@ -519,10 +816,7 @@ async function until<T>(
     await unlink(instruction)
     await writeFile(instruction, 'Local instruction.')
     const before = session.sessionManager.getBranch().map((entry) => entry.id)
-    assert.equal(
-      (await post(generation, { kind: 'coach-analyse' })).status,
-      200,
-    )
+    await succeeded(generation, { kind: 'coach-analyse' })
     const coached = await until(() => {
       const s = snapshot()
       return s && !s.facts.coach.busy && s.facts.coach.patch ? s : undefined
@@ -536,13 +830,14 @@ async function until<T>(
     const coachCall = mock.calls.at(-1)
     assert.equal((coachCall?.context.tools ?? []).length, 0)
     const calls = mock.calls.length
-    const apply = await post(generation, {
-      kind: 'coach-apply',
-      prompt: 'run arbitrary browser prompt',
-    })
-    if (apply.status === 200)
-      assert.deepEqual(await apply.json(), { ok: true, filled: false })
-    else assert.equal(apply.status, 400)
+    await refused(
+      generation,
+      {
+        kind: 'coach-apply',
+        prompt: 'run arbitrary browser prompt',
+      },
+      'invalid',
+    )
     assert.equal(mock.calls.length, calls)
     assert.deepEqual(
       session.sessionManager.getBranch().map((entry) => entry.id),
@@ -557,6 +852,39 @@ async function until<T>(
         : undefined
     }, changed)
     assert.equal(outsideHistory.generation, generation)
+    const outsidePreview = await post(generation, {
+      kind: 'preview-read',
+      ref: { p: outside, out: true },
+    })
+    assert.equal(outsidePreview.status, 200)
+    assert.deepEqual(await outsidePreview.json(), {
+      ok: true,
+      text: 'outside secret',
+    })
+    await succeeded(generation, {
+      kind: 'view',
+      intent: { kind: 'preview', ref: { p: outside, out: true } },
+    })
+    await until(
+      () =>
+        snapshot()?.shared.preview?.p === outside ? snapshot() : undefined,
+      changed,
+    )
+    await page.locator('button[data-key="t-files"]').click()
+    await page
+      .locator('[data-key="preview-back"]')
+      .waitFor({ state: 'visible' })
+    await page.getByText('outside secret', { exact: false }).waitFor({
+      state: 'visible',
+    })
+    await page.locator('[data-key="preview-back"]').click()
+    await until(
+      () => (snapshot()?.shared.preview === null ? snapshot() : undefined),
+      changed,
+    )
+    await page
+      .locator('[data-key="kpi-open-start"]')
+      .waitFor({ state: 'visible' })
     await unlink(outside)
     await symlink(canary, outside)
     await session.sessionManager.flush()
@@ -600,25 +928,32 @@ async function until<T>(
         (e) => e.k === 'read' && e.p === outside && e.out,
       ),
     )
-    assert.equal(
-      (await post(generation, { kind: 'refresh-meter' })).status,
-      409,
-    )
+    await refused(generation, { kind: 'refresh-meter' }, 'stale-generation')
     generation = outsideResumed.generation
-    assert.equal(
-      (
-        await post(generation, {
-          kind: 'preview-read',
-          ref: { p: outside, out: true },
-        })
-      ).status,
-      403,
+    // Authority follows the known path, not its historical target.
+    const replacedPreview = await post(generation, {
+      kind: 'preview-read',
+      ref: { p: outside, out: true },
+    })
+    assert.equal(replacedPreview.status, 200)
+    assert.deepEqual(await replacedPreview.json(), {
+      ok: true,
+      text: canaryText,
+    })
+    await refused(
+      generation,
+      { kind: 'preview-read', ref: { p: canary, out: true } },
+      'forbidden',
     )
-    assert.equal((await post(generation, { kind: 'clear-trail' })).status, 200)
-    await until(
-      () => (snapshot()?.facts.events.length === 0 ? snapshot() : undefined),
-      changed,
-    )
+    await succeeded(generation, { kind: 'clear-trail' })
+    const cleared = await until(() => {
+      const s = snapshot()
+      return s && s.generation > generation && s.facts.events.length === 0
+        ? s
+        : undefined
+    }, changed)
+    await refused(generation, { kind: 'refresh-meter' }, 'stale-generation')
+    generation = cleared.generation
     await session.sessionManager.flush()
     await session.reload()
     const resumed = await until(() => {
@@ -635,12 +970,10 @@ async function until<T>(
         : undefined
     }, changed)
     assert.deepEqual(rebuilt.facts.events, [])
-    assert.equal(
-      (await post(generation, { kind: 'refresh-meter' })).status,
-      409,
-    )
+    await refused(generation, { kind: 'refresh-meter' }, 'stale-generation')
     assert.equal(initial.generation, firstGeneration)
     assert.deepEqual(errors, [])
+    assert.deepEqual(browserErrors, [])
     await reader.cancel()
     await pump
   } catch (error) {
@@ -658,11 +991,20 @@ async function until<T>(
         },
         null,
         2,
+      ).replace(
+        /http:\/\/127\.0\.0\.1:\d+\/(?:s|launch)\/[^\s"'\\)]+/g,
+        '[private browser URL]',
       ),
     )
-    throw error
+    throw new Error(
+      (error instanceof Error ? error.message : String(error)).replace(
+        /http:\/\/127\.0\.0\.1:\d+\/(?:s|launch)\/[^\s"'\\)]+/g,
+        '[private browser URL]',
+      ),
+    )
   } finally {
     await cancelReader?.().catch(() => {})
+    await browser?.close()
     await session.dispose()
     await manager.disconnectAll()
     auth.close()

@@ -1,4 +1,5 @@
 import type { Coach, Play, PreviewRef, TrailSettings } from '../types/model'
+import type { SharedView, SharedViewIntent } from '../types/view'
 import type {
   DrawnFrames,
   GestureMemory,
@@ -161,6 +162,9 @@ export const plan = (
       return frame === undefined
         ? []
         : [
+            ...(i.f === 1
+              ? []
+              : [{ key: 'zoomed' as const, next: () => false }]),
             {
               key: 'camera',
               next: () => zoomFrame(frame.view, i.fx, i.fy, i.f, SIZE),
@@ -202,12 +206,54 @@ export const plan = (
       ]
   }
 }
+export const isSharedViewIntent = (i: ViewIntent): i is SharedViewIntent =>
+  i.kind === 'preview' ||
+  i.kind === 'replay-play' ||
+  i.kind === 'replay-pause' ||
+  i.kind === 'replay-live' ||
+  i.kind === 'replay-step' ||
+  i.kind === 'replay-reset' ||
+  i.kind === 'follow' ||
+  i.kind === 'whole'
+
+export const sharedView = (state: ViewState): SharedView => ({
+  preview: state.preview,
+  zoomed: state.zoomed,
+  play: state.play,
+})
+
+export const reduceSharedView = (
+  shared: SharedView,
+  intent: SharedViewIntent,
+  steps: number,
+): SharedView => {
+  if (
+    steps < 1 &&
+    (intent.kind === 'replay-play' || intent.kind === 'replay-step')
+  )
+    return { ...shared, play: { step: null, playing: false } }
+  const bounded =
+    intent.kind === 'replay-play' || intent.kind === 'replay-step'
+      ? { ...intent, steps }
+      : intent
+  const next = { ...shared }
+  for (const step of plan(bounded, {
+    now: 0,
+    frames: { d2: undefined, d3: undefined },
+  })) {
+    if (step.key === 'preview') next.preview = step.next(next.preview)
+    else if (step.key === 'zoomed') next.zoomed = step.next(next.zoomed)
+    else if (step.key === 'play') next.play = step.next(next.play)
+  }
+  return next
+}
 export const timerEffect = (i: ViewIntent): 'start' | 'stop' | 'none' =>
   i.kind === 'replay-play'
     ? 'start'
     : i.kind === 'replay-pause' ||
         i.kind === 'replay-live' ||
-        i.kind === 'replay-step'
+        i.kind === 'replay-step' ||
+        i.kind === 'replay-reset'
       ? 'stop'
       : 'none'
 export const replayTick =
@@ -398,18 +444,22 @@ export const mapGesture = (
             }
         } else if (!g.right && hit.file !== undefined)
           open = { p: frame.layout.files[hit.file]![0] }
-        else
+        else {
+          if (s.zoomed) steps.push({ key: 'zoomed', next: () => false })
           steps.push({
             key: 'camera',
             next: () =>
               zoomFrame(frame.view, g.fx, g.fy, g.right ? 1.8 : 1 / 1.8, SIZE),
           })
+        }
       } else if (g.kind === 'drag') {
         const base =
           memory.drag2d?.press === g.press
             ? memory.drag2d.view
             : { ...frame.view }
         memory = { ...memory, drag2d: { press: g.press, view: base } }
+        if (s.zoomed && (g.fx !== g.sfx || g.fy !== g.sfy))
+          steps.push({ key: 'zoomed', next: () => false })
         steps.push({
           key: 'camera',
           next: () => panFrame(base, g.fx - g.sfx, g.fy - g.sfy),
@@ -434,9 +484,10 @@ export const mapWheel = (
       },
     ]
   const frame = frames.d2
-  return frame === undefined
+  return frame === undefined || by === 0
     ? []
     : [
+        { key: 'zoomed', next: () => false },
         {
           key: 'camera',
           next: () => zoomFrame(frame.view, hover.fx, hover.fy, f, SIZE),

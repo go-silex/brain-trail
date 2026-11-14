@@ -44,6 +44,7 @@ const eventsOf = (raw: unknown): TrailEvent[] => {
 
 const engine = (on: On) => {
   mock.clock(on, { now: 10_000 })
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('store.get', () => ({ value: undefined }))

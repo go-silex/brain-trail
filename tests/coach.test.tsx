@@ -57,8 +57,12 @@ test('the coach turns the session into tips, and fills the prompt box to apply t
     return next(e)
   })
   on('clock.now', () => ({ value: 10_000 }))
+  on('env.get', (_$, e) => ({
+    value: e.name === 'HOME' ? '/Users/me' : undefined,
+  }))
   on('config.list', () => ({ value: [] }))
   on('session.cwd', () => ({ value: '/w' }))
+  on('session.id', () => ({ value: 'coach-session' }))
   on('session.usage', () => ({
     value: { startedAt: 0, rateLimits: [], context: { window: 200000 } },
   }))

@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["hosts/omp/browser/*.ts"]
+  "include": ["hosts/browser/*.ts"]
 }

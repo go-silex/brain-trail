@@ -2,7 +2,13 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 import { mapSource, viewBoxOf } from './fixtures/mounted'
-import { CWD, mountReady, NOTE_BODY, type ViewCase } from './fixtures/views'
+import {
+  CWD,
+  mountReady,
+  mountTarget,
+  NOTE_BODY,
+  type ViewCase,
+} from './fixtures/views'
 
 const MAP: ViewCase = {
   id: 'replay',
@@ -44,6 +50,29 @@ test('replay changes the drawn map, not only the step counter', async ($, on: On
   await ui.press({ key: 'live' })
   expect(viewBoxOf(await scene(ui))).toEqual(viewBoxOf(live))
   await ui.unmount()
+})
+
+test('replay advances once per 900ms across two mounted surfaces', async ($, on: On) => {
+  const { ui, host } = await mountReady($, on, MAP)
+  const other = await $.ui.mount(mountTarget({ ...MAP, surface: 'terminal' }))
+  try {
+    await ui.press({ key: 'play' })
+    await ui.redraw()
+    await other.redraw()
+    const first = await ui.find({ type: 'Text', text: /^1\/\d+$/ })
+    expect(first).toBeDefined()
+    await host.clock.advance(899)
+    await ui.redraw()
+    expect(await ui.find({ type: 'Text', text: /^1\/\d+$/ })).toBeDefined()
+    await host.clock.advance(1)
+    await ui.redraw()
+    await other.redraw()
+    expect(await ui.find({ type: 'Text', text: /^2\/\d+$/ })).toBeDefined()
+  } finally {
+    if (await ui.find({ key: 'live' })) await ui.press({ key: 'live' })
+    await other.unmount()
+    await ui.unmount()
+  }
 })
 
 test('clearing a paused replay returns new recorded steps to live', async ($, on: On) => {

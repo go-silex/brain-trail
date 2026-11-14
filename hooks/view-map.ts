@@ -11,6 +11,7 @@ import { DARK, kindColors } from './map'
 import type { MapRenderer } from './map'
 import type { FigureId } from './readout'
 import { drawSpin } from './spin'
+import { projectSemantics } from './scene3d'
 
 // In a framed pane (`s.fill`) the map takes the whole box the header and the footer leave, and its
 // legend is handed back as `footer` for the pane to seat at the bottom.
@@ -42,7 +43,7 @@ export const renderMap = <N, Press>(
       node: h(Text, { dimColor: true }, S.packing(b.seconds)),
       drawn: undefined,
     }
-  if (!R.Svg)
+  if (!R.Svg && !R.Scene3d)
     return {
       node: h(Text, { dimColor: true }, S.mapOnlyDesktop),
       drawn: undefined,
@@ -63,13 +64,14 @@ export const renderMap = <N, Press>(
   const T = folded.trail
   const services = [...T.perSvc.keys()]
   const vault = L.files.every(([p]) => p.endsWith('.md'))
-  const touched = new Set(
-    [...T.state.entries()]
-      .filter(([, state]) => state.k === 'read' || state.k === 'write')
-      .map(([n]) => n),
-  )
-  let svg: string, drawn: DrawnMap
-  if (in3d) {
+  const semantics = projectSemantics(T)
+  const touched = new Set(semantics.touched)
+  let svg = '',
+    drawn: DrawnMap | undefined
+  const scene = in3d && R.Scene3d
+  if (scene) {
+    // WebGL owns its camera and pointer handling; the shared shell remains here.
+  } else if (in3d) {
     const result = drawSpin(L, T, P, {
       widthPx: s.widthPx,
       now: s.now,
@@ -357,12 +359,29 @@ export const renderMap = <N, Press>(
               minHeight: 0,
               overflow: 'hidden',
             },
-        h(R.Svg, {
-          key: 'map',
-          source: svg,
-          alt: `${L.title}: ${T.state.size} files touched`,
-        }),
-        R.MapHit &&
+        scene
+          ? h(scene, {
+              key: 'map',
+              layout: L,
+              semantics,
+              trail: T,
+              palette: P,
+              state: b.state,
+              now: s.now,
+              lang: s.lang,
+              filesWord: vault ? S.notes : S.files,
+              outside: folded.outside,
+              onIntent: act.intent,
+              onOpen: act.openFile,
+            })
+          : R.Svg &&
+              h(R.Svg, {
+                key: 'map',
+                source: svg,
+                alt: `${L.title}: ${T.state.size} files touched`,
+              }),
+        !scene &&
+          R.MapHit &&
           h(
             Box,
             {

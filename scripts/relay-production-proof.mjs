@@ -1,0 +1,629 @@
+import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
+import { connect } from 'node:net'
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+
+const root = resolve(import.meta.dirname, '..')
+const version = process.env.RELAY_CLAUDE_VERSION || '2.1.322'
+const platform = `${process.platform}-${process.arch}`
+const cliRoot = resolve(process.env.RELAY_CLI_ROOT || root)
+const pkg = join(
+  cliRoot,
+  'node_modules',
+  '@anthropic-ai',
+  `claude-code-${platform}`,
+)
+const claude =
+  process.env.RELAY_CLI_EXECUTABLE ||
+  join(pkg, process.platform === 'win32' ? 'claude.exe' : 'claude')
+const pause = (ms) =>
+  new Promise((resolvePause) => setTimeout(resolvePause, ms))
+const readJson = (path) => {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message)
+}
+const nativeProcess = (mode, ...args) => {
+  const executable = process.env.RELAY_CROSS_ACCOUNT_BINARY
+  if (!executable) throw new Error('native process observer is not configured')
+  const result = spawnSync(executable, [mode, ...args], {
+    encoding: 'utf8',
+    timeout: 10000,
+    maxBuffer: 65536,
+    windowsHide: true,
+  })
+  let reply
+  try {
+    reply = JSON.parse(result.stdout || '')
+  } catch {}
+  if (result.status !== 0 || reply?.ok !== true) {
+    const phase =
+      typeof reply?.phase === 'string' && /^[a-z0-9-]{1,64}$/.test(reply.phase)
+        ? reply.phase
+        : 'unknown'
+    const code = Number.isSafeInteger(reply?.code) ? reply.code : null
+    throw new Error(
+      `native process observer failed: ${JSON.stringify({ mode, phase, code, status: result.status, signal: result.signal, errorCode: result.error?.code || null })}`,
+    )
+  }
+  return reply
+}
+const alive = (pid) => {
+  if (process.platform === 'win32') {
+    const reply = nativeProcess('--process-alive', String(pid), binary)
+    if (typeof reply.alive !== 'boolean')
+      throw new Error('invalid native process liveness response')
+    return reply.alive
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+let pidDiagnostic = {}
+const relayPid = (binary) => {
+  if (process.platform === 'win32') {
+    const reply = nativeProcess('--process-inspect', binary)
+    if (!Number.isSafeInteger(reply.pid) || reply.pid <= 0)
+      throw new Error('invalid native process identity response')
+    return reply.pid
+  }
+  const result = spawnSync('ps', ['-axo', 'pid=,command='], {
+    encoding: 'utf8',
+    timeout: 10000,
+  })
+  const pids =
+    result.status === 0
+      ? result.stdout
+          .split('\n')
+          .filter((line) => line.includes(binary))
+          .map((line) => Number(line.trim().split(/\s+/, 1)[0]))
+      : []
+  pidDiagnostic = {
+    status: result.status,
+    signal: result.signal,
+    errorCode: result.error?.code || null,
+    matches: pids.length,
+    validPid: pids.length === 1 && Number.isSafeInteger(pids[0]) && pids[0] > 0,
+  }
+  return result.status === 0 && pidDiagnostic.validPid ? pids[0] : 0
+}
+const temp = mkdtempSync(
+  join(process.platform === 'win32' ? tmpdir() : '/tmp', 'btr-proof-'),
+)
+const work = join(temp, 'work'),
+  plugin = join(temp, 'plugin'),
+  bin = join(temp, 'bin')
+let unicodeRoot
+let localAppData = join(temp, 'local')
+let unicodeLocal
+let child,
+  gateway,
+  stream,
+  socket,
+  binary,
+  pid,
+  gatewayCalls = 0
+try {
+  if (process.platform === 'win32')
+    assert(
+      [...temp].every((char) => char.codePointAt(0) < 128),
+      'Windows non-socket fixture root is not ASCII',
+    )
+  if (process.platform === 'win32') {
+    unicodeRoot = mkdtempSync(join(tmpdir(), 'btr-proof-é'))
+    localAppData = join(unicodeRoot, 'local')
+  }
+  for (const path of [
+    work,
+    bin,
+    join(temp, 'home'),
+    join(temp, 'config'),
+    join(temp, 'tmp'),
+    localAppData,
+  ])
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+  if (unicodeRoot) {
+    unicodeLocal = realpathSync.native(localAppData)
+    const budget = Buffer.byteLength(unicodeLocal, 'utf8') + 32
+    assert(
+      budget <= 100,
+      `Unicode LocalAppData exceeds socket budget: ${budget} bytes`,
+    )
+  }
+  if (process.platform !== 'win32' && process.env.RELAY_CROSS_ACCOUNT_HELPER) {
+    chmodSync(temp, 0o711)
+    chmodSync(join(temp, 'tmp'), 0o711)
+  }
+  const archive = join(temp, 'package.tar')
+  const packed = spawnSync(
+    'git',
+    ['archive', '--format=tar', `--output=${archive}`, 'HEAD'],
+    {
+      cwd: root,
+      timeout: 30000,
+      encoding: 'utf8',
+      maxBuffer: 65536,
+      windowsHide: true,
+    },
+  )
+  if (packed.status !== 0)
+    throw new Error(
+      `cannot archive committed source package: status=${packed.status} signal=${packed.signal} error=${packed.error?.message ?? 'none'} stderr=${packed.stderr ?? ''}`,
+    )
+  mkdirSync(plugin)
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT
+  if (process.platform === 'win32' && !systemRoot)
+    throw new Error('cannot locate Windows system tar: SystemRoot is missing')
+  const tar =
+    process.platform === 'win32'
+      ? join(systemRoot, 'System32', 'tar.exe')
+      : 'tar'
+  const unpacked = spawnSync(tar, ['-xf', archive, '-C', plugin], {
+    timeout: 30000,
+    encoding: 'utf8',
+    maxBuffer: 65536,
+    windowsHide: true,
+  })
+  if (unpacked.status !== 0)
+    throw new Error(
+      `cannot extract committed source package: status=${unpacked.status} signal=${unpacked.signal} error=${unpacked.error?.message ?? 'none'} stderr=${unpacked.stderr ?? ''}`,
+    )
+  const fixture = join(plugin, 'tests/fixtures/relay-production')
+  cpSync(
+    join(fixture, '.claude-plugin/plugin.json'),
+    join(plugin, '.claude-plugin/plugin.json'),
+  )
+  writeFileSync(
+    join(plugin, 'hooks/hooks.json'),
+    JSON.stringify({
+      modules: ['../tests/fixtures/relay-production/hooks/proof.ts'],
+    }),
+  )
+  assert(existsSync(claude), 'native CLI missing')
+  if (!process.env.RELAY_CLI_EXECUTABLE)
+    assert(
+      readJson(join(pkg, 'package.json'))?.version === version,
+      'native CLI version mismatch',
+    )
+  if (process.platform !== 'win32')
+    symlinkSync('/usr/bin/uname', join(bin, 'uname'))
+  const gitDir =
+    process.platform === 'win32'
+      ? (process.env.PATH || '')
+          .split(';')
+          .map((entry) => entry.replace(/^"|"$/g, ''))
+          .find(
+            (entry) => isAbsolute(entry) && existsSync(join(entry, 'git.exe')),
+          )
+      : undefined
+  if (process.platform === 'win32')
+    assert(gitDir, 'Git executable not found on runner PATH')
+  gateway = createServer((req, res) => {
+    gatewayCalls++
+    req.resume()
+    res.writeHead(503)
+    res.end()
+  })
+  await new Promise((ok, fail) => {
+    gateway.once('error', fail)
+    gateway.listen(0, '127.0.0.1', ok)
+  })
+  const env = {
+    PATH:
+      process.platform === 'win32'
+        ? [bin, gitDir, join(systemRoot, 'System32')].join(';')
+        : bin,
+    HOME: join(temp, 'home'),
+    USERPROFILE: join(temp, 'home'),
+    CLAUDE_CONFIG_DIR: join(temp, 'config'),
+    LOCALAPPDATA: localAppData,
+    TMPDIR: join(temp, 'tmp'),
+    TMP: join(temp, 'tmp'),
+    TEMP: join(temp, 'tmp'),
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    ANTHROPIC_BASE_URL: `http://127.0.0.1:${gateway.address().port}`,
+    ANTHROPIC_AUTH_TOKEN: 'proof-no-model',
+  }
+  for (const key of [
+    'SystemRoot',
+    'SYSTEMROOT',
+    'WINDIR',
+    'COMSPEC',
+    'PATHEXT',
+    'OS',
+    'PROCESSOR_ARCHITECTURE',
+    'PROCESSOR_ARCHITEW6432',
+  ])
+    if (process.env[key]) env[key] = process.env[key]
+  for (const entry of env.PATH.split(
+    process.platform === 'win32' ? ';' : ':',
+  )) {
+    for (const name of ['node', 'node.exe', 'bun', 'bun.exe']) {
+      assert(!existsSync(join(entry, name)), `child PATH exposes ${name}`)
+    }
+  }
+  if (process.platform === 'win32') {
+    const git = join(gitDir, 'git.exe')
+    const gitEnv = { ...env, GIT_CONFIG_NOSYSTEM: '1' }
+    const repositories = [
+      {
+        dir: join(work, 'git-unicode'),
+        names: ['ascii.txt', 'café-漢-😀.txt'],
+      },
+      { dir: join(work, 'git-foreign'), names: ['foreign-canary.txt'] },
+    ]
+    for (const repository of repositories) {
+      mkdirSync(repository.dir)
+      for (const name of repository.names)
+        writeFileSync(join(repository.dir, name), 'isolated fixture\n')
+      for (const args of [
+        ['init', '-q'],
+        ['add', '--', ...repository.names],
+      ]) {
+        const result = spawnSync(git, args, {
+          cwd: repository.dir,
+          env: gitEnv,
+          encoding: 'utf8',
+          timeout: 20000,
+          maxBuffer: 65536,
+          windowsHide: true,
+        })
+        assert(
+          result.status === 0,
+          `Git fixture setup failed: status=${result.status} error=${result.error?.code || 'none'} stderr=${result.stderr || ''}`,
+        )
+      }
+    }
+    writeFileSync(
+      join(work, 'git-unicode', '.git', 'info', 'exclude'),
+      'git.cmd\ncmd.exe\nsentinel-invoked.txt\n',
+    )
+  }
+  if (process.env.RELAY_CLI_EXECUTABLE) {
+    const actual = spawnSync(claude, ['--version'], {
+      env,
+      encoding: 'utf8',
+      timeout: 10000,
+      windowsHide: true,
+    })
+    assert(
+      actual.status === 0 && actual.stdout.trim().split(/\s+/)[0] === version,
+      'explicit CLI version mismatch',
+    )
+  }
+  child = spawn(
+    claude,
+    [
+      '-p',
+      '/relay-production-proof',
+      '--plugin-dir',
+      plugin,
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--mcp-config',
+      '{"mcpServers":{}}',
+    ],
+    {
+      cwd: work,
+      env,
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    },
+  )
+  let closed = false,
+    exitCode
+  child.once('error', () => {
+    closed = true
+  })
+  child.once('close', (code) => {
+    closed = true
+    exitCode = code
+  })
+  let report
+  const deadline = Date.now() + 180000
+  while (!closed && Date.now() < deadline) {
+    report = readJson(join(work, 'relay-production.json'))
+    if (report?.phase === 'ready' || report?.phase === 'failed') break
+    await pause(100)
+  }
+  assert(
+    report?.phase === 'ready',
+    `SDK fixture did not initialize: ${report?.error || 'no report'}`,
+  )
+  assert(
+    process.platform === 'win32'
+      ? report.windowsGit === 'passed'
+      : report.windowsGit === undefined,
+    'Windows SDK Git proof missing or unexpectedly present',
+  )
+  socket = report.socket
+  assert(
+    typeof socket === 'string' && typeof report.launch === 'string',
+    'missing private socket or launch file',
+  )
+  if (process.platform === 'win32') {
+    const socketBytes = Buffer.byteLength(socket, 'utf8')
+    const socketBase = realpathSync.native(dirname(dirname(socket)))
+    assert(
+      socket.includes('é') &&
+        socketBytes <= 100 &&
+        socketBase.toLowerCase() === unicodeLocal.toLowerCase(),
+      `Unicode socket path proof failed: ${socketBytes} bytes`,
+    )
+    console.log(JSON.stringify({ unicodeSocketBytes: socketBytes }))
+  }
+  const os = process.platform === 'win32' ? 'windows' : process.platform
+  const runnerArch = (process.env.RUNNER_ARCH || process.arch).toLowerCase()
+  const arch =
+    runnerArch === 'x64' || runnerArch === 'amd64'
+      ? 'amd64'
+      : runnerArch === 'arm64' || runnerArch === 'aarch64'
+        ? 'arm64'
+        : ''
+  assert(arch, `unsupported runner architecture: ${runnerArch}`)
+  assert(
+    typeof report.binary === 'string',
+    'SDK fixture did not report the selected production binary',
+  )
+  const expected = join(
+    plugin,
+    'hosts/relay/bin',
+    `brain-trail-relay-${os}-${arch}${process.platform === 'win32' ? '.exe' : ''}`,
+  )
+  const samePath = (a, b) =>
+    process.platform === 'win32'
+      ? resolve(a).toLowerCase() === resolve(b).toLowerCase()
+      : resolve(a) === resolve(b)
+  assert(
+    samePath(report.binary, expected),
+    `SDK selected wrong packaged relay: selected=${basename(report.binary)} expected=${basename(expected)} nodeArch=${process.arch} runnerArch=${runnerArch}`,
+  )
+  binary = resolve(report.binary)
+  pid = relayPid(binary)
+  assert(
+    pid && alive(pid),
+    `packaged relay process not observed: ${JSON.stringify({ ...pidDiagnostic, binary: basename(binary), nodeArch: process.arch, runnerArch, processorArch: process.env.PROCESSOR_ARCHITECTURE || null, processorWow64: process.env.PROCESSOR_ARCHITEW6432 || null })}`,
+  )
+  const helper = process.env.RELAY_CROSS_ACCOUNT_HELPER
+  const hosted =
+    process.env.GITHUB_ACTIONS === 'true' &&
+    process.env.RUNNER_ENVIRONMENT === 'github-hosted'
+  const supported = ['linux', 'darwin', 'win32'].includes(process.platform)
+  const runHelper = (...args) => {
+    const result = spawnSync(process.execPath, [helper, ...args], {
+      timeout: 75000,
+      encoding: 'utf8',
+      maxBuffer: 65536,
+      windowsHide: true,
+    })
+    if (result.status !== 0) {
+      const phases = [
+        ...(result.stderr || '').matchAll(
+          /cross-account-phase=([a-z0-9-]{1,64}) error-class=([a-z0-9-]{1,64})/g,
+        ),
+      ]
+        .slice(0, 5)
+        .map((match) => ({
+          phase: match[1],
+          errorClass:
+            /^(?:os-[0-9]{1,10}|service-100[123]|permission|not-found|timeout|other)$/.test(
+              match[2],
+            )
+              ? match[2]
+              : 'unknown',
+        }))
+      console.error(
+        JSON.stringify({
+          operation:
+            args[0] === '--owner' || args[0] === '--closed'
+              ? args[0]
+              : 'negative',
+          status: result.status,
+          signal: result.signal,
+          errorCode: result.error?.code || null,
+          phases,
+        }),
+      )
+    }
+    return result.status === 0
+  }
+  const ownerConnects = () =>
+    new Promise((done) => {
+      const connection = connect(socket)
+      connection.once('connect', () => {
+        connection.destroy()
+        done(true)
+      })
+      connection.once('error', () => done(false))
+      connection.setTimeout(2000, () => {
+        connection.destroy()
+        done(false)
+      })
+    })
+  const ownerControl = async () => {
+    if (!readdirSync(dirname(socket)).includes('relay.sock')) return false
+    if (hosted && helper) return runHelper('--owner', dirname(socket), socket)
+    // SDK launch already made an authenticated UDS request; Node cannot dial Windows AF_UNIX.
+    return process.platform === 'win32' ? true : ownerConnects()
+  }
+  assert(await ownerControl(), 'owner directory/socket control failed')
+  let crossAccount = 'skipped-local'
+  if (hosted && supported && helper)
+    crossAccount = runHelper(dirname(socket), socket) ? 'passed' : 'failed'
+  else if (
+    (supported && helper) ||
+    (process.env.GITHUB_ACTIONS === 'true' && (!hosted || !helper))
+  )
+    crossAccount = 'failed'
+  assert(
+    await ownerControl(),
+    'owner directory/socket control failed after isolation check',
+  )
+  const html = readFileSync(report.launch, 'utf8')
+  const launch = html.match(
+    /url=(http:\/\/127\.0\.0\.1:[0-9]+\/launch\/[A-Za-z0-9_-]+)/,
+  )?.[1]
+  assert(launch, 'missing one-use launch URL')
+  const redirect = await fetch(launch, { redirect: 'manual' })
+  assert(redirect.status === 303, 'launch failed')
+  const base = new URL(redirect.headers.get('location'), launch)
+  const abort = new AbortController()
+  stream = await fetch(new URL('events', base), { signal: abort.signal })
+  assert(
+    stream.status === 200 &&
+      stream.headers.get('content-type')?.startsWith('text/event-stream'),
+    'SSE failed',
+  )
+  const reader = stream.body.getReader()
+  let events = ''
+  while (!events.includes('"kind":"snapshot"')) {
+    const part = await reader.read()
+    assert(!part.done, 'SSE closed during initialization')
+    events += new TextDecoder().decode(part.value)
+    assert(events.length < 2000000, 'SSE initial frame too large')
+  }
+  const command = async (generation, value) => {
+    const response = await fetch(new URL('command', base), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: base.origin },
+      body: JSON.stringify({
+        v: 1,
+        generation,
+        command: { kind: 'settings', patch: { openMd: value } },
+      }),
+    })
+    assert(response.ok, 'command HTTP failed')
+    return response.json()
+  }
+  // Initialization publishes asynchronously; wait for the production ready handshake.
+  let saved
+  for (let n = 0; n < 50; n++) {
+    saved = await command(2, 'é😀')
+    if (saved.error !== 'disconnected') break
+    await pause(100)
+  }
+  assert(
+    saved?.ok === true && saved.value === 'é😀',
+    'authoritative Unicode save failed',
+  )
+  const stale = await command(1, 'replacement')
+  assert(
+    stale?.ok === false && stale.error === 'stale',
+    'stale mutation not refused',
+  )
+  abort.abort()
+  await reader.cancel().catch(() => {})
+  while (!closed && Date.now() < deadline) await pause(100)
+  report = readJson(join(work, 'relay-production.json'))
+  const end = readJson(join(work, 'relay-production-end.json'))
+  assert(
+    closed && exitCode === 0 && report?.phase === 'passed',
+    'SDK session failed or timed out',
+  )
+  assert(
+    end?.passed === true && end.value === 'é😀',
+    'session-end store readback failed',
+  )
+  assert(gatewayCalls === 0, 'unexpected model gateway request')
+  for (let n = 0; n < 30 && alive(pid); n++) await pause(100)
+  assert(!alive(pid), 'packaged relay process survived SDK session')
+  if (hosted && helper) {
+    assert(
+      runHelper('--closed', dirname(socket), socket),
+      'relay AF_UNIX socket remained live after SDK session',
+    )
+  } else if (process.platform !== 'win32') {
+    assert(
+      !(await ownerConnects()),
+      'relay socket remained live after SDK session',
+    )
+  }
+  assert(
+    crossAccount !== 'failed',
+    'cross-account directory/socket isolation failed or was not configured',
+  )
+  console.log(
+    JSON.stringify({
+      result: 'passed',
+      platform,
+      version,
+      modelRequests: gatewayCalls,
+      crossAccount,
+    }),
+  )
+} catch (error) {
+  console.error(`production relay proof failed: ${error.message}`)
+  process.exitCode = 1
+} finally {
+  if (
+    child &&
+    child.exitCode === null &&
+    child.signalCode === null &&
+    child.pid
+  ) {
+    if (process.platform === 'win32')
+      spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        timeout: 10000,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    else {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {}
+    }
+    await pause(500)
+  }
+  try {
+    if (binary && pid && alive(pid) && relayPid(binary) === pid) {
+      if (process.platform === 'win32')
+        spawnSync('taskkill', ['/PID', String(pid), '/F'], {
+          timeout: 10000,
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+      else {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {}
+      }
+      await pause(500)
+    }
+  } catch (error) {
+    console.error(`relay cleanup observation failed: ${error.message}`)
+    process.exitCode = 1
+  }
+  if (gateway) await new Promise((ok) => gateway.close(ok))
+  if (unicodeRoot)
+    rmSync(unicodeRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    })
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+}

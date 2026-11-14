@@ -46,6 +46,9 @@ test('the goal tab tells the session in plain words', async ($, on) => {
   })
   on('clock.now', () => ({ value: 200_000 }))
   on('config.list', () => ({ value: [] }))
+  on('env.get', (_$, e) => ({
+    value: e.name === 'HOME' ? '/Users/me' : undefined,
+  }))
   on('session.cwd', () => ({ value: '/w' }))
   on('process.run', () => ({
     value: {
