@@ -333,13 +333,36 @@ export type DrawnMap =
   | { kind: '2d'; frame: Drawn2d }
   | { kind: '3d'; frame: Drawn3d }
 export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
+export type MapPoint = { fx: number; fy: number }
+// A press in progress goes on in stretches: the frame its current stretch started from, where the
+// pointer was then (`from`) and where it was last seen (`at`). A wheel turned during the press
+// starts a new stretch from the frame it made, drawn or not.
+export type Drag2d = {
+  press: number
+  button: PointerButton
+  view: MapFrame
+  from: MapPoint
+  at: MapPoint
+}
+// in 3D, also the turn and the tilt the stretch started from
+// A 3D press keeps the turn and tilt of its stretch, and the layout it went down on, to frame
+// what it shows without waiting for a drawing.
+export type Drag3d = {
+  press: number
+  button: PointerButton
+  yaw: number
+  pitch: number
+  view: SpinView
+  layout: Layout
+  from: MapPoint
+  at: MapPoint
+}
 export type GestureMemory = {
-  hover: { fx: number; fy: number } | undefined
-  drag2d: { press: number; view: MapFrame } | undefined
-  // the drawing a 3D press started on, and the turn it showed then
-  drag3d:
-    | { press: number; yaw: number; pitch: number; view: SpinView }
-    | undefined
+  hover: MapPoint | undefined
+  drag2d: Drag2d | undefined
+  drag3d: Drag3d | undefined
+  // the followed 3D drawing a zoom already left: until a newer drawing, zooms go on from the camera
+  leftFollow: SpinView | undefined
 }
 export type GestureResult = {
   memory: GestureMemory

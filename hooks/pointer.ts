@@ -18,9 +18,13 @@ export const pointerButton = (index: number): PointerButton | undefined =>
       : index === 2
         ? 'right'
         : undefined
+const BIT = { left: 1, right: 2, middle: 4 } as const
 // whether a DOM pointer's `buttons` still holds this button
 export const heldIn = (button: PointerButton, buttons: number) =>
-  (buttons & (button === 'left' ? 1 : button === 'right' ? 2 : 4)) !== 0
+  (buttons & BIT[button]) !== 0
+// whether a DOM pointer's `buttons` holds another button too: a chord, never a click
+export const heldBesides = (button: PointerButton, buttons: number) =>
+  (buttons & 7 & ~BIT[button]) !== 0
 
 // A notch of the wheel is one row, wherever it turns: the pane counts rows itself,
 // a browser reports about 100 pixels, 3 lines or 1 page.
@@ -65,6 +69,8 @@ export type MapFrame = {
   // The frame drawn around a unit camera square, without the whole-map title.
   // Its inverse keeps pan/zoom anchored even when that title disappears.
   cameraFrame?: { vx: number; vy: number; vw: number; vh: number }
+  // the frame the same map draws with no camera: the whole map
+  whole: Box
 }
 
 export const fitFrame = (
@@ -126,6 +132,47 @@ export const panFrame = (
     x: b.vx + (b.vw - side) / 2 - dx * b.vw,
     y: b.vy + (b.vh - side) / 2 - dy * b.vh,
     side,
+  }
+}
+
+// The frame a camera made from `like` (by panFrame or zoomFrame; null: the whole map) draws:
+// `like`'s shape at the camera's place and size, so a gesture can go on from a camera that is
+// not drawn yet.
+export const frameOf = (
+  cam: { x: number; y: number; side: number } | null,
+  like: MapFrame,
+): MapFrame => {
+  const c = like.cameraFrame,
+    whole = like.whole
+  if (cam === null)
+    return {
+      ...whole,
+      px: (like.px * whole.vw) / like.vw,
+      ...(c !== undefined && { cameraFrame: c }),
+      whole,
+    }
+  if (c !== undefined) {
+    const vw = c.vw * cam.side
+    return {
+      vx: cam.x + c.vx * cam.side,
+      vy: cam.y + c.vy * cam.side,
+      vw,
+      vh: c.vh * cam.side,
+      px: (like.px * vw) / like.vw,
+      cameraFrame: c,
+      whole,
+    }
+  }
+  const k = cam.side / Math.min(like.vw, like.vh),
+    vw = like.vw * k,
+    vh = like.vh * k
+  return {
+    vx: cam.x - (vw - cam.side) / 2,
+    vy: cam.y - (vh - cam.side) / 2,
+    vw,
+    vh,
+    px: like.px * k,
+    whole,
   }
 }
 

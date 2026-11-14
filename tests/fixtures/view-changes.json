@@ -1,153 +1,30 @@
 {
-  "baseline": "3ab60c729e3748fb02031ae348d71a1f7199b700",
-  "reason": "Every docked desktop tab stays within the remaining pane height with a pinned header and footer. The map fills the residual frame and contains the whole default graph; other tabs page only their body. A bounded notice replaces chrome that cannot fit. Client probes measure actual layout. Terminal panes, prompt bands and external browser scenes are unchanged.",
+  "baseline": "68b45cf54508e4cfde7a44572fa751a69fcda085",
+  "reason": "The inline and browser 3D toolbars gain an always-visible whole-scene fit button, so an off-screen pan can be recovered. Only the added button and toolbar child count change; SVG sources and viewports remain identical. Exact tree differences were independently reviewed; no operational failure is waived.",
   "cases": {
-    "pane-map-desktop-dark-en": {
-      "tree": "4d9d00dd6c45ebb7b0ff1c4ab57bf12f6b601ca58ae5315491577c5e936794c3",
-      "svg:1:source": "8926d47d1bd87f6941401275ee7a6f6f5b0154f55cc4cd9beb8c8ed3e937ae3d",
-      "svg:1:viewport": "feea0898c79a0a11da07fe248281621107a2c603051cc9ed6661217fffbd1c7f"
-    },
-    "pane-map-desktop-dark-fr": {
-      "tree": "769fea29de0508655c37e48c9a40b96016f10246c95ee4fc7ebeceec8766700e",
-      "svg:1:source": "4ba16ee7ff0bbb50f2e6e22711e16608f8423875ecfbf2a0a5da3bdcd5656559",
-      "svg:1:viewport": "feea0898c79a0a11da07fe248281621107a2c603051cc9ed6661217fffbd1c7f"
-    },
-    "pane-map-desktop-light-en": {
-      "tree": "51e84a1b1e0acc17df21ea2c89601bd08125d92fae837edf7bbd66e4aa0756e1",
-      "svg:1:source": "741a9fc829f896b41b1d81b9794458f6e7e827b1754238a4d8df91a6b70a5de4",
-      "svg:1:viewport": "feea0898c79a0a11da07fe248281621107a2c603051cc9ed6661217fffbd1c7f"
-    },
-    "pane-map-desktop-light-fr": {
-      "tree": "fb5cb5f248da1389dcfa47b079ff0f4949eb2e289693bde54e59213253aebf4c",
-      "svg:1:source": "995f7b606de1d3d8897b4609dbbf86adac8b250e729fe5f5f8582c4ec95aec04",
-      "svg:1:viewport": "feea0898c79a0a11da07fe248281621107a2c603051cc9ed6661217fffbd1c7f"
-    },
-    "pane-goal-desktop-dark-en": {
-      "tree": "76302e6661cef147ba3d3a63584e21a4da52eb402893e1c51ea929dc02c3acf7"
-    },
-    "pane-goal-desktop-dark-fr": {
-      "tree": "1c929019ad22bfe7c7f81bc62ca82e5fb5b5d8141fe8a7b22ac444e11187567c"
-    },
-    "pane-goal-desktop-light-en": {
-      "tree": "ee1c80920f68f30d7d9e5013601c3e5ef936e6e7c6c0e02ce4be4ecedc82844f"
-    },
-    "pane-goal-desktop-light-fr": {
-      "tree": "982977699632d012c1c7490a7760cfca6d7a29459ad1a90313376596368d7670"
-    },
-    "pane-files-desktop-dark-en": {
-      "tree": "75c0a9d806fd0be6a6c6650cd210de72f7e74c4dcafa64e19a7b5ce301712a1b"
-    },
-    "pane-files-desktop-dark-fr": {
-      "tree": "290a1045aef625066a614f27a29b1e09cb62c977b25eaaf421ef8282c75fcd47"
-    },
-    "pane-files-desktop-light-en": {
-      "tree": "09a69b3f263b5c6f45f155bf91afc4858014bc3525dfb4658c436200e8df1736"
-    },
-    "pane-files-desktop-light-fr": {
-      "tree": "7f7f812092851b97f18c260187ea7e753085051acdbc09a8daf97d34dae270b1"
-    },
-    "pane-context-desktop-dark-en": {
-      "tree": "4e64e71373b27488d2268fce396ec7b8cba57384e7eefa48001220bd21264097"
-    },
-    "pane-context-desktop-dark-fr": {
-      "tree": "098f3b7f896aa0b20ea50a236b0e24b5181d12b194889c7d2ae5c0da3a285f56"
-    },
-    "pane-context-desktop-light-en": {
-      "tree": "03f187c4706f50d1f07045c796a2c839d3c93a9cb25f51dda6091c85e2d97605"
-    },
-    "pane-context-desktop-light-fr": {
-      "tree": "8743a5bc5f65720528b1723987530d16e2353b37211412b77567d3ba161903da"
-    },
-    "pane-coach-desktop-dark-en": {
-      "tree": "d81dd3c63761fdddc0ebb08acd449e6e80a2dcd1eaa25da10c10a6d21765ab7f"
-    },
-    "pane-coach-desktop-dark-fr": {
-      "tree": "37d189b61731134e1f6db2d6afb8a064f05f24fa283a05d09f9022e7f488dffa"
-    },
-    "pane-coach-desktop-light-en": {
-      "tree": "edf598d76d632a3ced4eeb2764b99a286041a029b09fdbd9c74fce4c33833f3a"
-    },
-    "pane-coach-desktop-light-fr": {
-      "tree": "40fa2f8d2a11538f01985606de0f86fa416584771a3364a595151c3c250c60eb"
-    },
-    "pane-settings-desktop-dark-en": {
-      "tree": "8e0a8afc36cdf67dd598e32039aceeb6ba47202296790cc916df1b2b051d70ae"
-    },
-    "pane-settings-desktop-dark-fr": {
-      "tree": "aa4aedc1130c473c2c34677d1f1a3dcba7fc9d5b5ff0570819b88bf360b4b289"
-    },
-    "pane-settings-desktop-light-en": {
-      "tree": "b93e841002f7981475dfc44abda6628e09830f627c83d1fd970de1fad1b2c5d9"
-    },
-    "pane-settings-desktop-light-fr": {
-      "tree": "98ab298b2dd4acc78a4f8f7db375c8d1235218dd62d92e7c7acef6242f424bd8"
-    },
     "inline3d-desktop-dark-en": {
-      "tree": "63b400c604614835f4424554a4281b60e12f10042eac41232f2f3b1a2eefb52f",
-      "svg:1:source": "d79037b2aea222fa24e2058f2f7f1ee985fdf5cdb275ce7bf76cf40df0db1753",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "af2acbec4ead3cd083a7aa4efcc9fa1cc6eeb5be953485c6a6e12aba9981703e"
     },
     "inline3d-desktop-dark-fr": {
-      "tree": "eacd73ee889cc01a4f121e9587bc88b90e69d9264de9438bb091ee4c0860bee2",
-      "svg:1:source": "cfe38d65c3cb2016b8b72c265f7eb92bdb49941ba876abe3de61e2b06c7f8f2e",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "63403a4491fb214acee129a0db3fe376c1b43b44795604cf6c131a4fc38fe106"
     },
     "inline3d-desktop-light-en": {
-      "tree": "65cf231b1c5a7fbc63f0c0d27895cb469f61230413db53db6ba22af3607606b9",
-      "svg:1:source": "3d07b88a5ee9c65db58d7eab401db13a12b313d3f3b0743f3e80f49e925ae9e8",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "08a91039fc31d8a5d993ba39e475925a22e5e19b6ce1efd80f1d352f8ab82914"
     },
     "inline3d-desktop-light-fr": {
-      "tree": "eef2f078295d12e92993a2dd7109abc14330abef8deba05ded72d5f3b94ccc0c",
-      "svg:1:source": "a4623c21252817e3ca9b6b28391b45f47b60a322e8238fce27ac73fdcfb87acf",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "3c42c49445b3402cd559351e265ff5c921ce45a18d429ccd35ee6b0f761ec7cc"
     },
     "browser3d-desktop-dark-en": {
-      "tree": "63b400c604614835f4424554a4281b60e12f10042eac41232f2f3b1a2eefb52f",
-      "svg:1:source": "d79037b2aea222fa24e2058f2f7f1ee985fdf5cdb275ce7bf76cf40df0db1753",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "af2acbec4ead3cd083a7aa4efcc9fa1cc6eeb5be953485c6a6e12aba9981703e"
     },
     "browser3d-desktop-dark-fr": {
-      "tree": "eacd73ee889cc01a4f121e9587bc88b90e69d9264de9438bb091ee4c0860bee2",
-      "svg:1:source": "cfe38d65c3cb2016b8b72c265f7eb92bdb49941ba876abe3de61e2b06c7f8f2e",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "63403a4491fb214acee129a0db3fe376c1b43b44795604cf6c131a4fc38fe106"
     },
     "browser3d-desktop-light-en": {
-      "tree": "65cf231b1c5a7fbc63f0c0d27895cb469f61230413db53db6ba22af3607606b9",
-      "svg:1:source": "3d07b88a5ee9c65db58d7eab401db13a12b313d3f3b0743f3e80f49e925ae9e8",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
+      "tree": "08a91039fc31d8a5d993ba39e475925a22e5e19b6ce1efd80f1d352f8ab82914"
     },
     "browser3d-desktop-light-fr": {
-      "tree": "eef2f078295d12e92993a2dd7109abc14330abef8deba05ded72d5f3b94ccc0c",
-      "svg:1:source": "a4623c21252817e3ca9b6b28391b45f47b60a322e8238fce27ac73fdcfb87acf",
-      "svg:1:viewport": "52d0faa874ccf6fc33836222b204c4cb4f34fa4bf41ba82115343e5f4bb8435f"
-    },
-    "pane-map-loading-desktop-dark-en": {
-      "tree": "ef9a989a047756d367f39939915d899817db8da94cbc85ff7e6b4b2576ab8411"
-    },
-    "pane-map-error-desktop-dark-en": {
-      "tree": "0ba51f81104a97b3fae51fe06736caf6a2ec980eb6a83125d36b4b6b8999a42d"
-    },
-    "pane-map-empty-desktop-dark-en": {
-      "tree": "2d302ba7432e1ad100c39e683f10c53e06407b5c1644d08ba28d99a38ced1ed1",
-      "svg:1:source": "b4cd64529d314fe50df508643d5b9572f9dd1d9342405fdeda0bc4dc46e47a83",
-      "svg:1:viewport": "68a1574fdc8f91ce69e0a6f806c34bc5960d37d416095e348dc91d75cdbc9fa0"
-    },
-    "pane-meter-unavailable-desktop-dark-en": {
-      "tree": "1f506d14eb3d927ae1749c178767b7ebe250846f614a4c3069552c3e233a4479"
-    },
-    "pane-coach-error-desktop-dark-en": {
-      "tree": "fc27a6c27e9c0ec4f6342dbf10707f31d39e470efb26f4960a9fe8f293f6e9fa"
-    },
-    "pane-map-follow-desktop-dark-en": {
-      "tree": "5b51622561fbc0adca40c04c9158f0df7f76371349857ec9e3bd0fc151e94198",
-      "svg:1:source": "b43e314c7c607a16df9884a0df2983e6ef2682db02322f564fa0e85665e3670a",
-      "svg:1:viewport": "72e823a54d24068bfbb489aee63db84432b5b1254bc70a785b0bfb9716f25d3f"
-    },
-    "pane-map-replay-desktop-dark-en": {
-      "tree": "415ee6fea7036c1e07bdd6b75767683f9a043229c297e733cd37d1badeff1e2d",
-      "svg:1:source": "d92e38088d370f5d5b63b75665fb4e6eb9fbf98bcc947df6e921241f7f7b5f8c",
-      "svg:1:viewport": "68a1574fdc8f91ce69e0a6f806c34bc5960d37d416095e348dc91d75cdbc9fa0"
+      "tree": "3c42c49445b3402cd559351e265ff5c921ce45a18d429ccd35ee6b0f761ec7cc"
     }
   }
 }

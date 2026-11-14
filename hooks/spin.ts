@@ -35,20 +35,23 @@ const at = (u: number, v: number, phi: number, ce: number, se: number): [number,
 const nearness = (phi: number) => (1 - Math.sin(phi)) / 2
 
 // What a drawing shows, so a gesture continues from it: `zoom` and `pan` as drawn (a followed note's
-// framing included), and `focus`, the point a change of zoom alone keeps in place.
+// framing included), `focus`, the point a change of zoom alone keeps in place, and the width and
+// box aspect it was drawn for, so another camera can be framed the same way.
 export type SpinView = {
   vx: number; vy: number; vw: number; vh: number; px: number; yaw: number; ce: number; se: number; t: number; spinning: boolean
   zoom: number; pan: { x: number; y: number }; focus: { x: number; y: number }; follow: boolean
+  widthPx: number; aspect?: number
 }
 
+// How a drawing of L frames a camera (`cur`: the note Claude is on): the turn, the tilt and the box
+// drawSpin shows, without drawing it.
 // `aspect`: the height over the width of the box the host gives the drawing; absent, it takes its own fixed shape.
-export const drawSpin = (
-  L: Layout, T: Trail, P: Palette,
-  o: { widthPx: number; now: number; cam: Cam; follow: boolean; filesWord: string; outside: number; dark: boolean; aspect?: number },
+const frameSpin = (
+  L: Layout, cur: number | undefined,
+  o: { widthPx: number; now: number; cam: Cam; follow: boolean; aspect?: number },
 ) => {
   const B = brain(L)
   const { widthPx, now, cam } = o
-  const cur = T.moves.at(-1)?.n
   // following Claude: the note it is on turns to the front and the camera comes close
   const follow = o.follow && cur !== undefined
   const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, cam.pitch))
@@ -116,6 +119,27 @@ export const drawSpin = (
     const fittedFrame = fitFrame(natural, o.aspect)
     ;({ vx, vy, vw, vh: H } = fittedFrame)
   }
+  const view: SpinView = {
+    vx, vy, vw, vh: H, px: vw / widthPx, yaw, ce, se, t: now, spinning,
+    zoom, pan: { x: cx - ax, y: cy - ay }, focus: { x: cx, y: cy }, follow, widthPx, aspect: o.aspect,
+  }
+  return { B, pitch, ce, se, spinning, ang, yaw, px, titleX, titleY, view }
+}
+
+// What a drawing like `like` (same width and box) shows for another camera, framed as drawSpin
+// frames it, so a gesture can go on from a camera that is not drawn yet: its turn, its tilt, its
+// zoom and its pan.
+export const spinViewFor = (L: Layout, like: SpinView, cam: Cam): SpinView =>
+  frameSpin(L, undefined, { widthPx: like.widthPx, now: cam.at, cam, follow: false, aspect: like.aspect }).view
+
+export const drawSpin = (
+  L: Layout, T: Trail, P: Palette,
+  o: { widthPx: number; now: number; cam: Cam; follow: boolean; filesWord: string; outside: number; dark: boolean; aspect?: number },
+) => {
+  const cur = T.moves.at(-1)?.n
+  const { B, pitch, ce, se, spinning, ang, yaw, px, titleX, titleY, view } = frameSpin(L, cur, o)
+  const { widthPx } = o
+  const { vx, vy, vw, vh: H } = view
   const heightPx = Math.round(widthPx * H / vw)
   const out: string[] = []
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vx)} ${f(vy)} ${f(vw)} ${f(H)}" ${o.aspect === undefined ? `width="${FLUID}" height="${Math.round(FLUID * H / vw)}"` : fitted} font-family="'General Sans',ui-sans-serif,system-ui,sans-serif">`)
@@ -261,10 +285,6 @@ export const drawSpin = (
   const title = fitTitle(L.title.toUpperCase(), `${(root?.n ?? N).toLocaleString('en-US')} ${o.filesWord.toUpperCase()}${more}`, widthPx, 320)
   if (title !== '') out.push(`<text x="${f(titleX + 12 * px)}" y="${f(titleY + 22 * px)}" font-size="${f(11 * px)}" font-family="ui-monospace,monospace" letter-spacing=".04em" fill="${P.dim}" stroke="${P.bg}" stroke-width="${f(4 * px)}" paint-order="stroke">${esc(title)}</text>`)
   out.push('</svg>')
-  const view: SpinView = {
-    vx, vy, vw, vh: H, px: vw / widthPx, yaw, ce, se, t: now, spinning,
-    zoom, pan: { x: cx - ax, y: cy - ay }, focus: { x: cx, y: cy }, follow,
-  }
   return { svg: out.join(''), heightPx, view }
 }
 

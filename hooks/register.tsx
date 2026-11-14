@@ -433,12 +433,12 @@ const nativeIntent = async ($: EngineInterface, intent: ViewIntent) => {
     await setShared($, next)
     if (timerEffect(intent) !== 'none') syncReplayClock($, next.play.playing)
     // Apply only surface-local effects here; shared fields were reduced above.
-    for (const step of plan(intent, { now: 0, frames: drawnFrames() })) {
+    for (const step of plan(intent, { now: 0, frames: drawnFrames(), view3d: await read($, view3dA) })) {
       if (step.key !== 'preview' && step.key !== 'zoomed' && step.key !== 'play') await applyStep($, step)
     }
   } else {
     const now = intent.kind === 'turn-3d' || intent.kind === 'spin-3d' || intent.kind === 'zoom-3d' ? await $.clock.now() : 0
-    for (const step of plan(intent, { now, frames: drawnFrames() })) await applyStep($, step)
+    for (const step of plan(intent, { now, frames: drawnFrames(), view3d: await read($, view3dA) })) await applyStep($, step)
   }
   queuePublish($)
   })
@@ -1020,10 +1020,15 @@ export const register: Register = (on, options) => {
     }
     if (!mapVisible || e.origin.kind !== 'person' || e.pointer === undefined || gesture.hover === undefined || e.by === 0) return next(e)
     if ((await read($, tabA)) !== 'map') return next(e)
+    const view3d = await read($, view3dA), now = await $.clock.now(), at = gesture.hover
+    if (at === undefined) return next(e)
+    // The memory changes here, in the order the pointer's messages came: a press in progress
+    // goes on from what the wheel made.
+    const result = mapWheel(e.by, view3d, at, gesture, drawnFrames(), now)
+    gesture = result.memory
     await serial(async () => {
-      const steps = mapWheel(e.by, await read($, view3dA), gesture.hover!, drawnFrames(), await $.clock.now())
       let sharedChanged = false
-      for (const step of steps) {
+      for (const step of result.steps) {
         if (step.key === 'zoomed') {
           const prior = await read($, zoomed), nextZoomed = step.next(prior)
           if (nextZoomed !== prior) { await update($, zoomed, () => nextZoomed); sharedChanged = true }

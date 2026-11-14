@@ -14,10 +14,12 @@ let pressSequence = 0
 const Hit: ClientModule<Props, { on: true }> = (props, surface) => {
   const { Box, Text } = surface.elements
   if (surface.state === undefined) {
-    let down: { x: number; y: number; fx: number; fy: number; press: number; button: Button } | undefined
+    // `mixed`: another button joined the press, which is then never a click
+    let down: { x: number; y: number; fx: number; fy: number; press: number; button: Button; mixed: boolean } | undefined
     let dragging = false
     // A press ends once: with its button's release, or, when that release never reached the layer,
     // at the next press or the first move that holds no button. It never ends in a click then.
+    // The layer is told no held set: another button's release leaves the press going.
     const release = () => {
       if (dragging) surface.post({ kind: 'dragend' })
       down = undefined; dragging = false
@@ -29,10 +31,11 @@ const Hit: ClientModule<Props, { on: true }> = (props, surface) => {
         if (e.button === undefined) return
         release()
         pressSequence = pressSequence >= Number.MAX_SAFE_INTEGER ? 1 : pressSequence + 1
-        down = { x: e.x, y: e.y, fx, fy, press: pressSequence, button: e.button }; dragging = false; return
+        down = { x: e.x, y: e.y, fx, fy, press: pressSequence, button: e.button, mixed: false }; dragging = false; return
       }
       if (e.type === 'move' && down !== undefined) {
         if (e.button !== undefined) {
+          if (e.button !== down.button) down.mixed = true
           // a drag starts once the pointer has left the cell it went down in
           if (dragging || Math.abs(down.x - e.x) > 1 || Math.abs(down.y - e.y) > 1) {
             dragging = true
@@ -43,13 +46,16 @@ const Hit: ClientModule<Props, { on: true }> = (props, surface) => {
         release()
       }
       if (e.type === 'up') {
-        if (down !== undefined && e.button !== undefined && e.button !== down.button) return
+        if (down !== undefined && e.button !== undefined && e.button !== down.button) {
+          down.mixed = true
+          return
+        }
         if (fx < 0 || fx >= 1 || fy < 0 || fy >= 1) {
           down = undefined; dragging = false
           surface.post({ kind: 'leave' })
           return
         }
-        if (down !== undefined && !dragging) surface.post({ kind: 'click', fx, fy, button: down.button })
+        if (down !== undefined && !dragging && !down.mixed) surface.post({ kind: 'click', fx, fy, button: down.button })
         if (dragging) surface.post({ kind: 'dragend' })
         down = undefined; dragging = false
         return

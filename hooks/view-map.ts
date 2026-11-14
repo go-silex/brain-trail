@@ -192,6 +192,12 @@ export const renderMap = <N, Press>(
       label: '+',
       onPress: () => act.intent({ kind: 'zoom-3d', dir: 'in' }),
     }),
+    // always there: the browser scene's own camera is not in the props, so no host can tell it is whole
+    h(Button, {
+      key: 'whole',
+      label: '⤢',
+      onPress: () => act.intent({ kind: 'whole' }),
+    }),
   ]
   const zoomControls = in3d
     ? controls3d

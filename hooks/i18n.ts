@@ -232,7 +232,7 @@ const fr: Strings = {
   costHow: "Le chiffre est celui de /cost : les tokens comptés par le moteur, au prix de l'API. Ta session habituelle est la médiane des sessions passées vues par Brain Trail.",
   planTitle: 'Ton abonnement Claude', planWhy: "Son prix mensuel, en dollars, pour le comparer à la valeur API de tes sessions.", planPlaceholder: 'ex. 100', save: 'Enregistrer',
   open3d: '3D', open3dFailed: 'La vue 3D n\'a pas pu s\'ouvrir dans le navigateur.', open3dBig: '⤢ Plein écran',
-  follow: 'Suivre Claude', openLine: 'Ouvrir :', mapHelp: 'Clic gauche sur une note pour l\'ouvrir. Glisser à gauche déplace en 2D ou tourne en 3D ; à droite, déplace. Glisser avec le bouton central zoome ; la molette aussi si l\'hôte la transmet.', subfolder: 'Sous-dossier…',
+  follow: 'Suivre Claude', openLine: 'Ouvrir :', mapHelp: 'Clic gauche sur une note pour l\'ouvrir. Glisser avec le bouton gauche déplace en 2D ou fait pivoter en 3D ; avec le bouton droit, déplace. Glisser avec le bouton central zoome ; la molette aussi si l\'hôte la transmet.', subfolder: 'Sous-dossier…',
   settings: 'Réglages', openWith: 'Ouvrir les fichiers avec', openWithWhy: "L'app dans laquelle s'ouvre un fichier quand tu cliques sur son nom.",
   openMd: 'Notes Markdown (.md)', openOther: 'Autres fichiers', defaultApp: 'App par défaut du système',
   display: 'Affichage', language: 'Langue', hoverNames: 'Noms au survol', hoverWhy: 'Sur la carte, survoler un point affiche le nom de son fichier.',

@@ -104,7 +104,14 @@ test('2D navigation turns follow off while no-op wheel preserves it', () => {
   const layout = packFiles(['notes/a.md'], 'Example')
   const frames = {
     d2: {
-      view: { vx: 10, vy: 20, vw: 400, vh: 300, px: 1 },
+      view: {
+        vx: 10,
+        vy: 20,
+        vw: 400,
+        vh: 300,
+        px: 1,
+        whole: { vx: 10, vy: 20, vw: 400, vh: 300 },
+      },
       layout,
       touched: new Set<number>(),
     },
@@ -133,24 +140,88 @@ test('2D navigation turns follow off while no-op wheel preserves it', () => {
     frames,
     { now: 100, hoverNames: false },
   )
-  const wheel = mapWheel(1, false, { fx: 0.5, fy: 0.5 }, frames, 100)
+  const wheel = mapWheel(
+    1,
+    false,
+    { fx: 0.5, fy: 0.5 },
+    GESTURE0,
+    frames,
+    100,
+  ).steps
   const toolbar = plan(
     { kind: 'zoom-2d', fx: 0.5, fy: 0.5, f: 1.8 },
-    { now: 100, frames },
+    { now: 100, frames, view3d: false },
   )
   for (const steps of [drag.steps, background.steps, wheel, toolbar]) {
     const follow = steps.find((step) => step.key === 'zoomed')
     expect(follow?.key === 'zoomed' && follow.next(true)).toBe(false)
     expect(steps.some((step) => step.key === 'camera')).toBe(true)
   }
-  expect(mapWheel(0, false, { fx: 0.5, fy: 0.5 }, frames, 100)).toEqual([])
+  expect(
+    mapWheel(0, false, { fx: 0.5, fy: 0.5 }, GESTURE0, frames, 100).steps,
+  ).toEqual([])
   expect(
     mapWheel(
       1,
       false,
       { fx: 0.5, fy: 0.5 },
+      GESTURE0,
       { d2: undefined, d3: undefined },
       100,
-    ),
+    ).steps,
   ).toEqual([])
+})
+
+test('a wheel to whole rebases an active pan even before a new frame is drawn', () => {
+  const layout = packFiles(['notes/a.md'], 'Example')
+  const view = {
+    vx: 100,
+    vy: 100,
+    vw: 1000,
+    vh: 1000,
+    px: 1,
+    cameraFrame: { vx: 0, vy: 0, vw: 1, vh: 1 },
+    whole: { vx: 0, vy: 0, vw: 1800, vh: 1800 },
+  }
+  const frames = {
+    d2: { view, layout, touched: new Set<number>() },
+    d3: undefined,
+  }
+  const state = { view3d: false, zoomed: false, cam3d: VIEW_STATE0.cam3d }
+  const start = {
+    kind: 'drag',
+    press: 1,
+    button: 'left',
+    sfx: 0.2,
+    sfy: 0.2,
+    fx: 0.4,
+    fy: 0.3,
+  } as const
+  const first = mapGesture(start, state, GESTURE0, frames, {
+    now: 100,
+    hoverNames: false,
+  })
+  const wheel = mapWheel(
+    4,
+    false,
+    { fx: 0.4, fy: 0.3 },
+    first.memory,
+    frames,
+    100,
+  )
+  const wheelStep = wheel.steps.find((step) => step.key === 'camera')
+  expect(
+    wheelStep?.key === 'camera' ? wheelStep.next(null) : undefined,
+  ).toBeNull()
+  const continued = mapGesture(
+    { ...start, fx: 0.5, fy: 0.35 },
+    state,
+    wheel.memory,
+    frames,
+    { now: 100, hoverNames: false },
+  )
+  const step = continued.steps.find((item) => item.key === 'camera')
+  const camera = step?.key === 'camera' ? step.next(null) : undefined
+  expect(camera?.side).toBe(1800)
+  expect(camera?.x).toBeLessThan(0)
 })

@@ -152,7 +152,7 @@ test('containment keeps the complete natural picture at shallow and tall aspects
     expect(frame.vx + frame.vw + 1e-8).toBeGreaterThan(picture.vx + picture.vw)
     expect(frame.vy + frame.vh + 1e-8).toBeGreaterThan(picture.vy + picture.vh)
     const cameraFrame = fitFrame({ vx: 0, vy: -0.13, vw: 1, vh: 1.13 }, aspect)
-    const view = { ...frame, px: frame.vw / 800, cameraFrame }
+    const view = { ...frame, px: frame.vw / 800, cameraFrame, whole: frame }
     const fx = 0.23,
       fy = 0.71
     const camera = zoomFrame(view, fx, fy, 0.6, 1800)!
@@ -328,7 +328,8 @@ test('middle drag zooms in both directions and right drag pans without zooming',
     })
     await ui.redraw()
     const up = (await mapBox(ui))!
-    expect((down.w - initial.w) * (up.w - initial.w)).toBeLessThan(0)
+    expect(down.w).toBeGreaterThan(initial.w)
+    expect(up.w).toBeLessThan(initial.w)
     for (const frame of [down, up]) {
       expect(Number.isFinite(frame.w) && frame.w > 0).toBe(true)
       expect(Number.isFinite(frame.h) && frame.h > 0).toBe(true)
@@ -369,6 +370,177 @@ test('middle drag zooms in both directions and right drag pans without zooming',
     expect(panned.y).not.toBe(beforePan.y)
     expect(Math.abs(panned.w - beforePan.w)).toBeLessThan(1.5)
     expect(Math.abs(panned.h - beforePan.h)).toBeLessThan(1.5)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('wheel zoom survives a continued 2D pan in the same press', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const beforeWheel = (await mapBox(ui))!
+    await $.ui.scroll({
+      component: 'Pane',
+      requestId: 'brain-trail-v2',
+      offset: 0,
+      by: -1,
+      bodyRows: 40,
+      contentRows: 80,
+      origin: { kind: 'person' },
+      pointer: { column: 30, row: 20 },
+    })
+    await ui.redraw()
+    const wheeled = (await mapBox(ui))!
+    expect(wheeled.w).toBeLessThan(beforeWheel.w)
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const continued = (await mapBox(ui))!
+    expect(Math.abs(continued.w - wheeled.w)).toBeLessThan(1.5)
+    expect(continued.x).not.toBe(wheeled.x)
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('wheel out to whole during a 2D drag rebases before the next render', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.redraw()
+    const whole = (await mapBox(ui))!
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    const zoomed = (await mapBox(ui))!
+    expect(zoomed.w).toBeLessThan(whole.w)
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    await $.ui.scroll({
+      component: 'Pane',
+      requestId: 'brain-trail-v2',
+      offset: 0,
+      by: 4,
+      bodyRows: 40,
+      contentRows: 80,
+      origin: { kind: 'person' },
+      pointer: { column: 30, row: 20 },
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const continued = (await mapBox(ui))!
+    expect(Math.abs(continued.w - whole.w)).toBeLessThan(1.5)
+    expect(continued.x).not.toBe(whole.x)
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('an unrelated button release does not end the active native pan', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const first = (await mapBox(ui))!
+    await ui.pointer({
+      type: 'up',
+      x: 30,
+      y: 20,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const continued = (await mapBox(ui))!
+    expect(continued.x).not.toBe(first.x)
+    expect(Math.abs(continued.w - first.w)).toBeLessThan(1.5)
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({ type: 'move', x: 48, y: 28, in: 'map-hit' })
+    await ui.redraw()
+    expect(await mapBox(ui)).toEqual(continued)
   } finally {
     await ui.unmount()
   }

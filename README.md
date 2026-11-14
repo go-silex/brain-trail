@@ -98,7 +98,7 @@ The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc
 
 Follow the session as it works and replay it step by step. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
 
-The map uses the same mouse gestures in the pane and browser:
+These navigation gestures are shared by the pane and browser:
 
 | Gesture | 2D | 3D |
 | --- | --- | --- |
@@ -107,7 +107,7 @@ The map uses the same mouse gestures in the pane and browser:
 | Left-button drag | Move the map | Turn the scene |
 | Right-button drag | Move the map | Move the scene without turning it |
 
-Only a left click opens a note. Manual navigation stops following Claude; a drag pauses automatic rotation and restores the prior rotation choice when it ends.
+Only a left click opens a note; pressing several mouse buttons together never opens one. Wheel zoom during a drag is retained when the drag continues. Manual navigation stops following Claude; a drag pauses automatic rotation and restores the prior rotation choice when it ends. The **⤢** control in the 3D toolbar fits the scene back into view. Resetting either view preserves the other view's camera.
 
 **Claude Desktop wheel limitation:** some Desktop versions report only scrolling that already moved the pane, without a wheel pointer. A fitted, fixed-height map cannot receive wheel zoom through that route. Use the middle-button drag or **+ / −** there; the browser supports wheel zoom directly. Brain Trail does not add an invisible scrolling area to work around this host limitation.
 

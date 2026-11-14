@@ -4,6 +4,7 @@ import hljs from 'highlight.js/lib/common'
 import { marked } from 'marked'
 import { WebGLScene } from './scene3d'
 import {
+  heldBesides,
   heldIn,
   pointerButton,
   wheelRows,
@@ -431,6 +432,8 @@ export class DomRenderer {
             fy: number
             button: PointerButton
             press: number
+            // another button joined the press: it is then never a click
+            mixed: boolean
           }
         | undefined,
       dragging = false
@@ -451,9 +454,9 @@ export class DomRenderer {
         tip.style.top = `${Math.max(0, t.y - 16)}px`
       }
     }
-    // A press ends once: on its release, a cancel or a lost capture, or, when its release was
-    // lost, at the next press or the first move that no longer holds its button.
-    // Only a release that never dragged is a click.
+    // A press ends once: on its button's release, a cancel or a lost capture, or, when that
+    // release was lost, at the next press, the first move or another button's release that no
+    // longer holds its button. Only its own release, never dragged nor chorded, is a click.
     const release = () => {
       if (dragging) show(this.map.gesture({ kind: 'dragend' }))
       down = undefined
@@ -475,13 +478,15 @@ export class DomRenderer {
         this.mapPressSequence >= Number.MAX_SAFE_INTEGER
           ? 1
           : this.mapPressSequence + 1
-      down = { ...p, button, press: this.mapPressSequence }
+      down = { ...p, button, press: this.mapPressSequence, mixed: false }
       dragging = false
       el.setPointerCapture(event.pointerId)
     }
     el.onpointermove = (event) => {
       const p = point(event)
       if (down !== undefined && !heldIn(down.button, event.buttons)) release()
+      if (down !== undefined && heldBesides(down.button, event.buttons))
+        down.mixed = true
       if (down !== undefined) {
         if (
           dragging ||
@@ -505,7 +510,12 @@ export class DomRenderer {
     }
     el.onpointerup = (event) => {
       if (down === undefined) return
-      if (dragging) {
+      if (pointerButton(event.button) !== down.button) {
+        if (heldIn(down.button, event.buttons)) down.mixed = true
+        else release()
+        return
+      }
+      if (dragging || down.mixed) {
         release()
         return
       }

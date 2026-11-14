@@ -11,6 +11,7 @@ import { LOGOS } from '../../hooks/logos'
 import {
   dragAction,
   dragZoom,
+  heldBesides,
   heldIn,
   pointerButton,
   wheelRows,
@@ -21,19 +22,25 @@ import {
 import { ZOOM_MAX, ZOOM_MIN } from '../../hooks/spin'
 import type { Scene3dProps } from '../../types/view'
 
+type Pose = {
+  position: THREE.Vector3
+  target: THREE.Vector3
+  quaternion: THREE.Quaternion
+}
 // A press of the pointer on the scene. Mouse and pen drags are the scene's own (`action`);
-// touch turns and pans stay OrbitControls'. `from` is the camera a drag started from.
+// touch turns and pans stay OrbitControls'. A drag goes on in stretches: `from` is the camera
+// the current one started from, at the pointer's (x, y); `wrote` the camera it last set, with
+// the pointer at `at`. `mixed`: another button joined the press, which is then never a click.
 type Press = {
   pointerId: number
   button: PointerButton
   action?: DragAction
   x: number
   y: number
-  from?: {
-    position: THREE.Vector3
-    target: THREE.Vector3
-    quaternion: THREE.Quaternion
-  }
+  at: { x: number; y: number }
+  mixed: boolean
+  from?: Pose
+  wrote?: Pose
 }
 
 // A scene belongs to one mounted map, not to an individual render of the pane.
@@ -766,8 +773,9 @@ export class WebGLScene {
         })
     }
   }
-  // A press ends once: on its button's release, a cancel or a lost capture, or, when its
-  // release was lost, at the next press or the first move that no longer holds its button.
+  // A press ends once: on its button's release, a cancel or a lost capture, or, when that
+  // release was lost, at the next press, the first move or another button's release that no
+  // longer holds its button. Only its own release, never dragged nor chorded, is a click.
   private pointerDown = (event: PointerEvent) => {
     this.renderer.domElement.focus()
     const button = pointerButton(event.button)
@@ -781,6 +789,8 @@ export class WebGLScene {
         event.pointerType === 'touch' ? undefined : dragAction(button, true),
       x: event.clientX,
       y: event.clientY,
+      at: { x: event.clientX, y: event.clientY },
+      mixed: false,
     }
     this.renderer.domElement.setPointerCapture(event.pointerId)
   }
@@ -790,26 +800,44 @@ export class WebGLScene {
   private mouseDown = (event: MouseEvent) => {
     if (event.button === 1) event.preventDefault()
   }
-  // A drag applies the shared policy to the camera it started from, with the pointer's whole
-  // travel since the press: left turns around the target, right pans, middle zooms on the
+  private pose(): Pose {
+    return {
+      position: this.camera.position.clone(),
+      target: this.controls.target.clone(),
+      quaternion: this.camera.quaternion.clone(),
+    }
+  }
+  // whether the camera left a pose, beyond rounding
+  private leftPose(pose: Pose) {
+    const near = (1e-6 * this.fitted) ** 2
+    return (
+      this.camera.position.distanceToSquared(pose.position) > near ||
+      this.controls.target.distanceToSquared(pose.target) > near
+    )
+  }
+  // A drag applies the shared policy to the camera its stretch started from, with the pointer's
+  // whole travel since then: left turns around the target, right pans, middle zooms on the
   // middle of the view (up in, down out). The projection is the scene's own.
   private drag(press: Press, event: PointerEvent) {
     if (press.action === undefined) return
     const rect = this.renderer.domElement.getBoundingClientRect()
     if (!rect.width || !rect.height) return
-    const dx = event.clientX - press.x,
-      dy = event.clientY - press.y
-    let from = press.from
-    if (from === undefined) {
+    if (press.from === undefined) {
       // a click until the pointer travels
-      if (Math.hypot(dx, dy) <= 5) return
-      from = press.from = {
-        position: this.camera.position.clone(),
-        target: this.controls.target.clone(),
-        quaternion: this.camera.quaternion.clone(),
-      }
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 5)
+        return
+      press.from = this.pose()
       this.manual()
+    } else if (press.wrote !== undefined && this.leftPose(press.wrote)) {
+      // Something else moved the camera since the drag did (the wheel, a key, a button): the
+      // drag goes on from there, with the pointer's travel since it was last seen.
+      press.from = this.pose()
+      press.x = press.at.x
+      press.y = press.at.y
     }
+    const from = press.from,
+      dx = event.clientX - press.x,
+      dy = event.clientY - press.y
     const offset = from.position.clone().sub(from.target)
     this.controls.target.copy(from.target)
     if (press.action === 'orbit') {
@@ -839,6 +867,8 @@ export class WebGLScene {
       this.camera.position.copy(from.position)
       this.zoomAbout(from.target, dragZoom(dy / rect.height))
     }
+    press.wrote = this.pose()
+    press.at = { x: event.clientX, y: event.clientY }
   }
   // Zooms by the shared factor `f` (> 1 out) around a point at the target's depth, which keeps
   // its place on the screen. The distance to the target stays within the SVG maps' zoom limits,
@@ -875,6 +905,7 @@ export class WebGLScene {
     const press = this.press
     if (press !== undefined && press.pointerId === event.pointerId) {
       if (heldIn(press.button, event.buttons)) {
+        if (heldBesides(press.button, event.buttons)) press.mixed = true
         this.drag(press, event)
         return
       }
@@ -898,17 +929,19 @@ export class WebGLScene {
   }
   private pointerUp = (event: PointerEvent) => {
     const press = this.press
-    // the release of another button than the press's does not end it
-    if (
-      press === undefined ||
-      press.pointerId !== event.pointerId ||
-      pointerButton(event.button) !== press.button
-    )
+    if (press === undefined || press.pointerId !== event.pointerId) return
+    // Another button came up: the press goes on while its own button is held; otherwise
+    // its release went unseen and the press ends here, without a click.
+    if (pointerButton(event.button) !== press.button) {
+      if (heldIn(press.button, event.buttons)) press.mixed = true
+      else this.press = undefined
       return
+    }
     this.press = undefined
     // only a left click opens a note
     if (
       press.button !== 'left' ||
+      press.mixed ||
       press.from !== undefined ||
       Math.hypot(event.clientX - press.x, event.clientY - press.y) > 5
     )

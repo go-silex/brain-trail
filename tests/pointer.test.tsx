@@ -151,6 +151,7 @@ test(
       fine: { x: 20.5, y: 8.5 },
       in: 'map-hit',
     })
+    await ui.redraw()
     const after = viewBoxOf(await mapSource(ui))
     expect(before).toBeDefined()
     expect(after).toBeDefined()
@@ -184,6 +185,37 @@ test('middle and right clicks on a map file never open it', async ($, on: On) =>
       expect(host.preparedFiles).toHaveLength(0)
       expect(host.opened).toHaveLength(0)
     }
+    await ui.pointer({ type: 'move', ...cell, fine, in: 'map-hit' })
+    expect((await ui.find({ type: 'Text', in: 'map-hit' }))?.text.trim()).toBe(
+      tip,
+    )
+    await ui.pointer({
+      type: 'down',
+      ...cell,
+      button: 'left',
+      fine,
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'up',
+      ...cell,
+      button: 'right',
+      fine,
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'up',
+      ...cell,
+      button: 'left',
+      fine,
+      in: 'map-hit',
+    })
+    await host.clock.settle()
+    await ui.redraw()
+    expect(await ui.find({ key: 'map-hit' })).toBeDefined()
+    expect(host.readFiles).toHaveLength(0)
+    expect(host.preparedFiles).toHaveLength(0)
+    expect(host.opened).toHaveLength(0)
   } finally {
     host.disconnectRelay()
     await ui.unmount()

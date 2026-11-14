@@ -427,8 +427,8 @@ export async function captureBrowserScene(
           const parent = label.parentElement.getBoundingClientRect()
           return {
             text: label.textContent,
-            left: label.style.left,
-            top: label.style.top,
+            left: label.hidden ? null : label.style.left,
+            top: label.hidden ? null : label.style.top,
             parent: [parent.x, parent.y, parent.width, parent.height],
             hidden: label.hidden,
           }
@@ -469,7 +469,7 @@ export async function captureBrowserScene(
       )
     }
     const projectionBefore = await projected()
-    if (projectionBefore.length < 2)
+    if (projectionBefore.filter((label) => !label.hidden).length < 2)
       throw new Error(
         'WebGL camera proof needs at least two projected landmarks',
       )
