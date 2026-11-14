@@ -775,7 +775,8 @@ export class WebGLScene {
   }
   // A press ends once: on its button's release, a cancel or a lost capture, or, when that
   // release was lost, at the next press, the first move or another button's release that no
-  // longer holds its button. Only its own release, never dragged nor chorded, is a click.
+  // longer holds its button. Only its own release, never dragged nor chorded, is a click; a
+  // press that replaces another pointer's (a second finger) is chorded from the start.
   private pointerDown = (event: PointerEvent) => {
     this.renderer.domElement.focus()
     const button = pointerButton(event.button)
@@ -790,7 +791,8 @@ export class WebGLScene {
       x: event.clientX,
       y: event.clientY,
       at: { x: event.clientX, y: event.clientY },
-      mixed: false,
+      mixed:
+        this.press !== undefined && this.press.pointerId !== event.pointerId,
     }
     this.renderer.domElement.setPointerCapture(event.pointerId)
   }
