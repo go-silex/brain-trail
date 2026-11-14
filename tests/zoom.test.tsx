@@ -152,7 +152,7 @@ test('containment keeps the complete natural picture at shallow and tall aspects
     expect(frame.vx + frame.vw + 1e-8).toBeGreaterThan(picture.vx + picture.vw)
     expect(frame.vy + frame.vh + 1e-8).toBeGreaterThan(picture.vy + picture.vh)
     const cameraFrame = fitFrame({ vx: 0, vy: -0.13, vw: 1, vh: 1.13 }, aspect)
-    const view = { ...frame, px: frame.vw / 800, cameraFrame }
+    const view = { ...frame, px: frame.vw / 800, cameraFrame, whole: frame }
     const fx = 0.23,
       fy = 0.71
     const camera = zoomFrame(view, fx, fy, 0.6, 1800)!
@@ -245,7 +245,7 @@ test('zoom-in shrinks around the centre, zoom-out grows, reset restores, and the
         bodyRows: 40,
         contentRows: 80,
         origin: { kind: 'person' },
-        pointer: { column: 1, row: 1 },
+        pointer: { column: x, row: y },
       })
       const wheeled = await mapBox(ui)
       expect(wheeled).toBeDefined()
@@ -295,3 +295,359 @@ test('zoom-in shrinks around the centre, zoom-out grows, reset restores, and the
   }
   await ui.unmount()
 })
+
+test('middle drag zooms in both directions and right drag pans without zooming', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    const initial = (await mapBox(ui))!
+    await ui.pointer({
+      type: 'down',
+      x: 30,
+      y: 20,
+      button: 'middle',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 28,
+      button: 'middle',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const down = (await mapBox(ui))!
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 12,
+      button: 'middle',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const up = (await mapBox(ui))!
+    expect(down.w).toBeGreaterThan(initial.w)
+    expect(up.w).toBeLessThan(initial.w)
+    for (const frame of [down, up]) {
+      expect(Number.isFinite(frame.w) && frame.w > 0).toBe(true)
+      expect(Number.isFinite(frame.h) && frame.h > 0).toBe(true)
+    }
+    await ui.pointer({
+      type: 'up',
+      x: 30,
+      y: 12,
+      button: 'middle',
+      in: 'map-hit',
+    })
+
+    const beforePan = (await mapBox(ui))!
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 32,
+      y: 22,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'up',
+      x: 32,
+      y: 22,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const panned = (await mapBox(ui))!
+    expect(panned.x).not.toBe(beforePan.x)
+    expect(panned.y).not.toBe(beforePan.y)
+    expect(Math.abs(panned.w - beforePan.w)).toBeLessThan(1.5)
+    expect(Math.abs(panned.h - beforePan.h)).toBeLessThan(1.5)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('wheel zoom survives a continued 2D pan in the same press', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const beforeWheel = (await mapBox(ui))!
+    await $.ui.scroll({
+      component: 'Pane',
+      requestId: 'brain-trail-v2',
+      offset: 0,
+      by: -1,
+      bodyRows: 40,
+      contentRows: 80,
+      origin: { kind: 'person' },
+      pointer: { column: 30, row: 20 },
+    })
+    await ui.redraw()
+    const wheeled = (await mapBox(ui))!
+    expect(wheeled.w).toBeLessThan(beforeWheel.w)
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const continued = (await mapBox(ui))!
+    expect(Math.abs(continued.w - wheeled.w)).toBeLessThan(1.5)
+    expect(continued.x).not.toBe(wheeled.x)
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('wheel out to whole during a 2D drag rebases before the next render', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.redraw()
+    const whole = (await mapBox(ui))!
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    const zoomed = (await mapBox(ui))!
+    expect(zoomed.w).toBeLessThan(whole.w)
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    await $.ui.scroll({
+      component: 'Pane',
+      requestId: 'brain-trail-v2',
+      offset: 0,
+      by: 4,
+      bodyRows: 40,
+      contentRows: 80,
+      origin: { kind: 'person' },
+      pointer: { column: 30, row: 20 },
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const continued = (await mapBox(ui))!
+    expect(Math.abs(continued.w - whole.w)).toBeLessThan(1.5)
+    expect(continued.x).not.toBe(whole.x)
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('an unrelated button release does not end the active native pan', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const first = (await mapBox(ui))!
+    await ui.pointer({
+      type: 'up',
+      x: 30,
+      y: 20,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const continued = (await mapBox(ui))!
+    expect(continued.x).not.toBe(first.x)
+    expect(Math.abs(continued.w - first.w)).toBeLessThan(1.5)
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({ type: 'move', x: 48, y: 28, in: 'map-hit' })
+    await ui.redraw()
+    expect(await mapBox(ui)).toEqual(continued)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a new drag after a lost release starts from the latest 2D view', async ($, on: On) => {
+  const { ui } = await mountReady($, on, MAP)
+  try {
+    await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+    await ui.press({ key: 'zoom-in' })
+    await ui.redraw()
+    await ui.pointer({
+      type: 'down',
+      x: 20,
+      y: 15,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 30,
+      y: 20,
+      button: 'left',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const first = (await mapBox(ui))!
+    await ui.pointer({
+      type: 'down',
+      x: 30,
+      y: 20,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'move',
+      x: 38,
+      y: 24,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'up',
+      x: 38,
+      y: 24,
+      button: 'right',
+      in: 'map-hit',
+    })
+    await ui.redraw()
+    const second = (await mapBox(ui))!
+    expect(
+      Math.abs(
+        second.x + (38.5 / 80) * second.w - (first.x + (30.5 / 80) * first.w),
+      ),
+    ).toBeLessThan(1.5)
+    expect(
+      Math.abs(
+        second.y + (24.5 / 40) * second.h - (first.y + (20.5 / 40) * first.h),
+      ),
+    ).toBeLessThan(1.5)
+    await ui.pointer({ type: 'move', x: 50, y: 30, in: 'map-hit' })
+    await ui.redraw()
+    expect(await mapBox(ui)).toEqual(second)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+for (const view3d of [false, true]) {
+  test(`manual ${view3d ? '3D' : '2D'} navigation interrupts follow`, async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, { ...MAP, view3d })
+    try {
+      await ui.resize({ columns: 80, rows: 40, in: 'map-hit' })
+      const idle = (await ui.find({ key: 'follow' }))?.text
+      expect(idle).toBeDefined()
+      for (const button of ['left', 'middle', 'right'] as const) {
+        await ui.press({ key: 'follow' })
+        await host.clock.settle()
+        await ui.redraw()
+        expect((await ui.find({ key: 'follow' }))?.text).not.toBe(idle)
+        await ui.pointer({ type: 'down', x: 20, y: 15, button, in: 'map-hit' })
+        await ui.pointer({ type: 'move', x: 30, y: 22, button, in: 'map-hit' })
+        await ui.pointer({ type: 'up', x: 30, y: 22, button, in: 'map-hit' })
+        await host.clock.settle()
+        await ui.redraw()
+        expect((await ui.find({ key: 'follow' }))?.text).toBe(idle)
+      }
+      await ui.press({ key: 'follow' })
+      await host.clock.settle()
+      await ui.redraw()
+      expect((await ui.find({ key: 'follow' }))?.text).not.toBe(idle)
+      await ui.pointer({ type: 'move', x: 20, y: 15, in: 'map-hit' })
+      await $.ui.scroll({
+        component: 'Pane',
+        requestId: 'brain-trail-v2',
+        offset: 0,
+        by: -1,
+        bodyRows: 40,
+        contentRows: 80,
+        origin: { kind: 'person' },
+        pointer: { column: 20, row: 15 },
+      })
+      await host.clock.settle()
+      await ui.redraw()
+      expect((await ui.find({ key: 'follow' }))?.text).toBe(idle)
+    } finally {
+      await ui.unmount()
+    }
+  })
+}

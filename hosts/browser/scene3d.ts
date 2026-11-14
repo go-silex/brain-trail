@@ -8,7 +8,40 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { brain } from '../../hooks/scene3d'
 import { kindColors } from '../../hooks/map'
 import { LOGOS } from '../../hooks/logos'
+import {
+  dragAction,
+  dragZoom,
+  heldBesides,
+  heldIn,
+  pointerButton,
+  wheelRows,
+  wheelZoom,
+  type DragAction,
+  type PointerButton,
+} from '../../hooks/pointer'
+import { ZOOM_MAX, ZOOM_MIN } from '../../hooks/spin'
 import type { Scene3dProps } from '../../types/view'
+
+type Pose = {
+  position: THREE.Vector3
+  target: THREE.Vector3
+  quaternion: THREE.Quaternion
+}
+// A press of the pointer on the scene. Mouse and pen drags are the scene's own (`action`);
+// touch turns and pans stay OrbitControls'. A drag goes on in stretches: `from` is the camera
+// the current one started from, at the pointer's (x, y); `wrote` the camera it last set, with
+// the pointer at `at`. `mixed`: another button joined the press, which is then never a click.
+type Press = {
+  pointerId: number
+  button: PointerButton
+  action?: DragAction
+  x: number
+  y: number
+  at: { x: number; y: number }
+  mixed: boolean
+  from?: Pose
+  wrote?: Pose
+}
 
 // A scene belongs to one mounted map, not to an individual render of the pane.
 export class WebGLScene {
@@ -42,7 +75,8 @@ export class WebGLScene {
   private labelItems: { element: HTMLElement; position: THREE.Vector3 }[] = []
   private hoverNames = true
   private adjusted = false
-  private autoPaused = false
+  // An OrbitControls touch turn or pan in progress: the spin waits for it, then resumes if it was on.
+  private gesturing = false
   private readonly observer: ResizeObserver
   private points?: THREE.Points
   private readonly halo = this.makeHalo()
@@ -57,7 +91,9 @@ export class WebGLScene {
   private frame = 0
   private width = 0
   private height = 0
-  private down?: { x: number; y: number }
+  private press?: Press
+  // the camera's distance for the whole picture: the zoom limits are relative to it, as on the SVG maps
+  private fitted = 1
   private openTimer?: number
   private tween?: {
     start: number
@@ -97,9 +133,22 @@ export class WebGLScene {
     this.controls.rotateSpeed = 0.55
     this.controls.enableZoom = false
     this.controls.screenSpacePanning = true
-    this.controls.addEventListener('start', this.manual)
+    // Mouse and pen drags follow the maps' shared policy (`drag`), whatever modifier is held:
+    // OrbitControls keeps touch and the spin, none of its button or modifier mappings.
+    this.controls.mouseButtons = { LEFT: null, MIDDLE: null, RIGHT: null }
+    this.controls.addEventListener('start', this.grab)
+    this.controls.addEventListener('end', this.release)
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown)
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp)
+    this.renderer.domElement.addEventListener(
+      'pointercancel',
+      this.pointerCancel,
+    )
+    this.renderer.domElement.addEventListener(
+      'lostpointercapture',
+      this.pointerCancel,
+    )
+    this.renderer.domElement.addEventListener('mousedown', this.mouseDown)
     this.renderer.domElement.addEventListener('pointermove', this.pointerMove)
     this.renderer.domElement.addEventListener('pointerleave', this.pointerLeave)
     this.renderer.domElement.addEventListener('dblclick', this.doubleClick)
@@ -132,7 +181,6 @@ export class WebGLScene {
     if (changedLayout) this.fit()
     const before = previous.state.cam3d,
       after = props.state.cam3d
-    if (before.spin !== after.spin) this.autoPaused = false
     if (before.yaw !== after.yaw) {
       const offset = this.camera.position.clone().sub(this.controls.target)
       offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), after.yaw - before.yaw)
@@ -140,10 +188,7 @@ export class WebGLScene {
       this.adjusted = true
     }
     if (before.zoom !== after.zoom && before.zoom > 0 && after.zoom > 0) {
-      this.camera.position
-        .sub(this.controls.target)
-        .multiplyScalar(before.zoom / after.zoom)
-        .add(this.controls.target)
+      this.zoomAbout(this.controls.target, before.zoom / after.zoom)
       this.adjusted = true
     }
     if (previous.state.zoomed && !props.state.zoomed && before === after)
@@ -656,6 +701,7 @@ export class WebGLScene {
     })
     this.controls.target.copy(target)
     this.camera.position.copy(target).addScaledVector(direction, distance)
+    this.fitted = distance
     this.camera.far = Math.max(30000, distance * 4)
     this.camera.updateProjectionMatrix()
     this.controls.update()
@@ -707,9 +753,16 @@ export class WebGLScene {
     this.hoverNames = enabled
     if (!enabled) this.pointerLeave()
   }
+  private grab = () => {
+    this.gesturing = true
+    this.manual()
+  }
+  private release = () => {
+    this.gesturing = false
+  }
+  // Moving the camera by hand stops following Claude; the spin choice stays the person's.
   private manual = () => {
     this.adjusted = true
-    this.autoPaused = true
     this.tween = undefined
     if (this.props.state.zoomed && !this.stoppingFollow) {
       this.stoppingFollow = true
@@ -720,9 +773,118 @@ export class WebGLScene {
         })
     }
   }
+  // A press ends once: on its button's release, a cancel or a lost capture, or, when that
+  // release was lost, at the next press, the first move or another button's release that no
+  // longer holds its button. Only its own release, never dragged nor chorded, is a click; a
+  // press that replaces another pointer's (a second finger) is chorded from the start.
   private pointerDown = (event: PointerEvent) => {
-    this.down = { x: event.clientX, y: event.clientY }
     this.renderer.domElement.focus()
+    const button = pointerButton(event.button)
+    if (button === undefined) return
+    // no autoscroll: the middle button zooms
+    if (button === 'middle') event.preventDefault()
+    this.press = {
+      pointerId: event.pointerId,
+      button,
+      action:
+        event.pointerType === 'touch' ? undefined : dragAction(button, true),
+      x: event.clientX,
+      y: event.clientY,
+      at: { x: event.clientX, y: event.clientY },
+      mixed:
+        this.press !== undefined && this.press.pointerId !== event.pointerId,
+    }
+    this.renderer.domElement.setPointerCapture(event.pointerId)
+  }
+  private pointerCancel = (event: PointerEvent) => {
+    if (this.press?.pointerId === event.pointerId) this.press = undefined
+  }
+  private mouseDown = (event: MouseEvent) => {
+    if (event.button === 1) event.preventDefault()
+  }
+  private pose(): Pose {
+    return {
+      position: this.camera.position.clone(),
+      target: this.controls.target.clone(),
+      quaternion: this.camera.quaternion.clone(),
+    }
+  }
+  // whether the camera left a pose, beyond rounding
+  private leftPose(pose: Pose) {
+    const near = (1e-6 * this.fitted) ** 2
+    return (
+      this.camera.position.distanceToSquared(pose.position) > near ||
+      this.controls.target.distanceToSquared(pose.target) > near
+    )
+  }
+  // A drag applies the shared policy to the camera its stretch started from, with the pointer's
+  // whole travel since then: left turns around the target, right pans, middle zooms on the
+  // middle of the view (up in, down out). The projection is the scene's own.
+  private drag(press: Press, event: PointerEvent) {
+    if (press.action === undefined) return
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    if (press.from === undefined) {
+      // a click until the pointer travels
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 5)
+        return
+      press.from = this.pose()
+      this.manual()
+    } else if (press.wrote !== undefined && this.leftPose(press.wrote)) {
+      // Something else moved the camera since the drag did (the wheel, a key, a button): the
+      // drag goes on from there, with the pointer's travel since it was last seen.
+      press.from = this.pose()
+      press.x = press.at.x
+      press.y = press.at.y
+    }
+    const from = press.from,
+      dx = event.clientX - press.x,
+      dy = event.clientY - press.y
+    const offset = from.position.clone().sub(from.target)
+    this.controls.target.copy(from.target)
+    if (press.action === 'orbit') {
+      // as OrbitControls turns: a full turn for the view's height over the rotate speed
+      const turn = (2 * Math.PI * this.controls.rotateSpeed) / rect.height
+      const s = new THREE.Spherical().setFromVector3(offset)
+      s.theta -= dx * turn
+      s.phi = Math.max(
+        this.controls.minPolarAngle,
+        Math.min(this.controls.maxPolarAngle, s.phi - dy * turn),
+      )
+      s.makeSafe()
+      this.camera.position.copy(from.target).add(offset.setFromSpherical(s))
+    } else if (press.action === 'pan') {
+      // the point at the target's depth stays under the pointer
+      const unit =
+        (2 *
+          offset.length() *
+          Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) /
+        rect.height
+      const move = new THREE.Vector3(-dx * unit, dy * unit, 0).applyQuaternion(
+        from.quaternion,
+      )
+      this.controls.target.add(move)
+      this.camera.position.copy(from.position).add(move)
+    } else {
+      this.camera.position.copy(from.position)
+      this.zoomAbout(from.target, dragZoom(dy / rect.height))
+    }
+    press.wrote = this.pose()
+    press.at = { x: event.clientX, y: event.clientY }
+  }
+  // Zooms by the shared factor `f` (> 1 out) around a point at the target's depth, which keeps
+  // its place on the screen. The distance to the target stays within the SVG maps' zoom limits,
+  // relative to the whole picture; a camera already beyond them only comes back.
+  private zoomAbout(point: THREE.Vector3, f: number) {
+    const distance = this.camera.position.distanceTo(this.controls.target)
+    if (!(distance > 0) || !Number.isFinite(f) || f === 1) return
+    const near = Math.min(this.fitted / ZOOM_MAX, distance),
+      far = Math.max(this.fitted / ZOOM_MIN, distance),
+      k = Math.max(near, Math.min(far, distance * f)) / distance
+    if (k === 1) return
+    const anchor = point.clone()
+    this.camera.position.sub(anchor).multiplyScalar(k).add(anchor)
+    this.controls.target.sub(anchor).multiplyScalar(k).add(anchor)
   }
   private pick(x: number, y: number) {
     if (!this.points) return undefined
@@ -742,7 +904,16 @@ export class WebGLScene {
     return this.ray.intersectObject(this.points)[0]?.index
   }
   private pointerMove = (event: PointerEvent) => {
-    if (this.down || !this.hoverNames) return
+    const press = this.press
+    if (press !== undefined && press.pointerId === event.pointerId) {
+      if (heldIn(press.button, event.buttons)) {
+        if (heldBesides(press.button, event.buttons)) press.mixed = true
+        this.drag(press, event)
+        return
+      }
+      this.press = undefined
+    }
+    if (this.press !== undefined || !this.hoverNames) return
     const n = this.pick(event.clientX, event.clientY)
     const path = n === undefined ? undefined : this.props.layout.files[n]?.[0]
     this.tip.hidden = path === undefined
@@ -759,9 +930,23 @@ export class WebGLScene {
     this.renderer.domElement.style.cursor = ''
   }
   private pointerUp = (event: PointerEvent) => {
-    const down = this.down
-    this.down = undefined
-    if (!down || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5)
+    const press = this.press
+    if (press === undefined || press.pointerId !== event.pointerId) return
+    // Another button came up: the press goes on while its own button is held; otherwise
+    // its release went unseen and the press ends here, without a click.
+    if (pointerButton(event.button) !== press.button) {
+      if (heldIn(press.button, event.buttons)) press.mixed = true
+      else this.press = undefined
+      return
+    }
+    this.press = undefined
+    // only a left click opens a note
+    if (
+      press.button !== 'left' ||
+      press.mixed ||
+      press.from !== undefined ||
+      Math.hypot(event.clientX - press.x, event.clientY - press.y) > 5
+    )
       return
     const n = this.pick(event.clientX, event.clientY)
     const path = n === undefined ? undefined : this.props.layout.files[n]?.[0]
@@ -791,24 +976,33 @@ export class WebGLScene {
       to: target.clone().addScaledVector(direction, 70),
     }
   }
+  // The wheel zooms by the shared factor around the point under the pointer, at the target's depth.
   private wheel = (event: WheelEvent) => {
     event.preventDefault()
-    this.manual()
+    const f = wheelZoom(wheelRows(event.deltaY, event.deltaMode))
+    if (f === 1) return
     const rect = this.renderer.domElement.getBoundingClientRect()
     if (!rect.width || !rect.height) return
+    this.manual()
+    this.camera.updateMatrixWorld()
     this.pointer.set(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
       (-(event.clientY - rect.top) / rect.height) * 2 + 1,
     )
     this.ray.setFromCamera(this.pointer, this.camera)
-    const distance = this.camera.position.distanceTo(this.controls.target)
-    const step =
-      ((-Math.sign(event.deltaY) * Math.min(Math.abs(event.deltaY), 120)) /
-        120) *
-      Math.max(18, Math.min(distance, 2400) * 0.16)
-    const move = this.ray.ray.direction.clone().multiplyScalar(step)
-    this.camera.position.add(move)
-    this.controls.target.add(move)
+    const forward = this.camera.getWorldDirection(new THREE.Vector3()),
+      depth = this.controls.target
+        .clone()
+        .sub(this.camera.position)
+        .dot(forward),
+      along = this.ray.ray.direction.dot(forward)
+    if (!(depth > 0) || !(along > 0)) return
+    this.zoomAbout(
+      this.ray.ray.origin
+        .clone()
+        .addScaledVector(this.ray.ray.direction, depth / along),
+      f,
+    )
   }
   private keyDown = (event: KeyboardEvent) => {
     if (
@@ -907,7 +1101,9 @@ export class WebGLScene {
     }
     this.controls.autoRotate =
       this.props.state.cam3d.spin &&
-      !this.autoPaused &&
+      !this.gesturing &&
+      this.press?.from === undefined &&
+      this.tween === undefined &&
       !this.props.state.zoomed &&
       !this.keys.size
     this.controls.autoRotateSpeed = 0.35
@@ -928,11 +1124,15 @@ export class WebGLScene {
     this.disposed = true
     cancelAnimationFrame(this.frame)
     this.observer.disconnect()
-    this.controls.removeEventListener('start', this.manual)
+    this.controls.removeEventListener('start', this.grab)
+    this.controls.removeEventListener('end', this.release)
     this.controls.dispose()
     const canvas = this.renderer.domElement
     canvas.removeEventListener('pointerdown', this.pointerDown)
     canvas.removeEventListener('pointerup', this.pointerUp)
+    canvas.removeEventListener('pointercancel', this.pointerCancel)
+    canvas.removeEventListener('lostpointercapture', this.pointerCancel)
+    canvas.removeEventListener('mousedown', this.mouseDown)
     canvas.removeEventListener('pointermove', this.pointerMove)
     canvas.removeEventListener('pointerleave', this.pointerLeave)
     canvas.removeEventListener('dblclick', this.doubleClick)

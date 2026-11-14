@@ -18,9 +18,11 @@ const FLUID = 2400
 const FIT_GLOW_LOG_MAX = 4
 const TAU = Math.PI * 2
 
-export type Cam = { yaw: number; pitch: number; zoom: number; spin: boolean; at: number }
-export const CAM0: Cam = { yaw: -0.6, pitch: 0.5, zoom: 1, spin: true, at: 0 }
+// `pan` moves the drawing on the screen's plane (SVG units), not the axis the brain turns around.
+export type Cam = { yaw: number; pitch: number; zoom: number; pan: { x: number; y: number }; spin: boolean; at: number }
+export const CAM0: Cam = { yaw: -0.6, pitch: 0.5, zoom: 1, pan: { x: 0, y: 0 }, spin: true, at: 0 }
 export const PITCH_MIN = 0.08, PITCH_MAX = 1.05
+export const ZOOM_MIN = 0.6, ZOOM_MAX = 12
 // the camera's turn at a given time: it keeps going between redraws
 export const yawAt = (c: Cam, now: number) => c.yaw + (c.spin ? (TAU * (now - c.at)) / SPIN_MS : 0)
 
@@ -32,16 +34,24 @@ const at = (u: number, v: number, phi: number, ce: number, se: number): [number,
 // how near the viewer it is: 1 in front, 0 at the back
 const nearness = (phi: number) => (1 - Math.sin(phi)) / 2
 
-export type SpinView = { vx: number; vy: number; vw: number; vh: number; px: number; yaw: number; ce: number; se: number; t: number; spinning: boolean }
+// What a drawing shows, so a gesture continues from it: `zoom` and `pan` as drawn (a followed note's
+// framing included), `focus`, the point a change of zoom alone keeps in place, and the width and
+// box aspect it was drawn for, so another camera can be framed the same way.
+export type SpinView = {
+  vx: number; vy: number; vw: number; vh: number; px: number; yaw: number; ce: number; se: number; t: number; spinning: boolean
+  zoom: number; pan: { x: number; y: number }; focus: { x: number; y: number }; follow: boolean
+  widthPx: number; aspect?: number
+}
 
+// How a drawing of L frames a camera (`cur`: the note Claude is on): the turn, the tilt and the box
+// drawSpin shows, without drawing it.
 // `aspect`: the height over the width of the box the host gives the drawing; absent, it takes its own fixed shape.
-export const drawSpin = (
-  L: Layout, T: Trail, P: Palette,
-  o: { widthPx: number; now: number; cam: Cam; follow: boolean; filesWord: string; outside: number; dark: boolean; aspect?: number },
+const frameSpin = (
+  L: Layout, cur: number | undefined,
+  o: { widthPx: number; now: number; cam: Cam; follow: boolean; aspect?: number },
 ) => {
   const B = brain(L)
   const { widthPx, now, cam } = o
-  const cur = T.moves.at(-1)?.n
   // following Claude: the note it is on turns to the front and the camera comes close
   const follow = o.follow && cur !== undefined
   const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, cam.pitch))
@@ -54,8 +64,10 @@ export const drawSpin = (
   const contentW = B.rMax * 1.98, contentTop = -(B.yMax * ce + B.rMax * se), contentBottom = B.rMax * se
   const aspect = 0.58
   let vw = Math.max(contentW, (contentBottom - contentTop) * 1.04 / aspect)
-  let cx = 0, cy = (contentTop + contentBottom) / 2
-  const zoom = follow ? Math.max(1.8, cam.zoom) : Math.max(0.6, Math.min(12, cam.zoom))
+  // the zoom keeps the picture's middle in place, moved by the pan, or the followed note
+  let ax = 0, ay = (contentTop + contentBottom) / 2
+  let cx = ax + cam.pan.x, cy = ay + cam.pan.y
+  const zoom = follow ? Math.max(1.8, cam.zoom) : Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.zoom))
   vw /= zoom
   if (follow) [cx, cy] = at(B.u[cur!]!, B.v[cur!]!, ang(cur!) + yaw, ce, se)
   let vh = vw * aspect
@@ -100,11 +112,34 @@ export const drawSpin = (
       left -= extra; right += extra
     }
     const centerX = (left + right) / 2, centerY = (top + bottom) / 2
-    const natural = { vx: (left - centerX) / zoom + (follow ? cx : centerX), vy: (top - centerY) / zoom + (follow ? cy : centerY) - head, vw: (right - left) / zoom, vh: (bottom - top) / zoom + head }
+    ax = centerX; ay = centerY
+    if (!follow) { cx = centerX + cam.pan.x; cy = centerY + cam.pan.y }
+    const natural = { vx: (left - centerX) / zoom + cx, vy: (top - centerY) / zoom + cy - head, vw: (right - left) / zoom, vh: (bottom - top) / zoom + head }
     titleX = natural.vx; titleY = natural.vy
     const fittedFrame = fitFrame(natural, o.aspect)
     ;({ vx, vy, vw, vh: H } = fittedFrame)
   }
+  const view: SpinView = {
+    vx, vy, vw, vh: H, px: vw / widthPx, yaw, ce, se, t: now, spinning,
+    zoom, pan: { x: cx - ax, y: cy - ay }, focus: { x: cx, y: cy }, follow, widthPx, aspect: o.aspect,
+  }
+  return { B, pitch, ce, se, spinning, ang, yaw, px, titleX, titleY, view }
+}
+
+// What a drawing like `like` (same width and box) shows for another camera, framed as drawSpin
+// frames it, so a gesture can go on from a camera that is not drawn yet: its turn, its tilt, its
+// zoom and its pan.
+export const spinViewFor = (L: Layout, like: SpinView, cam: Cam): SpinView =>
+  frameSpin(L, undefined, { widthPx: like.widthPx, now: cam.at, cam, follow: false, aspect: like.aspect }).view
+
+export const drawSpin = (
+  L: Layout, T: Trail, P: Palette,
+  o: { widthPx: number; now: number; cam: Cam; follow: boolean; filesWord: string; outside: number; dark: boolean; aspect?: number },
+) => {
+  const cur = T.moves.at(-1)?.n
+  const { B, pitch, ce, se, spinning, ang, yaw, px, titleX, titleY, view } = frameSpin(L, cur, o)
+  const { widthPx } = o
+  const { vx, vy, vw, vh: H } = view
   const heightPx = Math.round(widthPx * H / vw)
   const out: string[] = []
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vx)} ${f(vy)} ${f(vw)} ${f(H)}" ${o.aspect === undefined ? `width="${FLUID}" height="${Math.round(FLUID * H / vw)}"` : fitted} font-family="'General Sans',ui-sans-serif,system-ui,sans-serif">`)
@@ -250,14 +285,26 @@ export const drawSpin = (
   const title = fitTitle(L.title.toUpperCase(), `${(root?.n ?? N).toLocaleString('en-US')} ${o.filesWord.toUpperCase()}${more}`, widthPx, 320)
   if (title !== '') out.push(`<text x="${f(titleX + 12 * px)}" y="${f(titleY + 22 * px)}" font-size="${f(11 * px)}" font-family="ui-monospace,monospace" letter-spacing=".04em" fill="${P.dim}" stroke="${P.bg}" stroke-width="${f(4 * px)}" paint-order="stroke">${esc(title)}</text>`)
   out.push('</svg>')
-  const view: SpinView = { vx, vy, vw, vh: H, px: vw / widthPx, yaw, ce, se, t: now, spinning }
   return { svg: out.join(''), heightPx, view }
 }
+
+// the turn a drawing shows at a given moment (the brain keeps turning between redraws)
+export const yawOf = (view: SpinView, now: number) => view.spinning ? view.yaw + (TAU * (now - view.t)) / SPIN_MS : view.yaw
+
+// The zoom and pan that scale the drawn frame by `f` (under 1 = closer) around its point (fx, fy).
+export const zoomSpin = (view: SpinView, fx: number, fy: number, f: number) => {
+  const zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.zoom / f)), k = view.zoom / zoom
+  const X = view.vx + fx * view.vw, Y = view.vy + fy * view.vh
+  return { zoom, pan: { x: view.pan.x + (X - view.focus.x) * (1 - k), y: view.pan.y + (Y - view.focus.y) * (1 - k) } }
+}
+
+// the pan that moves the drawn frame by (dx, dy) of its size: the picture follows the pointer
+export const panSpin = (view: SpinView, dx: number, dy: number) => ({ x: view.pan.x - dx * view.vw, y: view.pan.y - dy * view.vh })
 
 // the note under the pointer at a given moment (the brain keeps turning), touched notes first
 export const pickSpin = (L: Layout, view: SpinView, now: number, fx: number, fy: number, touched: Set<number>) => {
   const B = brain(L)
-  const yaw = view.spinning ? view.yaw + (TAU * (now - view.t)) / SPIN_MS : view.yaw
+  const yaw = yawOf(view, now)
   const X = view.vx + fx * view.vw, Y = view.vy + fy * view.vh
   let best: number | undefined, bd = Infinity
   const scan = (n: number, reach: number) => {

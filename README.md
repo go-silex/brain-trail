@@ -96,7 +96,20 @@ Your folder as one disc: one circle per folder, one dot per file. Every file tha
 
 The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc with their logo and their call count. The legend under the map counts each colour; click it to list the files.
 
-Follow the session as it works, replay it step by step, and zoom with the wheel. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
+Follow the session as it works and replay it step by step. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
+
+These navigation gestures are shared by the pane and browser:
+
+| Gesture | 2D | 3D |
+| --- | --- | --- |
+| Wheel | Zoom toward the pointer, when the host supplies wheel input | Zoom toward the pointer, when the host supplies wheel input |
+| Middle-button vertical drag | Zoom out when dragging down, in when dragging up | Same |
+| Left-button drag | Move the map | Turn the scene |
+| Right-button drag | Move the map | Move the scene without turning it |
+
+Only a left click opens a note; pressing several mouse buttons together never opens one. Wheel zoom during a drag is retained when the drag continues. Manual navigation stops following Claude; a drag pauses automatic rotation and restores the prior rotation choice when it ends. The **⤢** control in the 3D toolbar fits the scene back into view. Resetting either view preserves the other view's camera.
+
+**Claude Desktop wheel limitation:** some Desktop versions report only scrolling that already moved the pane, without a wheel pointer. A fitted, fixed-height map cannot receive wheel zoom through that route. Use the middle-button drag or **+ / −** there; the browser supports wheel zoom directly. Brain Trail does not add an invisible scrolling area to work around this host limitation.
 
 Browser 3D adapts to the theme: dark mode uses restrained ambient connections and activity glows; light mode retains its point rendering without bloom.
 
@@ -115,7 +128,9 @@ behavior to match the allocated paint height.
 The map image stretches across its allocated paint area on Desktop.
 Fitted 3D activity glows are bounded so new reads and writes do not move the
 camera. Hiding the map during a drag preserves its final orientation and
-restores rotation only if it was running before the drag.
+restores rotation only if it was running before the drag. Version 2.3.2 resets
+the saved 3D camera once when introducing screen-plane panning; session history
+and opening preferences are preserved.
 
 Inside an Obsidian vault, the map shows the whole vault, even when the session started in a sub-folder.
 

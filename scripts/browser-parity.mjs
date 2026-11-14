@@ -180,8 +180,8 @@ export async function captureBrowserScene(
     }
     await page.locator('button[data-key="spin"]').click()
     const canvas = await page.locator('.bt-scene3d canvas').elementHandle()
-    const scanFiles = () =>
-      canvas.evaluate((element) => {
+    const scanFiles = (target = canvas) =>
+      target.evaluate((element) => {
         const rect = element.getBoundingClientRect()
         const tip = element.parentElement?.querySelector('.bt-tip')
         const found = new Map()
@@ -427,8 +427,8 @@ export async function captureBrowserScene(
           const parent = label.parentElement.getBoundingClientRect()
           return {
             text: label.textContent,
-            left: label.style.left,
-            top: label.style.top,
+            left: label.hidden ? null : label.style.left,
+            top: label.hidden ? null : label.style.top,
             parent: [parent.x, parent.y, parent.width, parent.height],
             hidden: label.hidden,
           }
@@ -469,7 +469,7 @@ export async function captureBrowserScene(
       )
     }
     const projectionBefore = await projected()
-    if (projectionBefore.length < 2)
+    if (projectionBefore.filter((label) => !label.hidden).length < 2)
       throw new Error(
         'WebGL camera proof needs at least two projected landmarks',
       )
@@ -718,6 +718,122 @@ export async function captureBrowserScene(
     await page.waitForTimeout(100)
     if (errors.length) throw new Error(errors.join('; '))
     const png = await page.screenshot({ type: 'png', scale: 'css' })
+    // Exercise the real Chromium touch boundary after the visual screenshot: the
+    // captured host feed refuses commands, but requests still expose attempted opens.
+    const touchCanvas = await page.locator('.bt-scene3d canvas').elementHandle()
+    const touchFiles = await scanFiles(touchCanvas)
+    const touchTarget = touchFiles.find(([name]) => name === 'notes/a.md')
+    if (!touchTarget) throw new Error('touch proof needs a pickable file')
+    const [, point] = touchTarget
+    const touchBounds = await touchCanvas.boundingBox()
+    if (!touchBounds) throw new Error('touch proof needs canvas bounds')
+    const other = {
+      x:
+        point.x + (point.x + 40 < touchBounds.x + touchBounds.width ? 40 : -40),
+      y: point.y,
+      id: 1,
+    }
+    const file = { x: point.x, y: point.y, id: 2 }
+    if (
+      other.x <= touchBounds.x ||
+      other.x >= touchBounds.x + touchBounds.width
+    )
+      throw new Error('touch proof needs room for two distinct contacts')
+    const touchEvents = []
+    await page.exposeFunction('__brainTrailTouchProof', (event) =>
+      touchEvents.push(event),
+    )
+    await touchCanvas.evaluate((element) => {
+      for (const type of ['pointerdown', 'pointerup'])
+        element.addEventListener(
+          type,
+          (event) => {
+            if (event.pointerType === 'touch')
+              void window.__brainTrailTouchProof({
+                type: event.type,
+                pointerId: event.pointerId,
+                trusted: event.isTrusted,
+              })
+          },
+          true,
+        )
+    })
+    const opens = []
+    const isOpen = (request) => {
+      if (new URL(request.url()).pathname !== '/command') return false
+      const command = request.postDataJSON()?.command
+      return (
+        command?.kind === 'open' ||
+        (command?.kind === 'view' &&
+          command.intent?.kind === 'preview' &&
+          command.intent.ref !== null)
+      )
+    }
+    page.on('request', (request) => {
+      if (isOpen(request)) opens.push(request.postDataJSON().command)
+    })
+    const cdp = await context.newCDPSession(page)
+    await cdp.send('Emulation.setTouchEmulationEnabled', {
+      enabled: true,
+      maxTouchPoints: 2,
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [other],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [other, file],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [other],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [],
+    })
+    await page.clock.runFor(350)
+    await page.waitForTimeout(100)
+    if (
+      touchEvents.length !== 4 ||
+      touchEvents.some((event) => !event.trusted) ||
+      touchEvents[0].type !== 'pointerdown' ||
+      touchEvents[1].type !== 'pointerdown' ||
+      touchEvents[2].type !== 'pointerup' ||
+      touchEvents[3].type !== 'pointerup' ||
+      touchEvents[0].pointerId !== touchEvents[2].pointerId ||
+      touchEvents[1].pointerId !== touchEvents[3].pointerId ||
+      touchEvents[0].pointerId === touchEvents[1].pointerId
+    )
+      throw new Error(
+        `touch proof did not deliver trusted first-contact-first release: ${JSON.stringify(touchEvents)}`,
+      )
+    if (opens.length !== 0)
+      throw new Error(
+        `two-finger gesture attempted to open a file: ${JSON.stringify(opens)}`,
+      )
+    const positiveOpen = page.waitForEvent('request', {
+      predicate: isOpen,
+      timeout: 5000,
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [file],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [],
+    })
+    await page.clock.runFor(350)
+    const positive = (await positiveOpen).postDataJSON().command
+    const openedPath =
+      positive.kind === 'open' ? positive.ref?.p : positive.intent?.ref?.p
+    if (openedPath !== 'notes/a.md')
+      throw new Error(
+        `single touch opened the wrong file: ${JSON.stringify(positive)}`,
+      )
+    await cdp.detach()
     for (const client of clients) client.end()
     await page
       .getByText('Connection lost. Reopen from the host.')

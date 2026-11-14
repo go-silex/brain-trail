@@ -1,4 +1,5 @@
 import type { On } from 'claude-code'
+import type { Mounted } from 'claude-code/testing'
 import { expect, test } from 'claude-code/testing'
 
 import { mapSource, viewBoxOf } from './fixtures/mounted'
@@ -40,6 +41,40 @@ const circlesIn = (
   return out
 }
 
+const fileCell = async (
+  ui: Mounted<'desktop' | 'terminal', 'Pane' | 'AbovePrompt'>,
+) => {
+  const columns = 160
+  const rows = 80
+  await ui.resize({ columns, rows, in: 'map-hit' })
+  const source = (await mapSource(ui)) ?? ''
+  const frame = viewBoxOf(source)
+  expect(frame).toBeDefined()
+  for (const circle of circlesIn(source, frame!)) {
+    const cell = {
+      x: Math.min(
+        columns - 1,
+        Math.max(
+          0,
+          Math.round(((circle.x - frame!.x) / frame!.w) * columns - 0.5),
+        ),
+      ),
+      y: Math.min(
+        rows - 1,
+        Math.max(
+          0,
+          Math.round(((circle.y - frame!.y) / frame!.h) * rows - 0.5),
+        ),
+      ),
+    }
+    const fine = { x: cell.x + 0.5, y: cell.y + 0.5 }
+    await ui.pointer({ type: 'move', ...cell, fine, in: 'map-hit' })
+    const tip = (await ui.find({ type: 'Text', in: 'map-hit' }))?.text.trim()
+    if (tip) return { cell, fine, tip }
+  }
+  throw new Error('No file dot found in the mounted map')
+}
+
 test(
   'a map dot opens its selected file in preview and a drag pans',
   { timeoutMs: 20_000 },
@@ -56,53 +91,14 @@ test(
       )
     })
     const { ui, host } = await mountReady($, on, MAP)
-    await ui.press({ key: 'settings' })
-    await ui.redraw()
-    await ui.press({ key: 'openMd-preview' })
-    await ui.redraw()
-    await ui.press({ key: 'openOther-preview' })
-    await ui.redraw()
-    await ui.press({ key: 't-map' })
-    await ui.redraw()
-    const columns = 160
-    const rows = 80
-    await ui.resize({ columns, rows, in: 'map-hit' })
-    const source = (await mapSource(ui)) ?? ''
-    const box = viewBoxOf(source)
-    expect(box).toBeDefined()
-    const frame = box!
-    const cellAt = (mx: number, my: number) => ({
-      x: Math.min(
-        columns - 1,
-        Math.max(0, Math.round(((mx - frame.x) / frame.w) * columns - 0.5)),
-      ),
-      y: Math.min(
-        rows - 1,
-        Math.max(0, Math.round(((my - frame.y) / frame.h) * rows - 0.5)),
-      ),
+    host.seed('settings', {
+      openMd: 'preview',
+      openOther: 'preview',
+      hover: true,
+      band: true,
     })
-    let tip: string | undefined
-    let cell = { x: 0, y: 0 }
-    for (const circle of circlesIn(source, frame)) {
-      cell = cellAt(circle.x, circle.y)
-      const fine = { x: cell.x + 0.5, y: cell.y + 0.5 }
-      await ui.pointer({
-        type: 'move',
-        x: cell.x,
-        y: cell.y,
-        fine,
-        in: 'map-hit',
-      })
-      const shown = (
-        await ui.find({ type: 'Text', in: 'map-hit' })
-      )?.text.trim()
-      if (shown !== undefined && shown !== '') {
-        tip = shown
-        break
-      }
-    }
-    expect(tip).toBeDefined()
-    const fine = { x: cell.x + 0.5, y: cell.y + 0.5 }
+    await ui.redraw()
+    const { cell, fine, tip } = await fileCell(ui)
     await ui.pointer({
       type: 'down',
       x: cell.x,
@@ -128,7 +124,7 @@ test(
     expect(await ui.find({ key: 'preview-back' })).toBeDefined()
     await ui.press({ key: 't-map' })
     await ui.redraw()
-    await ui.resize({ columns, rows, in: 'map-hit' })
+    await ui.resize({ columns: 160, rows: 80, in: 'map-hit' })
 
     const before = viewBoxOf(await mapSource(ui))
     await ui.pointer({
@@ -155,6 +151,7 @@ test(
       fine: { x: 20.5, y: 8.5 },
       in: 'map-hit',
     })
+    await ui.redraw()
     const after = viewBoxOf(await mapSource(ui))
     expect(before).toBeDefined()
     expect(after).toBeDefined()
@@ -162,3 +159,65 @@ test(
     await ui.unmount()
   },
 )
+
+test('middle and right clicks on a map file never open it', async ($, on: On) => {
+  const { ui, host } = await mountReady($, on, MAP)
+  try {
+    host.seed('settings', {
+      openMd: 'preview',
+      openOther: 'preview',
+      hover: true,
+      band: true,
+    })
+    await ui.redraw()
+    const { cell, fine, tip } = await fileCell(ui)
+    await ui.pointer({ type: 'move', ...cell, fine, in: 'map-hit' })
+    expect((await ui.find({ type: 'Text', in: 'map-hit' }))?.text.trim()).toBe(
+      tip,
+    )
+    for (const button of ['middle', 'right'] as const) {
+      await ui.pointer({ type: 'down', ...cell, button, fine, in: 'map-hit' })
+      await ui.pointer({ type: 'up', ...cell, button, fine, in: 'map-hit' })
+      await host.clock.settle()
+      await ui.redraw()
+      expect(await ui.find({ key: 'map-hit' })).toBeDefined()
+      expect(host.readFiles).toHaveLength(0)
+      expect(host.preparedFiles).toHaveLength(0)
+      expect(host.opened).toHaveLength(0)
+    }
+    await ui.pointer({ type: 'move', ...cell, fine, in: 'map-hit' })
+    expect((await ui.find({ type: 'Text', in: 'map-hit' }))?.text.trim()).toBe(
+      tip,
+    )
+    await ui.pointer({
+      type: 'down',
+      ...cell,
+      button: 'left',
+      fine,
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'up',
+      ...cell,
+      button: 'right',
+      fine,
+      in: 'map-hit',
+    })
+    await ui.pointer({
+      type: 'up',
+      ...cell,
+      button: 'left',
+      fine,
+      in: 'map-hit',
+    })
+    await host.clock.settle()
+    await ui.redraw()
+    expect(await ui.find({ key: 'map-hit' })).toBeDefined()
+    expect(host.readFiles).toHaveLength(0)
+    expect(host.preparedFiles).toHaveLength(0)
+    expect(host.opened).toHaveLength(0)
+  } finally {
+    host.disconnectRelay()
+    await ui.unmount()
+  }
+})

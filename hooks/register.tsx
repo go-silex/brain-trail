@@ -47,7 +47,7 @@ const playA = atom({ plugin: 'brain-trail-v2', key: 'play' } as const, { step: n
 let playTimer: { cancel: () => void } | undefined
 // the map in 3D inside the pane (the 2D map is the default), and its camera: turn, height, zoom, turning by itself or not
 const view3dA = atom({ plugin: 'brain-trail-v2', key: 'view3d' } as const, false)
-const cam3dA = atom({ plugin: 'brain-trail-v2', key: 'cam3d' } as const, CAM0 as Cam, { shape: 'cam3d-1' })
+const cam3dA = atom({ plugin: 'brain-trail-v2', key: 'cam3d' } as const, CAM0 as Cam, { shape: 'cam3d-2' })
 let lastSpin: { view: SpinView; L: Layout; touched: Set<number> } | undefined
 // a file read inside the pane (the « Preview in Brain Trail » choice), or none
 const previewA = atom({ plugin: 'brain-trail-v2', key: 'preview' } as const, null as { p: string; out?: boolean } | null, { shape: 'preview-1' })
@@ -433,12 +433,12 @@ const nativeIntent = async ($: EngineInterface, intent: ViewIntent) => {
     await setShared($, next)
     if (timerEffect(intent) !== 'none') syncReplayClock($, next.play.playing)
     // Apply only surface-local effects here; shared fields were reduced above.
-    for (const step of plan(intent, { now: 0, frames: drawnFrames() })) {
+    for (const step of plan(intent, { now: 0, frames: drawnFrames(), view3d: await read($, view3dA) })) {
       if (step.key !== 'preview' && step.key !== 'zoomed' && step.key !== 'play') await applyStep($, step)
     }
   } else {
-    const now = intent.kind === 'turn-3d' || intent.kind === 'spin-3d' ? await $.clock.now() : 0
-    for (const step of plan(intent, { now, frames: drawnFrames() })) await applyStep($, step)
+    const now = intent.kind === 'turn-3d' || intent.kind === 'spin-3d' || intent.kind === 'zoom-3d' ? await $.clock.now() : 0
+    for (const step of plan(intent, { now, frames: drawnFrames(), view3d: await read($, view3dA) })) await applyStep($, step)
   }
   queuePublish($)
   })
@@ -1011,7 +1011,7 @@ export const register: Register = (on, options) => {
     return { props: { tip: result.tip, ...hitBox } }
   }).catch(($, e, next) => next(e))
 
-  // the wheel over the map zooms it, around the pointer in 2D; elsewhere in the pane it scrolls as usual
+  // the wheel over the map zooms it toward the pointer the map last reported; elsewhere in the pane it scrolls as usual
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.origin.kind === 'person' && e.by !== 0 && bodyWindow !== undefined && e.contentRows === e.bodyRows && e.bodyRows === bodyWindow.paneRows && (await read($, tabA)) === bodyWindow.tab) {
       const by = Math.abs(e.by) >= e.bodyRows ? Math.sign(e.by) * Math.max(1, bodyWindow.viewport) : e.by
@@ -1020,10 +1020,15 @@ export const register: Register = (on, options) => {
     }
     if (!mapVisible || e.origin.kind !== 'person' || e.pointer === undefined || gesture.hover === undefined || e.by === 0) return next(e)
     if ((await read($, tabA)) !== 'map') return next(e)
+    const view3d = await read($, view3dA), now = await $.clock.now(), at = gesture.hover
+    if (at === undefined) return next(e)
+    // The memory changes here, in the order the pointer's messages came: a press in progress
+    // goes on from what the wheel made.
+    const result = mapWheel(e.by, view3d, at, gesture, drawnFrames(), now)
+    gesture = result.memory
     await serial(async () => {
-      const steps = mapWheel(e.by, await read($, view3dA), gesture.hover!, drawnFrames())
       let sharedChanged = false
-      for (const step of steps) {
+      for (const step of result.steps) {
         if (step.key === 'zoomed') {
           const prior = await read($, zoomed), nextZoomed = step.next(prior)
           if (nextZoomed !== prior) { await update($, zoomed, () => nextZoomed); sharedChanged = true }

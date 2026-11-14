@@ -183,19 +183,25 @@ export function startPage(
       const result = await command({ kind: 'view', intent: i })
       if (result === undefined) return
       apply(
-        plan(i, { now: Date.now(), frames }).filter(
+        plan(i, { now: Date.now(), frames, view3d: state.view3d }).filter(
           (step) =>
             step.key !== 'zoomed' &&
             step.key !== 'play' &&
             step.key !== 'preview',
         ),
       )
-      if (i.kind === 'whole' || (i.kind === 'follow' && i.following))
-        dom.resetScene()
       render()
+      // after the scene took the new props (a zoom change scales its camera): it fits the whole
+      // brain again, whatever its own camera did, even when the props did not change; a reset
+      // of the 2D map leaves the 3D scene's camera alone
+      if (
+        (i.kind === 'whole' && state.view3d) ||
+        (i.kind === 'follow' && i.following)
+      )
+        dom.resetScene()
       return
     }
-    const steps = plan(i, { now: Date.now(), frames })
+    const steps = plan(i, { now: Date.now(), frames, view3d: state.view3d })
     if (steps.some((step) => step.key === 'zoomed') && state.zoomed) {
       if (
         (await command({ kind: 'view', intent: { kind: 'whole' } })) ===
@@ -314,7 +320,16 @@ export function startPage(
     },
     wheel: (by, fx, fy) => {
       if (ended || state.tab !== 'map') return false
-      const steps = mapWheel(by, state.view3d, { fx, fy }, frames)
+      const result = mapWheel(
+        by,
+        state.view3d,
+        { fx, fy },
+        memory,
+        frames,
+        Date.now(),
+      )
+      memory = result.memory
+      const steps = result.steps
       if (!steps.length) return false
       if (steps.some((step) => step.key === 'zoomed') && state.zoomed)
         void command({ kind: 'view', intent: { kind: 'whole' } })
