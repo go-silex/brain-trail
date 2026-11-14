@@ -873,16 +873,6 @@ export function registerCapture(
           handle = file.id
           if (!valid()) return refusal('stale-generation')
           if (!command.ref.out && !file.inside) return refusal('forbidden')
-          if (!file.inside || command.kind === 'open') {
-            if (!context.hasUI) return refusal('forbidden')
-            const app = command.kind === 'open' ? ` with ${command.app}` : ''
-            const approved = await context.ui.confirm(
-              'Brain Trail file access',
-              `${command.kind === 'open' ? 'Open' : 'Preview'} ${file.path}${app}?`,
-            )
-            if (!valid()) return refusal('stale-generation')
-            if (approved !== true) return refusal('forbidden')
-          }
           if (command.kind === 'preview-read') {
             const text = await authority.readFile(file.id)
             if (!valid()) return refusal('stale-generation')

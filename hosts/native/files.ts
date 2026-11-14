@@ -1,4 +1,3 @@
-import type { EngineInterface } from 'claude-code'
 import type { PreviewRef } from '../../types/model'
 import type { RelayClient } from '../relay/client'
 
@@ -11,9 +10,8 @@ export type FileAuthority = {
   apps: readonly string[]
 }
 
-/** Resolve a session-owned reference, hold it across consent and the effect, then release it. */
+/** Resolve a session-owned reference, hold it across the effect, then release it. */
 export async function withNativeFile<T>(
-  $: EngineInterface,
   relay: RelayClient,
   authority: FileAuthority,
   ref: PreviewRef,
@@ -39,18 +37,7 @@ export async function withNativeFile<T>(
   const held = await relay.prepareFile(authority.root, path)
   try {
     await current()
-    if (action.kind === 'open' || !held.inside) {
-      if ((await $.session.surfaces()).length === 0)
-        throw new Error('forbidden')
-      await current()
-      const question =
-        action.kind === 'open'
-          ? `Open ${held.path} with ${action.app === 'default' ? 'the default application' : action.app}?`
-          : `Preview file outside the workspace: ${held.path}?`
-      const answer = await $.ui.ask(question, ['Allow', 'Deny']).catch(() => '')
-      await current()
-      if (answer !== 'Allow') throw new Error('forbidden')
-    }
+    if (!ref.out && !held.inside) throw new Error('forbidden')
     if (!(await relay.verifyFile(held.id))) throw new Error('forbidden')
     await current()
     const value = await use(held.id)

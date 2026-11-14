@@ -572,7 +572,7 @@ const knownRef = async ($: EngineInterface, ref: { p: string; out?: boolean }) =
 const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: string; out?: boolean }, action: { kind: 'preview' } | { kind: 'open'; app: string }, use: (client: RelayClient, id: string) => Promise<T>): Promise<T> => {
   if (!relay || !I) throw new Error('forbidden')
   const client = relay
-  return withNativeFile($, client, { root: I.root, generation: expected, refreshGeneration: () => checkSession($), currentGeneration: () => generation, known: candidate => knownRef($, candidate), apps: await installedApps($) }, ref, action, id => use(client, id))
+  return withNativeFile(client, { root: I.root, generation: expected, refreshGeneration: () => checkSession($), currentGeneration: () => generation, known: candidate => knownRef($, candidate), apps: await installedApps($) }, ref, action, id => use(client, id))
 }
 const invalidateTrail = ($: EngineInterface) => {
   generation++; revision = 0; lastLayout = undefined; browserPreview = undefined; breakdown = undefined

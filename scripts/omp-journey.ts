@@ -403,7 +403,11 @@ async function until<T>(
     ) => {
       const response = await post(generation, command)
       assert.equal(response.status, 200)
-      assert.deepEqual(await response.json(), { ok: false, error })
+      assert.deepEqual(
+        await response.json(),
+        { ok: false, error },
+        JSON.stringify(command),
+      )
     }
     const succeeded = async (generation: number, command: object) => {
       const response = await post(generation, command)
@@ -775,11 +779,6 @@ async function until<T>(
     )
     await refused(
       generation,
-      { kind: 'preview-read', ref: { p: outside, out: true } },
-      'forbidden',
-    )
-    await refused(
-      generation,
       { kind: 'preview-read', ref: { p: outsideDirectory, out: true } },
       'forbidden',
     )
@@ -853,6 +852,15 @@ async function until<T>(
         : undefined
     }, changed)
     assert.equal(outsideHistory.generation, generation)
+    const outsidePreview = await post(generation, {
+      kind: 'preview-read',
+      ref: { p: outside, out: true },
+    })
+    assert.equal(outsidePreview.status, 200)
+    assert.deepEqual(await outsidePreview.json(), {
+      ok: true,
+      text: 'outside secret',
+    })
     await succeeded(generation, {
       kind: 'view',
       intent: { kind: 'preview', ref: { p: outside, out: true } },
@@ -866,7 +874,7 @@ async function until<T>(
     await page
       .locator('[data-key="preview-back"]')
       .waitFor({ state: 'visible' })
-    await page.getByText(/cannot be read|impossible de lire/i).waitFor({
+    await page.getByText('outside secret', { exact: false }).waitFor({
       state: 'visible',
     })
     await page.locator('[data-key="preview-back"]').click()
@@ -922,9 +930,19 @@ async function until<T>(
     )
     await refused(generation, { kind: 'refresh-meter' }, 'stale-generation')
     generation = outsideResumed.generation
+    // Authority follows the known path, not its historical target.
+    const replacedPreview = await post(generation, {
+      kind: 'preview-read',
+      ref: { p: outside, out: true },
+    })
+    assert.equal(replacedPreview.status, 200)
+    assert.deepEqual(await replacedPreview.json(), {
+      ok: true,
+      text: canaryText,
+    })
     await refused(
       generation,
-      { kind: 'preview-read', ref: { p: outside, out: true } },
+      { kind: 'preview-read', ref: { p: canary, out: true } },
       'forbidden',
     )
     await succeeded(generation, { kind: 'clear-trail' })
