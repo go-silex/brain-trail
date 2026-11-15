@@ -27,7 +27,6 @@ import {
   decideViewChanges,
   proofFingerprint,
 } from './view-changes.mjs'
-import { probeNativeMapLayout } from './native-map-layout.mjs'
 import { captureBrowserScene } from './browser-parity.mjs'
 import { fixtureInputProblem } from './view-input.mjs'
 
@@ -62,10 +61,6 @@ const THEME_BG = { dark: '#0b0e10', light: '#eef2f4' }
 const THREE_PREFIX = 'https://cdn.jsdelivr.net/npm/three@0.160.0/'
 const THREE_MODULE = `${THREE_PREFIX}build/three.module.js`
 
-const NATIVE_LAYOUT_CASES = new Set([
-  'pane-map-desktop-dark-en',
-  'inline3d-desktop-dark-en',
-])
 const LIMIT =
   'Complete SDK descriptions plus SVG and browser proof is not actual native Claude Desktop pixel capture on Linux.'
 const temps = []
@@ -96,7 +91,8 @@ const main = async () => {
       'Historical scene dependencies are served locally from the pinned Three package; its remote font stylesheet is replaced with an empty stylesheet.',
       'SVG HTML only frames the production SVG on the fixture theme background. It is not a native UI replica and is not a desktop layout.',
       'SVG proof captures one frame: CSS animations are materialized at 1600 ms and cancelled; SMIL is paused at 1.6 seconds. It does not prove motion parity.',
-      'Primary proof compares native trees, SVG source and viewport. Exact declared tree/SVG proofs may be approved; browser execution and operational failures remain strict. Raster differences are diagnostic.',
+      'Band cases compare native trees, SVG source and viewport. Browser cases compare historical and candidate browser execution, not retired native pane trees. Exact declared tree/SVG proofs may be approved; operational failures remain strict. Raster differences are diagnostic.',
+      'Loading, failed, empty and coach-refusal browser presentation probes use synthetic snapshot variants derived from the captured SDK feed; they do not prove host command success.',
       'Numeric press.handle values are canonicalized; presence and type remain significant. Svg props.source is replaced with an ordered slot before the tree compare.',
     ],
     baseline: null,
@@ -318,7 +314,6 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
     const left = baselineCases.get(item.id)
     const right = candidateCases.get(item.id)
     return (
-      NATIVE_LAYOUT_CASES.has(item.id) ||
       left?.svgs.length ||
       right?.svgs.length ||
       browserArtifacts(left) ||
@@ -373,7 +368,7 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
       await mkdir(semanticDir, { recursive: true })
       await writeFile(
         path.join(semanticDir, 'semantic.test.tsx'),
-        caseWrapper(semanticScenario.id, true),
+        caseWrapper(semanticScenario.id, true, true),
       )
       const run = await runNative(
         'candidate-semantic',
@@ -671,21 +666,38 @@ const validateManifest = (cases) => {
     if (seen.has(item.id)) throw new Error(`duplicate manifest id ${item.id}`)
     seen.add(item.id)
   }
+  for (const surface of ['desktop', 'terminal']) {
+    for (const theme of ['dark', 'light'])
+      for (const lang of ['en', 'fr'])
+        if (!seen.has(`band-${surface}-${theme}-${lang}`))
+          throw new Error(`manifest missing band ${surface}/${theme}/${lang}`)
+    if (!seen.has(`band-meter-unavailable-${surface}-dark-en`))
+      throw new Error(`manifest missing unavailable meter band ${surface}`)
+  }
+  for (const theme of ['dark', 'light'])
+    for (const lang of ['en', 'fr'])
+      if (!seen.has(`browser3d-desktop-${theme}-${lang}`))
+        throw new Error(`manifest missing browser ${theme}/${lang}`)
 }
 
 const installWrappers = async (baselineRoot, candidateRoot, cases) => {
-  const files = cases.map((item, index) => ({
-    name: `${safeName(item.id, index)}.test.tsx`,
-    source: caseWrapper(item.id),
-  }))
-  const body = files.map((file) => file.source).join('')
-  for (const isolated of [baselineRoot, candidateRoot]) {
+  const bodies = []
+  for (const [isolated, candidate] of [
+    [baselineRoot, false],
+    [candidateRoot, true],
+  ]) {
     const dir = path.join(isolated, 'tests', 'parity-cases')
     await mkdir(dir, { recursive: true })
-    for (const file of files)
-      await writeFile(path.join(dir, file.name), file.source)
+    for (const [index, item] of cases.entries()) {
+      const source = caseWrapper(item.id, false, candidate)
+      bodies.push(source)
+      await writeFile(
+        path.join(dir, `${safeName(item.id, index)}.test.tsx`),
+        source,
+      )
+    }
   }
-  return body
+  return bodies.join('')
 }
 
 const manifestWrapper = () => `import { test } from 'claude-code/testing'
@@ -702,6 +714,7 @@ test('view-parity manifest', { timeoutMs: ${TEST_TIMEOUT_MS} }, () => {
 const caseWrapper = (
   id,
   semantic = false,
+  candidate = false,
 ) => `import { test } from 'claude-code/testing'
 import { captureView, viewCases } from '../fixtures/views'
 
@@ -710,7 +723,7 @@ const scenario = viewCases.find((item) => item && item.id === id)
 if (!scenario) throw new Error('view-parity wrapper missing scenario ' + id)
 
 test(id, { timeoutMs: ${TEST_TIMEOUT_MS} }, async ($, on) => {
-  const captured = await captureView($, on, scenario${semantic ? ', true' : ''})
+  const captured = await captureView($, on, scenario, ${semantic}, ${candidate})
   console.log(${JSON.stringify(MARK_CASE)} + JSON.stringify(captured))
 })
 `
@@ -932,89 +945,91 @@ const compareCase = async (
     path.join(dir, 'tree.candidate.json'),
     `${JSON.stringify(candidate.tree, null, 2)}\n`,
   )
-  const leftSlots = slotSvgs(baseline.tree)
-  const rightSlots = slotSvgs(candidate.tree)
-  const identity = identityErrors(baseline, leftSlots, candidate, rightSlots)
-  if (NATIVE_LAYOUT_CASES.has(id)) {
-    try {
-      item.nativeMapLayout = await probeNativeMapLayout(browser, candidate.tree)
-    } catch (error) {
-      item.errors.push(
-        `candidate native map layout: ${error instanceof Error ? error.message : String(error)}`,
-      )
+  if (!scenario.browser3d) {
+    const leftSlots = slotSvgs(baseline.tree)
+    const rightSlots = slotSvgs(candidate.tree)
+    const identity = identityErrors(baseline, leftSlots, candidate, rightSlots)
+    item.errors.push(...identity)
+    const normalized = {
+      left: canonicalTree(leftSlots.tree, baselineRoot),
+      right: canonicalTree(rightSlots.tree, candidateRoot),
     }
-  }
-  item.errors.push(...identity)
-  const normalized = {
-    left: canonicalTree(leftSlots.tree, baselineRoot),
-    right: canonicalTree(rightSlots.tree, candidateRoot),
-  }
-  await writeFile(
-    path.join(dir, 'tree.normalized.baseline.json'),
-    `${JSON.stringify(normalized.left, null, 2)}\n`,
-  )
-  await writeFile(
-    path.join(dir, 'tree.normalized.candidate.json'),
-    `${JSON.stringify(normalized.right, null, 2)}\n`,
-  )
-  const diff = diffValues(normalized.left, normalized.right, '')
-  await writeFile(
-    path.join(dir, 'tree.diff.json'),
-    `${JSON.stringify({ differences: diff.differences, nonvisual: diff.nonvisual }, null, 2)}\n`,
-  )
-  item.tree = {
-    equal: diff.differences.length === 0,
-    differences: diff.differences.length,
-    differencePaths: diff.differences.map((entry) => entry.path),
-    nonvisual: diff.nonvisual,
-    fingerprint: proofFingerprint(normalized.left, normalized.right),
-    diff: path.relative(output, path.join(dir, 'tree.diff.json')),
-  }
-  if (!item.tree.equal)
-    difference(
-      `tree body differs at ${diff.differences.length} path(s)`,
-      'tree',
-      item.tree.fingerprint,
+    await writeFile(
+      path.join(dir, 'tree.normalized.baseline.json'),
+      `${JSON.stringify(normalized.left, null, 2)}\n`,
     )
-
-  item.svgCount = Math.max(leftSlots.slots.length, rightSlots.slots.length)
-  if (item.svgCount) {
-    const theme = themeBackground(scenario)
-    if (theme.error) item.errors.push(theme.error)
-    for (let svgIndex = 0; svgIndex < item.svgCount; svgIndex += 1) {
-      const { item: svgItem, viewportDifference } = await compareSvg(
-        dir,
-        svgIndex,
-        leftSlots.slots[svgIndex],
-        rightSlots.slots[svgIndex],
-        baseline.svgs[svgIndex],
-        candidate.svgs[svgIndex],
-        theme.background,
-        browser,
-        output,
+    await writeFile(
+      path.join(dir, 'tree.normalized.candidate.json'),
+      `${JSON.stringify(normalized.right, null, 2)}\n`,
+    )
+    const diff = diffValues(normalized.left, normalized.right, '')
+    await writeFile(
+      path.join(dir, 'tree.diff.json'),
+      `${JSON.stringify({ differences: diff.differences, nonvisual: diff.nonvisual }, null, 2)}\n`,
+    )
+    item.tree = {
+      equal: diff.differences.length === 0,
+      differences: diff.differences.length,
+      differencePaths: diff.differences.map((entry) => entry.path),
+      nonvisual: diff.nonvisual,
+      fingerprint: proofFingerprint(normalized.left, normalized.right),
+      diff: path.relative(output, path.join(dir, 'tree.diff.json')),
+    }
+    if (!item.tree.equal)
+      difference(
+        `tree body differs at ${diff.differences.length} path(s)`,
+        'tree',
+        item.tree.fingerprint,
       )
-      item.svgs.push(svgItem)
-      if (svgItem.source && !svgItem.source.equal)
-        difference(
-          `svg ${svgIndex} source bytes differ`,
-          `svg:${svgIndex}:source`,
-          proofFingerprint(
-            svgItem.source.sha256.baseline,
-            svgItem.source.sha256.candidate,
-          ),
+
+    item.svgCount = Math.max(leftSlots.slots.length, rightSlots.slots.length)
+    if (item.svgCount) {
+      const theme = themeBackground(scenario)
+      if (theme.error) item.errors.push(theme.error)
+      for (let svgIndex = 0; svgIndex < item.svgCount; svgIndex += 1) {
+        const { item: svgItem, viewportDifference } = await compareSvg(
+          dir,
+          svgIndex,
+          leftSlots.slots[svgIndex],
+          rightSlots.slots[svgIndex],
+          baseline.svgs[svgIndex],
+          candidate.svgs[svgIndex],
+          theme.background,
+          browser,
+          output,
         )
-      if (svgItem.error) {
-        const message = `svg ${svgIndex} ${svgItem.error}`
-        if (viewportDifference)
+        item.svgs.push(svgItem)
+        if (svgItem.missing)
           difference(
-            message,
-            `svg:${svgIndex}:viewport`,
+            `svg ${svgIndex} exists on only one side`,
+            `svg:${svgIndex}:source`,
             proofFingerprint(
-              svgItem.viewport.baseline,
-              svgItem.viewport.candidate,
+              svgItem.missing.baseline,
+              svgItem.missing.candidate,
             ),
           )
-        else item.errors.push(message)
+        if (svgItem.source && !svgItem.source.equal)
+          difference(
+            `svg ${svgIndex} source bytes differ`,
+            `svg:${svgIndex}:source`,
+            proofFingerprint(
+              svgItem.source.sha256.baseline,
+              svgItem.source.sha256.candidate,
+            ),
+          )
+        if (svgItem.error) {
+          const message = `svg ${svgIndex} ${svgItem.error}`
+          if (viewportDifference)
+            difference(
+              message,
+              `svg:${svgIndex}:viewport`,
+              proofFingerprint(
+                svgItem.viewport.baseline,
+                svgItem.viewport.candidate,
+              ),
+            )
+          else item.errors.push(message)
+        }
       }
     }
   }
@@ -1037,6 +1052,10 @@ const compareCase = async (
           scenario,
         )
         await writeFile(path.join(sceneDir, 'baseline.png'), leftShot.png)
+        for (const [tab, png] of Object.entries(rightShot.tabs ?? {}))
+          await writeFile(path.join(sceneDir, `candidate-${tab}.png`), png)
+        for (const [tab, png] of Object.entries(leftShot.tabs ?? {}))
+          await writeFile(path.join(sceneDir, `baseline-${tab}.png`), png)
         await writeFile(path.join(sceneDir, 'candidate.png'), rightShot.png)
         item.browser = {
           probe: { baseline: leftShot.probe, candidate: rightShot.probe },
@@ -1187,7 +1206,38 @@ const compareSvg = async (
   }
   let viewportDifference = false
   if (!leftSlot || !rightSlot || !leftHarvest || !rightHarvest) {
-    item.error = 'missing svg on one side'
+    // Identity was independently checked on each side. A removed native SVG is
+    // a reviewable exact visual change, not a missing capture or a waiver.
+    const left = leftHarvest ? sha256(leftHarvest.source) : null
+    const right = rightHarvest ? sha256(rightHarvest.source) : null
+    if (leftHarvest)
+      await writeFile(path.join(svgDir, 'baseline.svg'), leftHarvest.source)
+    if (rightHarvest)
+      await writeFile(path.join(svgDir, 'candidate.svg'), rightHarvest.source)
+    item.missing = { baseline: left, candidate: right }
+    if (!browser || !background) {
+      item.error = !browser
+        ? 'playwright unavailable for SVG raster'
+        : 'no theme background'
+    } else {
+      try {
+        for (const [side, slot, harvest] of [
+          ['baseline', leftSlot, leftHarvest],
+          ['candidate', rightSlot, rightHarvest],
+        ]) {
+          if (!slot || !harvest) continue
+          const shot = await rasterSvg(
+            browser,
+            harvest.source,
+            background,
+            svgSize(slot, harvest.source),
+          )
+          await writeFile(path.join(svgDir, `${side}.png`), shot.png)
+        }
+      } catch (error) {
+        item.error = error instanceof Error ? error.message : String(error)
+      }
+    }
     return { item, viewportDifference }
   }
   item.source = byteProof(leftHarvest.source, rightHarvest.source)

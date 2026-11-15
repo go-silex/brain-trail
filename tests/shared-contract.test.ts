@@ -115,7 +115,6 @@ test('2D navigation turns follow off while no-op wheel preserves it', () => {
       layout,
       touched: new Set<number>(),
     },
-    d3: undefined,
   }
   const state = { view3d: false, zoomed: true, cam3d: VIEW_STATE0.cam3d }
   const drag = mapGesture(
@@ -161,14 +160,8 @@ test('2D navigation turns follow off while no-op wheel preserves it', () => {
     mapWheel(0, false, { fx: 0.5, fy: 0.5 }, GESTURE0, frames, 100).steps,
   ).toEqual([])
   expect(
-    mapWheel(
-      1,
-      false,
-      { fx: 0.5, fy: 0.5 },
-      GESTURE0,
-      { d2: undefined, d3: undefined },
-      100,
-    ).steps,
+    mapWheel(1, false, { fx: 0.5, fy: 0.5 }, GESTURE0, { d2: undefined }, 100)
+      .steps,
   ).toEqual([])
 })
 
@@ -185,7 +178,6 @@ test('a wheel to whole rebases an active pan even before a new frame is drawn', 
   }
   const frames = {
     d2: { view, layout, touched: new Set<number>() },
-    d3: undefined,
   }
   const state = { view3d: false, zoomed: false, cam3d: VIEW_STATE0.cam3d }
   const start = {

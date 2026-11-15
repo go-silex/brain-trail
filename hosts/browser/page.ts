@@ -2,7 +2,6 @@
 import { makeIndex, type Index } from '../../hooks/files'
 import { createMapRenderer, DARK, LIGHT } from '../../hooks/map'
 import {
-  cameraDuringGesture,
   GESTURE0,
   VIEW_STATE0,
   mapGesture,
@@ -64,7 +63,7 @@ export function startPage(
     facts: FactsWire | undefined,
     layout: LayoutWire | undefined,
     index: Index | undefined
-  let frames: DrawnFrames = { d2: undefined, d3: undefined },
+  let frames: DrawnFrames = { d2: undefined },
     maps = createMapRenderer()
   let mapWidth = 0,
     mapHeight = 0
@@ -93,7 +92,7 @@ export function startPage(
     index = undefined
     state = { ...VIEW_STATE0, view3d: true }
     memory = { ...GESTURE0 }
-    frames = { d2: undefined, d3: undefined }
+    frames = { d2: undefined }
     maps = createMapRenderer()
     preview = undefined
     previewSerial++
@@ -431,14 +430,13 @@ export function startPage(
         )
           return
         else {
-          const cam3d = cameraDuringGesture(state.cam3d, memory)
           body = {
             tab: 'map',
             kind: 'ready',
             layout: layout.layout,
             shallow: f.workspace.shallow,
             fold: { ...fold, index },
-            state: cam3d === state.cam3d ? state : { ...state, cam3d },
+            state,
           }
         }
         break
@@ -483,8 +481,6 @@ export function startPage(
     }
     const out = renderPane(runtime, snapshot, actions, maps)
     if (out.drawn?.kind === '2d') frames = { ...frames, d2: out.drawn.frame }
-    else if (out.drawn?.kind === '3d')
-      frames = { ...frames, d3: out.drawn.frame }
     dom.hoverNames = f.settings.hover
     dom.render(out.node)
   }

@@ -1,3 +1,7 @@
+import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
+
+import type { ServerEvent } from '../../types/browser'
 type SvgHit = { props: { alt?: unknown; source?: unknown } }
 
 export const mapSourceOf = (svgs: SvgHit[]) => {
@@ -26,4 +30,67 @@ export const viewBoxOf = (source: string | undefined) => {
     return undefined
   if ([x, y, w, h].some((n) => Number.isNaN(n))) return undefined
   return { x, y, w, h }
+}
+
+export const latestSnapshot = (events: unknown[]) =>
+  [...events]
+    .reverse()
+    .find(
+      (event): event is Extract<ServerEvent, { kind: 'snapshot' }> =>
+        typeof event === 'object' &&
+        event !== null &&
+        'kind' in event &&
+        event.kind === 'snapshot',
+    )
+
+// Inspect the entire SDK render tree, including Link, Markdown and Code props.
+export const renderedContains = async (
+  ui: { drawn: () => Promise<unknown> },
+  value: string,
+) => JSON.stringify(await ui.drawn()).includes(value)
+
+export const mountCommandOutput = async (
+  $: Engine,
+  surface: 'desktop' | 'terminal' = 'desktop',
+  requestId = 'command-output',
+) => {
+  const result = await $.command.run({
+    command: 'brain-trail-v2',
+    args: '',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  })
+  return $.ui.mount({
+    plugin: 'brain-trail-v2',
+    component: 'CommandOutput',
+    requestId,
+    surface,
+    props: {
+      command: 'brain-trail-v2',
+      args: '',
+      text: result.text ?? '',
+      isErrored: false,
+    },
+  })
+}
+
+export const mockPaneRegistry = (on: On, ids: string[], denied = false) => {
+  const panes = new Set(ids)
+  const closed: string[] = []
+  on('ui.panes', () => ({
+    value: [...panes].map((id) => ({
+      id,
+      title: id,
+      isShown: false,
+      isFocused: false,
+      isPlaced: true,
+    })),
+  }))
+  on('ui.close', (_, e) => {
+    closed.push(e.id)
+    if (denied) return { deny: 'close refused' }
+    panes.delete(e.id)
+    return { value: undefined }
+  })
+  return { panes, closed }
 }

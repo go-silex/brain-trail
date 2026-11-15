@@ -30,21 +30,21 @@ The quality workflow validates and tests an archived source copy without `.git` 
 
 On Windows the same SDK session exercises the shipped `hooks/workspace.ts` inventory: exact ASCII/Unicode listing, exit-code propagation, a hostile `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/config environment with a positive control, and current-directory `git.cmd`/`cmd.exe` decoys. The relay socket runs under a non-ASCII LocalAppData within the 100-byte socket budget; this does not exercise a fully non-ASCII user profile. The proof adds only the runner's Git directory to its isolated PATH and refuses any PATH entry that provides Node or Bun.
 
-Before merge or tag, execute the production matrix and exercise the final candidate in real Claude Desktop: graph fit, resize, 2D/3D, browser opening, common tabs and settings, shared selection/follow/replay, context memory facts and fail-closed lifecycle. Verify that known outside-workspace previews and allowed external application opens work without an extra confirmation. This actual Desktop interaction is a release gate, not an implementation prerequisite. Record actual results and unresolved limitations; cross-compilation, SDK fixtures or source-only packaging do not establish Desktop behavior.
+Before merge or tag, execute the production matrix and exercise the final candidate in real Claude Desktop: native capture, Copy link in the prompt band and command output, and manual paste into a live Claude Browser tab; browser graph fit and resize, 2D/3D and input, all tabs and settings, selection/follow/replay, context memory facts and fail-closed lifecycle. Exercise the command with the band disabled or collapsed, confirm no automatic clipboard changes, and check scoped closure of the obsolete plugin pane without affecting other panes. Also exercise the external-browser paste route, expiry and refresh, and verify that known outside-workspace previews and allowed external application opens work without an extra confirmation. This actual Desktop interaction is a release gate, not an implementation prerequisite. Record actual results and unresolved limitations; cross-compilation, SDK fixtures or source-only packaging do not establish Desktop behavior.
 
 Launch tests use controlled child processes and exercise receipts and eventual exit handling; a controlled Linux PATH-opener test covers selection, execution and outcome, not full `openPath` end-to-end behavior or a desktop application opening a document. On Linux the default opener resolves `xdg-open` through PATH. The relay does not wait synchronously for it or promise a process-tree lifetime.
 
 ## View parity
 
-`bun run check:views` compares the working source with the baseline through the pinned native runner. The manifest covers the six panes, the prompt band, desktop and terminal surfaces, dark and light themes, English and French, inline and browser 3D, and targeted loading, error, empty and transition states.
+`bun run check:views` compares the working source with the baseline through the pinned native runner and browser execution. The migration removes native dashboard rendering; preserve meaningful checks for capture, band and command entry, and for the browser's tabs, 2D/3D scenes, actions and states across themes and languages.
 
-The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline commit, frozen candidate-source hash and fixture matrix. It compares native trees and SVG source and viewport, and executes baseline and candidate browser scenes with semantic and action checks. A baseline uses either historical HTML/data.js artifacts or its own modern captured feed and packaged assets; the candidate uses its own captured feed and packaged assets. Raster pixel differences are diagnostic; capture, decode, network, console and missing-artifact failures remain fatal, including missing or invalid modern feeds and missing assets. SVG CSS animations are materialized at 1600 ms and SMIL is paused at 1.6 seconds: this compares one frame, not motion parity. Historical scene dependencies are supplied locally for the test.
+The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline, candidate and fixture evidence. Review intentional differences against the migration; missing artifacts and capture, decode, network, console or browser execution failures are not visual approvals. Raster comparisons are diagnostic rather than proof of interaction or real Desktop rendering.
 
 The browser visibility guard samples compositor pixels around a known read file in dark and light themes with the camera and clock stable, excluding DOM labels and tooltips; it checks canvas contrast rather than treating overlays as visible points.
 
 The browser picking oracle exhausts integer CSS-client coordinates for its search; it does not establish continuous or subpixel visibility.
 
-Only opaque numeric press handles and verified temporary module locations are treated as nonvisual. SVG source bytes are the SVG proof. The raster is a diagnostic of the materialized frame, not a substitute for the source comparison.
+Do not treat an element-tree or raster comparison alone as proof of browser interactions or real Desktop rendering.
 
 The Claude Code 2.1.322 native runtime uses the OS timezone, not `TZ`. The
 manifest observes that timezone for both isolated roots and fails before case
@@ -64,18 +64,18 @@ source SHA-256 pair, or the complete viewport pair respectively. Unused or
 mismatched approvals fail. Declarations apply only to their exact baseline;
 browser execution failures and operational failures cannot be approved.
 
-These checks do not capture Claude Desktop's own pixels on Linux. Claude Code 2.1.322's test runner also drops the pointer's `fine` field before the real Client handler receives it: resized cell-centre gestures are exercised, but sub-cell precision is not established by those tests.
+These checks do not capture Claude Desktop's own pixels on Linux. Real Desktop acceptance must exercise copy, browser handoff and the browser interface.
 
 ## Modules
 
 | Files | Interface and responsibility |
 | --- | --- |
 | `types/model.ts`, `types/view.ts`, `types/browser.ts` | Host-free session, shared view and browser protocol contracts. |
-| `hooks/views.ts`, `hooks/view-*.ts`, `hooks/view-controller.ts`, `hooks/workspace.ts` | Shared tab views, transitions and workspace logic, without Claude, Bun or DOM globals. |
-| `hooks/fold.ts`, `hooks/readout.ts`, `hooks/pointer.ts`, `hooks/scene3d.ts` | Replay, context and file projections, shared mouse-action/zoom policy, pointer geometry and shared scene geometry. |
+| `hooks/views.ts`, `hooks/view-*.ts`, `hooks/view-controller.ts`, `hooks/workspace.ts` | Shared view data, transitions and workspace logic, without Claude, Bun or DOM globals. |
+| `hooks/fold.ts`, `hooks/readout.ts`, `hooks/scene3d.ts` | Replay, context and file projections and shared scene geometry. |
 | `hooks/acts.ts`, `hooks/files.ts`, `hooks/mcp.ts` | Current tool names, file detection and connector interpretation. Host-free does not mean host-neutral. |
-| `hooks/register.tsx`, `hosts/native/` | Claude SDK calls, host-owned state, lifecycle, storage and native adapter. |
-| `hooks/map.ts`, `hooks/spin.ts`, `hosts/browser/` | Shared map shell and SVG renderer, plus the browser UI and WebGL renderer. The pane's SVG budget is 131,072 characters. |
+| `hooks/register.tsx`, `hosts/native/` | Claude SDK calls, capture, host-owned state, lifecycle, storage, band, command and native adapter. |
+| `hooks/map.ts`, `hosts/browser/` | Shared map data and browser UI, including the SVG 2D and WebGL 3D renderers. |
 | `hosts/omp/`, `hosts/relay/` | OMP capture, lifecycle and persistence; Go relay, file authority and SDK-safe client shared by hosts. |
 
 The host owns replay and shared preview, zoomed and play state. Tabs and WebGL camera remain surface-local. Hosts retain separate durable stores.
@@ -94,22 +94,7 @@ ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT
 
 `.claude-plugin/sdk/` contains genuine declarations generated by Claude Code 2.1.322, with an intentionally empty MCP tool interface. These declarations are for development, not a replacement runtime. `bun run check:sdk` rejects a mismatch between the generated header and the CLI dependency.
 
-`ClientSurface.post` keeps only the latest undelivered message in a frame. Map
-drags carry the pressed button and a safe-integer press identity so a new press
-starts from the latest drawn frame even if its predecessor's `dragend` was
-replaced. A hover, click or leave concludes a drag. A new press or a move with
-no held button ends an open press; an unrelated button release cannot turn a
-drag into a click. Native Hit suppresses leave during pointer capture and emits
-it on an outside release. Browser adapters additionally end a drag on pointer
-cancellation or lost capture.
-
-`hooks/pointer.ts` owns button-to-action mapping and zoom amounts; native SVG
-and browser WebGL apply them using their own projections. The native `ui.scroll`
-path requires the SDK's person-origin event and wheel pointer. Some installed
-Desktop renderers send only post-scroll offsets without that pointer, so SDK
-fixtures do not prove wheel delivery over a fitting Desktop pane. Document this
-host limitation separately from working middle-drag zoom; do not introduce
-hidden scrollable content or weaken the native input-origin checks.
+The browser owns map pointer interactions and rendering; there is no second native graph renderer. The host remains responsible for session state and for authorizing file operations. On an explicit action in the prompt band or command output, the host copies a short-lived, one-use link; the user pastes it into a live browser address bar. Starting a session or running the command must not change the clipboard. OMP retains its private-file browser launch flow.
 
 For an SDK upgrade:
 

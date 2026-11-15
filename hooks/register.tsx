@@ -1,55 +1,42 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderElement, SessionContextBreakdown, UiPressArgument } from 'claude-code'
+import type { EngineInterface, Register, SessionContextBreakdown, UiPressArgument } from 'claude-code'
 
-import type { Lang, Meter, TrailSettings, Tab, Totals, TrailEvent } from '../types/model'
+import type { Lang, Meter, TrailSettings, Totals, TrailEvent } from '../types/model'
 import { MAX_SEEN, afterCd, describe, linksIn, makeIndex, pairKey, pathsIn, touchedBy } from './files'
 import type { Index } from './files'
 import { coachPrompt, strings } from './i18n'
-import { DARK, LIGHT, createMapRenderer, packFiles } from './map'
+import { DARK, LIGHT, packFiles } from './map'
 import { isLocal, toolsByServer } from './mcp'
-import { CAM0 } from './spin'
-import type { Cam, SpinView } from './spin'
 import type { Layout, Palette } from './map'
 import { sliceToStep } from './fold'
 import { assembleCapture, needsMcpScan, needsTouch } from './acts'
 import { costStats, keepCosts, limitOf, projectFiles, usd, zoneOf } from './readout'
 import type { CostEntry } from './readout'
 import { DEFAULT_SETTINGS, findArgv, fromFind, nativeGitInventoryArgv, hash, initialSettings, isShallow, pickFiles, vaultProbe, windowsSystemRoot } from './workspace'
-import { cameraDuringGesture, cellAspect, coachBusy, coachDone, coachFailed, GESTURE0, guessChrome, mapCells, mapGesture, mapWheel, openTarget, paneWidthPx, parseBox, parseGesture, plan, replayTick, STEP_MS, timerEffect, type Cells } from './view-controller'
-import type { Drawn2d, DrawnFrames, FoldFacts, Step, TabSnapshot, ViewActions, ViewChild, ViewIntent, ViewProps, ViewRuntime, ViewSnapshot, ViewTag } from '../types/view'
+import { coachBusy, coachDone, coachFailed, replayTick, STEP_MS, timerEffect } from './view-controller'
 import type { DashboardFeed, FactsWire, HostCommand, CommandReplies, CommandRefusal, LayoutWire, ServerEvent } from '../types/browser'
 import type { SharedView } from '../types/view'
-import { reduceSharedView, isSharedViewIntent } from './view-controller'
+import { reduceSharedView } from './view-controller'
 import { RelayRefusal, startRelay, type RelayClient } from '../hosts/relay/client'
 import { relayBinary, relayIO } from '../hosts/native/io'
 import { withNativeFile } from '../hosts/native/files'
 import { applySettingsPatch } from './view-settings'
-import { renderPane, TITLE, weather } from './views'
+import { weather } from './views'
 
 const COMMAND = 'brain-trail-v2'
 const PANE = 'brain-trail-v2'
 const CACHE_DIR = '.claude/brain-trail-v2'
 const MAX_EVENTS = 2000
-const maps = createMapRenderer()
 
 const events = atom({ plugin: 'brain-trail-v2', key: 'events' } as const, [] as TrailEvent[], { shape: 'events-1' })
 const totals = atom({ plugin: 'brain-trail-v2', key: 'totals' } as const, { steps: 0 } as Totals, { shape: 'totals-1' })
 const meter = atom({ plugin: 'brain-trail-v2', key: 'meter' } as const, { window: 0 } as Meter, { shape: 'meter-1' })
-const tabA = atom({ plugin: 'brain-trail-v2', key: 'tab' } as const, 'map' as Tab)
 const langA = atom({ plugin: 'brain-trail-v2', key: 'lang' } as const, 'en' as Lang)
 const zoomed = atom({ plugin: 'brain-trail-v2', key: 'zoomed' } as const, false)
-// the sections a person opened with « More details »
-const openA = atom({ plugin: 'brain-trail-v2', key: 'open' } as const, [] as string[])
-// a frame the wheel zoomed to, in map units; null = the folder's own frame
-const cameraA = atom({ plugin: 'brain-trail-v2', key: 'camera' } as const, null as { x: number; y: number; side: number } | null, { shape: 'camera-1' })
 // the replay: the step shown (null = live) and whether it plays
 const playA = atom({ plugin: 'brain-trail-v2', key: 'play' } as const, { step: null, playing: false } as { step: number | null; playing: boolean }, { shape: 'play-1' })
 let playTimer: { cancel: () => void } | undefined
-// the map in 3D inside the pane (the 2D map is the default), and its camera: turn, height, zoom, turning by itself or not
-const view3dA = atom({ plugin: 'brain-trail-v2', key: 'view3d' } as const, false)
-const cam3dA = atom({ plugin: 'brain-trail-v2', key: 'cam3d' } as const, CAM0 as Cam, { shape: 'cam3d-2' })
-let lastSpin: { view: SpinView; L: Layout; touched: Set<number> } | undefined
-// a file read inside the pane (the « Preview in Brain Trail » choice), or none
+// The file currently previewed in the browser, or none.
 const previewA = atom({ plugin: 'brain-trail-v2', key: 'preview' } as const, null as { p: string; out?: boolean } | null, { shape: 'preview-1' })
 // the coach's analysis of the session, and the lines it proposes for the instructions file
 const coachA = atom({ plugin: 'brain-trail-v2', key: 'coach' } as const, { text: '', at: 0, busy: false } as { text: string; patch?: string; at: number; busy: boolean; error?: string }, { shape: 'coach-1' })
@@ -264,23 +251,10 @@ let meterTimer: { cancel: () => void } | undefined
 // The portable relay registry is the authority for both surfaces.
 let apps: string[] | undefined
 let appDiscovery: Promise<string[]> | undefined
-let appsFailed = false
-let appsLoading = false
 let appsEpoch = 0
 const resetApps = () => {
   appsEpoch++
-  apps = undefined; appDiscovery = undefined; appsFailed = false; appsLoading = false
-}
-const discoverApps = ($: EngineInterface) => {
-  if (relay?.isClosed()) appsFailed = true
-  if (apps !== undefined || appsFailed || appsLoading) return
-  appsLoading = true
-  const owner = appsEpoch
-  void installedApps($).then(() => { if (owner === appsEpoch) appsFailed = false }, () => { if (owner === appsEpoch && apps === undefined) appsFailed = true }).finally(() => {
-    if (owner !== appsEpoch) return
-    appsLoading = false
-    $.ui.invalidate('ui.render')
-  })
+  apps = undefined; appDiscovery = undefined
 }
 const installedApps = async ($: EngineInterface) => {
   const owner = appsEpoch
@@ -292,34 +266,11 @@ const installedApps = async ($: EngineInterface) => {
   try {
     const found = await pending
     if (owner !== appsEpoch || relay !== client || (appDiscovery !== pending && apps !== found)) throw new Error('Relay disconnected')
-    if (appsFailed) { appsFailed = false; $.ui.invalidate('ui.render') }
     if (apps === undefined) { apps = found; queuePublish($) }
     return apps
   } finally { if (appDiscovery === pending) appDiscovery = undefined }
 }
 
-const openFile = async ($: EngineInterface, p: string, out?: true) => {
-  const ref = { p, ...(out ? { out: true as const } : {}) }
-  const target = openTarget(await read($, settingsA), I, ref)
-  await ensureRelay($)
-  await checkSession($)
-  const expected = generation
-  if (target.kind === 'preview') {
-    const operation = ++previewOperation
-    const text = await secureFile($, expected, ref, { kind: 'preview' }, (client, id) => client.readFile(id))
-    await serial(async () => {
-      await checkSession($)
-      if (generation !== expected || operation !== previewOperation) throw new Error('stale-generation')
-      browserPreview = { p, out: !!out, text }
-      await update($, previewA, () => target.ref)
-      await update($, tabA, () => 'files')
-      queuePublish($)
-    })
-    return
-  }
-  const launch = await secureFile($, expected, ref, { kind: 'open', app: target.app }, (client, id) => client.openFile(id, target.app === 'default' ? undefined : target.app, expected))
-  void $.ui.toast(`Brain Trail: Launch ${launch.status}.`)
-}
 
 // ---- cost: the API price of this session, kept per session to compare with the person's own habits ----
 
@@ -342,54 +293,6 @@ const costHistoryOf = async ($: EngineInterface) => {
   return costStats(all, id, month)
 }
 
-// ---- the map's pointer layer ----
-
-// what the last map drawn shows, so a click or a hover can be matched to a file or a folder
-let lastMap: { view: Drawn2d['view']; L: Layout; touched: Set<number> } | undefined
-
-let gesture = GESTURE0
-// Measurements are stamped with their pane and map sizes; other surfaces cannot
-// clear them, and a late report from a previous resize cannot change the new frame.
-const hitBoxes = new Map<string, { box: string; reach: number }>()
-let mapChrome: { columns: number; chrome: Cells } | undefined
-let bodyWindow: { stamp: string; dimensions: string; paneRows: number; tab: Tab; offset: number; viewport: number; measured: number; reach: number; end: boolean } | undefined
-let bodyGeneration = 0
-let chromeGeneration = 0
-let measuredChrome: { shape: string; stamp: string; header: number; footer: number; headerReach: number; footerReach: number } | undefined
-let mapVisible = false
-const bodyLimit = () => bodyWindow === undefined ? 0 : Math.max(0, bodyWindow.measured + 1 - bodyWindow.viewport)
-// Keep the requested offset across provisional or stale measurements; only the
-// displayed window is clamped. A later measurement can reveal the saved position.
-const visibleBodyOffset = () => {
-  if (bodyWindow === undefined) return 0
-  if (bodyWindow.measured === 0 || bodyWindow.viewport === 0) return bodyWindow.offset
-  return bodyWindow.end ? bodyLimit() : Math.min(bodyWindow.offset, bodyLimit())
-}
-const moveBody = ($: EngineInterface, to: 'first' | 'previous' | 'next' | 'last' | number) => {
-  if (bodyWindow === undefined) return
-  const limit = bodyLimit()
-  const page = Math.max(1, bodyWindow.viewport)
-  const current = visibleBodyOffset()
-  bodyWindow.end = to === 'last'
-  bodyWindow.offset = Math.max(0, Math.min(limit, typeof to === 'number' ? current + to : to === 'first' ? 0 : to === 'last' ? limit : current + (to === 'next' ? page : -page)))
-  $.ui.invalidate('ui.render')
-}
-const drawnFrames = (): DrawnFrames => ({
-  d2: lastMap === undefined ? undefined : { view: lastMap.view, layout: lastMap.L, touched: lastMap.touched },
-  d3: lastSpin === undefined ? undefined : { view: lastSpin.view, layout: lastSpin.L, touched: lastSpin.touched },
-})
-const applyStep = async ($: EngineInterface, step: Step) => {
-  switch (step.key) {
-    case 'tab': await update($, tabA, step.next); break
-    case 'open': await update($, openA, step.next); break
-    case 'zoomed': await update($, zoomed, step.next); break
-    case 'camera': await update($, cameraA, step.next); break
-    case 'play': await update($, playA, step.next); break
-    case 'view3d': await update($, view3dA, step.next); break
-    case 'cam3d': await update($, cam3dA, step.next); break
-    case 'preview': await update($, previewA, step.next); break
-  }
-}
 let replayRun = 0
 const syncReplayClock = ($: EngineInterface, playing: boolean) => {
   const run = ++replayRun, owner = generation
@@ -413,36 +316,6 @@ const syncReplayClock = ($: EngineInterface, playing: boolean) => {
 }
 let previewOperation = 0
 let coachOperation = 0
-const nativeIntent = async ($: EngineInterface, intent: ViewIntent) => {
-  const operation = intent.kind === 'preview' ? ++previewOperation : undefined
-  await checkSession($)
-  const expected = generation
-  let text: string | undefined
-  if (intent.kind === 'preview' && intent.ref !== null) {
-    await ensureRelay($)
-    text = await secureFile($, expected, intent.ref, { kind: 'preview' }, (client, id) => client.readFile(id))
-  }
-  return serial(async () => {
-  await checkSession($)
-  if (expected !== generation || (operation !== undefined && operation !== previewOperation)) return
-  if (intent.kind === 'toggle-3d') gesture = GESTURE0
-  if (isSharedViewIntent(intent)) {
-    if (intent.kind === 'preview') browserPreview = intent.ref === null ? undefined : { p: intent.ref.p, out: !!intent.ref.out, text: text! }
-    const count = sliceToStep(await read($, events), null, Date.now()).steps.length
-    const next = reduceSharedView(await shared($), intent, count)
-    await setShared($, next)
-    if (timerEffect(intent) !== 'none') syncReplayClock($, next.play.playing)
-    // Apply only surface-local effects here; shared fields were reduced above.
-    for (const step of plan(intent, { now: 0, frames: drawnFrames(), view3d: await read($, view3dA) })) {
-      if (step.key !== 'preview' && step.key !== 'zoomed' && step.key !== 'play') await applyStep($, step)
-    }
-  } else {
-    const now = intent.kind === 'turn-3d' || intent.kind === 'spin-3d' || intent.kind === 'zoom-3d' ? await $.clock.now() : 0
-    for (const step of plan(intent, { now, frames: drawnFrames(), view3d: await read($, view3dA) })) await applyStep($, step)
-  }
-  queuePublish($)
-  })
-}
 
 
 
@@ -456,18 +329,32 @@ const miniGauge = (P: Palette, pct: number) => {
 }
 
 
-let opened = false
 
 // Start the relay on demand for browser access or native app discovery.
 let relay: RelayClient | undefined
 let startingRelay: Promise<RelayClient> | undefined
+let relayOwner = 0
 let generation = 1
+let launchCopied: { expiresAt: number; generation: number } | undefined
+let launchBusy = false
+let launchError = false
+let launchSite: string | undefined
+let launchOperation = 0
+let launchExpiry: { cancel: () => void } | undefined
+const resetLaunch = () => {
+  launchOperation++
+  launchCopied = undefined
+  launchBusy = false
+  launchError = false
+  launchSite = undefined
+  launchExpiry?.cancel()
+  launchExpiry = undefined
+}
 let sessionId: string | undefined
 let revision = 0
 let layoutRevision = 0
 let lastLayout: Layout | undefined
 let currentFeed: ReturnType<DashboardFeed['current']> | undefined
-let browserPreview: { p: string; out: boolean; text: string } | undefined
 const feedListeners = new Set<(event: ServerEvent) => void>()
 let mutations: Promise<unknown> = Promise.resolve()
 const serial = <T,>(work: () => Promise<T>): Promise<T> => {
@@ -498,12 +385,12 @@ const checkSession = async ($: EngineInterface) => {
   else if (sessionId !== id) {
     sessionId = id
     generation++
+    resetLaunch()
     invalidateCoach($)
     resetApps()
     revision = 0
     lastLayout = undefined
     breakdown = undefined
-    browserPreview = undefined
     syncReplayClock($, false)
     await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } })
   }
@@ -575,7 +462,8 @@ const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: st
   return withNativeFile(client, { root: I.root, generation: expected, refreshGeneration: () => checkSession($), currentGeneration: () => generation, known: candidate => knownRef($, candidate), apps: await installedApps($) }, ref, action, id => use(client, id))
 }
 const invalidateTrail = ($: EngineInterface) => {
-  generation++; revision = 0; lastLayout = undefined; browserPreview = undefined; breakdown = undefined
+  generation++; revision = 0; lastLayout = undefined; breakdown = undefined
+  resetLaunch()
   invalidateCoach($)
   syncReplayClock($, false)
 }
@@ -612,20 +500,17 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
       case 'view': {
         const intent = command.intent
         const operation = intent.kind === 'preview' ? ++previewOperation : undefined
-        let text: string | undefined
         if (intent.kind === 'preview' && intent.ref !== null) {
-          text = await secureFile($, expected, intent.ref, { kind: 'preview' }, (client, id) => client.readFile(id))
+          await secureFile($, expected, intent.ref, { kind: 'preview' }, (client, id) => client.readFile(id))
         }
         await serial(async () => {
           await guard()
           if (operation !== undefined && operation !== previewOperation) throw new Error('stale-generation')
-          if (intent.kind === 'preview') browserPreview = intent.ref === null ? undefined : { p: intent.ref.p, out: !!intent.ref.out, text: text! }
           const count = sliceToStep(await read($, events), null, Date.now()).steps.length
           const prior = await shared($)
           const next = reduceSharedView(prior, intent, count)
           await guard()
           await setShared($, next)
-          if (intent.kind === 'follow' && !prior.zoomed && next.zoomed) await update($, cameraA, () => null)
           if (timerEffect(intent) !== 'none') syncReplayClock($, next.play.playing)
         })
         break
@@ -687,8 +572,9 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
   }
 }
 const ensureRelay = async ($: EngineInterface, reopen = false) => {
-  if (reopen) { appsEpoch++; appsLoading = false; appDiscovery = undefined; appsFailed = false }
+  if (reopen) { appsEpoch++; appDiscovery = undefined }
   if (relay?.isClosed()) {
+    if (launchCopied !== undefined) { const site = launchSite; resetLaunch(); launchSite = site; launchError = true; $.ui.invalidate('ui.render') }
     if (!reopen) throw new Error('Relay disconnected; reopen the browser from Brain Trail')
     relay = undefined
     apps = undefined; appDiscovery = undefined
@@ -709,7 +595,20 @@ const ensureRelay = async ($: EngineInterface, reopen = false) => {
           subscribe: listener => { feedListeners.add(listener); return () => { feedListeners.delete(listener) } },
         }
         const binary = await relayBinary($)
-        const client = await startRelay(relayIO($, owner => owner === generation), binary, `${$.plugin.root}/hosts/browser/dist`, feed)
+        const owner = ++relayOwner
+        const io = relayIO($, current => current === generation)
+        const notifyFailure = io.onFailure
+        io.onFailure = error => {
+          if (relayOwner === owner) {
+            const site = launchSite
+            resetLaunch()
+            launchSite = site
+            launchError = true
+            $.ui.invalidate('ui.render')
+          }
+          notifyFailure(error)
+        }
+        const client = await startRelay(io, binary, `${$.plugin.root}/hosts/browser/dist`, feed)
         if (generation !== startedGeneration) { client.close(); throw new Error('stale-generation') }
         return client
       })()
@@ -723,98 +622,73 @@ const ensureRelay = async ($: EngineInterface, reopen = false) => {
   }
   return relay
 }
-const open3d = async ($: EngineInterface) => {
-  const client = await ensureRelay($, true)
-  await installedApps($)
-  await publish($)
-  await checkSession($)
-  await client.openBrowser(generation)
-  return true
-}
-const openPane = async ($: EngineInterface) => {
-  if ((await $.session.surfaces()).length === 0) return false
-  const r = await $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
-  opened ||= r !== undefined
-  return r !== undefined
-}
-const el = <P extends ViewProps>(tag: ViewTag<P, RenderElement>, props: P | null, ...children: ViewChild<RenderElement>[]): RenderElement => {
-  const node = h(tag, props, ...children)
-  if (node === null || node === undefined || typeof node === 'string') throw new TypeError('Brain Trail: constructor returned no element')
-  return node
-}
-const nativeRuntime = (ui: ElementTable, hitBox?: { box: string; reach: number }): ViewRuntime<RenderElement, UiPressArgument> => ({
-  h: el, Box: ui.Box, Text: ui.Text, Button: ui.Button, Input: ui.Input, Link: ui.Link,
-  Svg: 'Svg' in ui ? ui.Svg : undefined,
-  Markdown: 'Markdown' in ui ? ui.Markdown : undefined,
-  Code: 'Code' in ui ? ui.Code : undefined,
-  Measure: 'Client' in ui ? props => <ui.Client key={`${props.kind}-probe`} module="./measure.tsx" props={props} width={0} height="100%" /> : undefined,
-  MapHit: 'Client' in ui ? () => <ui.Client key="map-hit" module="./hit.tsx" props={{ tip: null, ...hitBox }} width="100%" height="100%" /> : undefined,
-})
-const nativeActions = ($: EngineInterface, snap: ViewSnapshot): ViewActions<UiPressArgument> => ({
-  scrollBody: to => moveBody($, to),
-  intent: i => nativeIntent($, i).catch(error => { void $.ui.toast(`Brain Trail: ${String(error)}`) }),
-  openFile: ref => openFile($, ref.p, ref.out ? true : undefined).catch(error => { void $.ui.toast(`Brain Trail: ${String(error)}`) }),
-  openIn: async (ref, app) => {
-    try {
-      await ensureRelay($); await checkSession($)
-      const expected = generation
-      const launch = await secureFile($, expected, ref, { kind: 'open', app }, (client, id) => client.openFile(id, app === 'default' ? undefined : app, expected))
-      void $.ui.toast(`Brain Trail: Launch ${launch.status}.`)
-    } catch (error) { void $.ui.toast(`Brain Trail: ${String(error)}`) }
-  },
-  copy: (text, press) => $.ui.copy({ text, surface: press.surface }).then(r => r !== undefined, () => false),
-  toast: text => { void $.ui.toast(text) },
-  compact: async () => {
-    const result = await $.session.compact({}).catch(() => undefined)
-    return result === undefined ? { kind: 'failed' } : 'skip' in result && result.skip !== undefined ? { kind: 'skipped', reason: result.skip } : { kind: 'done' }
-  },
-  refreshMeter: () => refreshMeter($).then(() => publish($)).catch(() => {}),
-  saveSettings: patch => serial(async () => {
-    const next = applySettingsPatch(await read($, settingsA), patch)
-    await $.store.set('settings', next)
-    await update($, settingsA, () => next)
-    queuePublish($)
-  }),
-  setLang: lang => serial(async () => { await $.store.set('lang', lang); await update($, langA, () => lang); queuePublish($) }),
-  clearTrail: () => { invalidateTrail($); return serial(async () => { await clearTrailState($); queuePublish($) }) },
-  retryLayout: () => { failure = undefined; void load($).catch(() => {}) },
-  open3d: () => open3d($).catch(error => { void $.ui.toast(`Brain Trail: ${String(error)}`); return false }),
-  analyseCoach: async (lang, file) => {
+const copyLink = async ($: EngineInterface, press: UiPressArgument) => {
+  if (launchBusy) return
+  const operation = ++launchOperation
+  launchSite = JSON.stringify([press.component, press.requestId, press.surface])
+  launchBusy = true
+  launchError = false
+  launchCopied = undefined
+  launchExpiry?.cancel()
+  launchExpiry = undefined
+  $.ui.invalidate('ui.render')
+  try {
     await checkSession($)
+    if (operation !== launchOperation) return
     const expected = generation
-    const operation = await serial(async () => {
-      await checkSession($)
-      if (expected !== generation || (await read($, coachA)).busy) return undefined
-      if (expected !== generation) return undefined
-      const accepted = ++coachOperation
-      await update($, coachA, coachBusy); queuePublish($)
-      return accepted
+    const client = await ensureRelay($, true)
+    await installedApps($)
+    await publish($)
+    await checkSession($)
+    if (operation !== launchOperation || expected !== generation || relay !== client || client.isClosed()) return
+    const link = await client.prepareBrowserLink(expected)
+    await checkSession($)
+    if (operation !== launchOperation || expected !== generation || relay !== client || client.isClosed()) return
+    if (link.expiresAt <= Date.now()) { launchError = true; return }
+    const copied = await $.ui.copy({ text: link.url, surface: press.surface })
+    await checkSession($)
+    if (operation !== launchOperation || expected !== generation || relay !== client || client.isClosed()) return
+    if (!copied.isCopied || link.expiresAt <= Date.now()) { launchError = true; return }
+    launchCopied = { expiresAt: link.expiresAt, generation: expected }
+    launchExpiry = $.clock.every(1000, () => {
+      if (Date.now() >= link.expiresAt) {
+        launchExpiry?.cancel()
+        launchCopied = undefined
+        launchExpiry = undefined
+        $.ui.invalidate('ui.render')
+      }
     })
-    if (operation === undefined) return
-    const result = await $.model.fork({ prompt: coachPrompt(lang, file, snap.assistant) }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
-    await serial(async () => {
-      await checkSession($)
-      if (expected !== generation || operation !== coachOperation) return
-      if (result.isAnswered) await update($, coachA, () => coachDone(result.text, Date.now()))
-      else await update($, coachA, coachFailed('reason' in result ? String(result.reason) : 'unknown', strings(lang, snap.assistant)))
-      queuePublish($)
-    })
-  },
-  applyCoach: async (file, patch) => (await $.prompt.fill({ text: strings(snap.lang, snap.assistant).applyPrompt(file, patch) }).catch(() => undefined)) !== undefined,
-})
+  } catch {
+    if (operation === launchOperation) launchError = true
+  } finally {
+    if (operation === launchOperation) {
+      launchBusy = false
+      $.ui.invalidate('ui.render')
+    }
+  }
+}
+const closeOwnPane = async ($: EngineInterface) => {
+  try {
+    if (!(await $.ui.panes()).some(pane => pane.id === PANE)) return
+    await $.ui.close({ id: PANE })
+    if (!(await $.ui.panes()).some(pane => pane.id === PANE)) return
+  } catch {}
+  const fr = await read($, langA).then(lang => lang === 'fr', () => false)
+  $.ui.toast(fr ? 'Fermez l’ancien panneau Brain Trail manuellement.' : 'Close the old Brain Trail pane manually.')
+}
 
 export const register: Register = (on, options) => {
-  const autoOpen = options.autoOpen !== false
   const defaultLang: Lang = options.language === 'fr' ? 'fr' : 'en'
 
   on('session.start', async ($, e, next) => {
+    void closeOwnPane($)
     generation++; revision = 0; sessionId = await $.session.id(); lastLayout = undefined; breakdown = undefined
+    resetLaunch()
     invalidateCoach($)
     syncReplayClock($, false)
     resetApps()
-    browserPreview = undefined
     await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } })
-    await $.command.register({ name: COMMAND, description: 'Show what this session puts in its context, in a pane' })
+    await $.command.register({ name: COMMAND, description: 'Open Brain Trail in a browser' })
     const saved = await $.store.get('lang').catch(() => undefined)
     await update($, langA, () => (saved === 'fr' || saved === 'en' ? saved : defaultLang))
     const savedSet = await $.store.get('settings').catch(() => undefined) as Partial<TrailSettings> | undefined
@@ -823,14 +697,14 @@ export const register: Register = (on, options) => {
     void load($).catch(() => {})
     meterTimer?.cancel()
     meterTimer = $.clock.every(4000, () => { void refreshMeter($).then(() => publish($)).catch(() => {}) })
-    if (autoOpen) await openPane($)
     return next(e)
   })
 
   on('session.end', async ($, e, next) => {
     generation++
+    resetLaunch()
     invalidateCoach($)
-    relay?.close(); relay = undefined; startingRelay = undefined
+    relayOwner++; relay?.close(); relay = undefined; startingRelay = undefined
     resetApps()
     syncReplayClock($, false)
     meterTimer?.cancel(); meterTimer = undefined
@@ -840,12 +714,13 @@ export const register: Register = (on, options) => {
 
   on('session.attach', async ($, e, next) => {
     const attached = await next(e)
-    if (autoOpen && !opened) await openPane($)
+    void closeOwnPane($)
     return attached
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'clear' }, async ($, e, next) => {
-    generation++; revision = 0; lastLayout = undefined; browserPreview = undefined; breakdown = undefined
+    generation++; revision = 0; lastLayout = undefined; breakdown = undefined
+    resetLaunch()
     invalidateCoach($)
     syncReplayClock($, false)
     const result = await next(e)
@@ -856,9 +731,9 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: COMMAND }, async $ => {
-    void load($).catch(() => {})
-    const S = strings(await read($, langA))
-    return { text: (await openPane($)) ? S.opened : S.later }
+    void closeOwnPane($)
+    const fr = (await read($, langA)) === 'fr'
+    return { text: fr ? 'Dans Claude Desktop, copiez le lien, puis collez-le dans la barre d’adresse du navigateur, pas dans la conversation.' : 'In Claude Desktop, copy the link, then paste it into the browser address bar, not the conversation.' }
   })
 
   // the gauge follows the engine's own measure, pushed after each turn
@@ -951,215 +826,54 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // the pointer layer over the map: a name under the pointer, a click opens a file or zooms in,
-  // a right click zooms out, a drag moves the map
-  on('ui.message', async ($, e, next) => {
-    if (e.element === 'header-probe' || e.element === 'footer-probe') {
-      const data = e.data as { kind?: string; stamp?: string; rows?: number }
-      if (measuredChrome === undefined || data.stamp !== measuredChrome.stamp || data.kind !== e.element.replace('-probe', '') || typeof data.rows !== 'number' || !Number.isSafeInteger(data.rows) || data.rows <= 0) return {}
-      if (data.kind === 'header') {
-        measuredChrome.header = data.rows
-        if (data.rows >= measuredChrome.headerReach) measuredChrome.headerReach = Math.max(data.rows + 1, measuredChrome.headerReach * 2)
-      } else {
-        measuredChrome.footer = data.rows
-        if (data.rows >= measuredChrome.footerReach) measuredChrome.footerReach = Math.max(data.rows + 1, measuredChrome.footerReach * 2)
-      }
-      $.ui.invalidate('ui.render')
-      return {}
-    }
-    if (e.element === 'viewport-probe' || e.element === 'content-probe') {
-      const data = e.data as { kind?: string; stamp?: string; rows?: number }
-      if (bodyWindow === undefined || data.stamp !== bodyWindow.stamp || data.kind !== e.element.replace('-probe', '') || typeof data.rows !== 'number' || !Number.isFinite(data.rows) || data.rows <= 0) return {}
-      const rows = Math.floor(data.rows)
-      if (data.kind === 'viewport') bodyWindow.viewport = rows
-      else {
-        bodyWindow.measured = rows
-        if (rows >= bodyWindow.reach) bodyWindow.reach = Math.max(bodyWindow.reach * 2, rows + 1)
-      }
-      $.ui.invalidate('ui.render')
-      return {}
-    }
-    if (e.element !== 'map-hit') return next(e)
-    if (e.surface === 'desktop' && !mapVisible) return {}
-    const laid = parseBox(e.data)
-    if (laid !== undefined) {
-      if (e.surface !== 'desktop' || laid.for !== hitBoxes.get(e.surface)?.box) return {}
-      const chrome = { columns: laid.pane.columns - laid.columns, rows: laid.pane.rows - laid.rows }
-      if (laid.pane.columns !== mapChrome?.columns || chrome.columns !== mapChrome?.chrome.columns || chrome.rows !== mapChrome?.chrome.rows) {
-        mapChrome = { columns: laid.pane.columns, chrome }
-        $.ui.invalidate('ui.render')
-      }
-      return {}
-    }
-    const state = { view3d: await read($, view3dA), zoomed: await read($, zoomed), cam3d: await read($, cam3dA) }
-    const settings = await read($, settingsA)
-    const now = await $.clock.now()
-    const result = mapGesture(parseGesture(e.data), state, gesture, drawnFrames(), { now, hoverNames: settings.hover })
-    gesture = result.memory
-    await serial(async () => {
-      let sharedChanged = false
-      for (const step of result.steps) {
-        if (step.key === 'zoomed') {
-          const prior = await read($, zoomed), nextZoomed = step.next(prior)
-          if (nextZoomed !== prior) { await update($, zoomed, () => nextZoomed); sharedChanged = true }
-        } else await applyStep($, step)
-      }
-      if (sharedChanged) queuePublish($)
-    })
-    if (result.open !== undefined) void openFile($, result.open.p, result.open.out ? true : undefined).catch(error => { void $.ui.toast(`Brain Trail: ${String(error)}`) })
-    const hitBox = hitBoxes.get(e.surface)
-    return { props: { tip: result.tip, ...hitBox } }
-  }).catch(($, e, next) => next(e))
 
-  // the wheel over the map zooms it toward the pointer the map last reported; elsewhere in the pane it scrolls as usual
-  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (e.origin.kind === 'person' && e.by !== 0 && bodyWindow !== undefined && e.contentRows === e.bodyRows && e.bodyRows === bodyWindow.paneRows && (await read($, tabA)) === bodyWindow.tab) {
-      const by = Math.abs(e.by) >= e.bodyRows ? Math.sign(e.by) * Math.max(1, bodyWindow.viewport) : e.by
-      moveBody($, by)
-      return {}
-    }
-    if (!mapVisible || e.origin.kind !== 'person' || e.pointer === undefined || gesture.hover === undefined || e.by === 0) return next(e)
-    if ((await read($, tabA)) !== 'map') return next(e)
-    const view3d = await read($, view3dA), now = await $.clock.now(), at = gesture.hover
-    if (at === undefined) return next(e)
-    // The memory changes here, in the order the pointer's messages came: a press in progress
-    // goes on from what the wheel made.
-    const result = mapWheel(e.by, view3d, at, gesture, drawnFrames(), now)
-    gesture = result.memory
-    await serial(async () => {
-      let sharedChanged = false
-      for (const step of result.steps) {
-        if (step.key === 'zoomed') {
-          const prior = await read($, zoomed), nextZoomed = step.next(prior)
-          if (nextZoomed !== prior) { await update($, zoomed, () => nextZoomed); sharedChanged = true }
-        } else await applyStep($, step)
-      }
-      if (sharedChanged) queuePublish($)
-    })
-    return {}
-  }).catch(($, e, next) => next(e))
-
-  // ---- the band above the prompt: the context and the cost, always in sight, even with the pane closed ----
+  // The band remains available before the first context measurement.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const set = await read($, settingsA)
     const m = await read($, meter)
-    if (e.props.hasSurvey || set.band === false || m.percent === undefined) return next(e)
+    if (e.props.hasSurvey || set.band === false || (e.surface !== 'desktop' && m.percent === undefined)) return next(e)
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const S = strings(await read($, langA))
-    const P = await palette($, await $.clock.now())
+    const lang = await read($, langA)
+    const S = strings(lang)
+    const fr = lang === 'fr'
     const pct = m.percent
-    const zone = zoneOf(pct)
-    const open = async (t: Tab) => { await update($, tabA, () => t); await openPane($) }
+    const zone = pct === undefined ? undefined : zoneOf(pct)
+    const P = pct === undefined ? undefined : await palette($, await $.clock.now())
+    const active = launchSite === JSON.stringify([e.component, e.requestId, e.surface])
+    const copied = active && relay?.isClosed() === false && launchCopied?.generation === generation && launchCopied.expiresAt > Date.now()
     return (
       <Box flexDirection="row" alignItems="center" columnGap="sm" flexWrap="wrap">
-        {'Svg' in ui && <ui.Svg key="band-gauge" source={miniGauge(P, pct)} width={64} height={8} alt={`${pct} %`} />}
-        <Text size="caption" weight={zone === 'ok' ? undefined : 'medium'} tabular>{weather(pct)} {S.bandContext(pct)}</Text>
+        {pct !== undefined && P !== undefined && 'Svg' in ui && <ui.Svg key="band-gauge" source={miniGauge(P, pct)} width={64} height={8} alt={`${pct} %`} />}
+        {pct !== undefined && <Text size="caption" weight={zone === 'ok' ? undefined : 'medium'} tabular>{weather(pct)} {S.bandContext(pct)}</Text>}
         {m.usd !== undefined && <Text size="caption" dimColor tabular>· {S.bandCost(usd(m.usd))}</Text>}
         {limitOf(m, 'five_hour') !== undefined && <Text size="caption" dimColor tabular>· {S.band5h(Math.round(limitOf(m, 'five_hour')!.percentUsed))}</Text>}
         {limitOf(m, 'seven_day') !== undefined && <Text size="caption" dimColor tabular>· {S.band7d(Math.round(limitOf(m, 'seven_day')!.percentUsed))}</Text>}
         <Box flexGrow={1} />
-        {zone === 'bad'
-          ? <Button key="band-handoff" label={S.zoneLabel.bad} variant="primary" onPress={() => open('context')} />
-          : <Button key="band-open" plain dimColor label={TITLE} onPress={() => open('context')} />}
+        {e.surface === 'desktop' && !(active && launchBusy) && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
+        {active && launchBusy && <Text size="caption">{fr ? 'Copie…' : 'Copying…'}</Text>}
+        {active && launchError && <Text size="caption">{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
+        {copied && <Text size="caption">{fr ? 'Copié : collez dans la barre d’adresse.' : 'Copied: paste into the address bar.'}</Text>}
       </Box>
     )
   }).catch(($, e, next) => next(e))
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const ui = $.ui.resolve(e)
-    const now = await $.clock.now()
-    const lang = await read($, langA)
-    const tab = await read($, tabA)
-    const paletteValue = await palette($, now)
-    const meterValue = await read($, meter)
-    const list = await read($, events)
-    void load($).catch(() => {})
-    const columns = e.props.bodyColumns ?? e.viewport?.columns ?? 48
-    const widthPx = paneWidthPx(columns)
-    const open = await read($, openA)
-    const fold = (): FoldFacts => ({ index: I, linked, connected })
-    let body: TabSnapshot
-    if (tab === 'context') {
-      const breakdown = await getBreakdown($, now)
-      const history = await costHistory($)
-      const settings = await read($, settingsA)
-      body = { tab, breakdown, costHistory: history, settings }
-    } else if (tab === 'files') {
-      const breakdown = await getBreakdown($, now)
-      await load($).catch(() => undefined)
-      const ref = await read($, previewA)
-      let preview: Extract<TabSnapshot, { tab: 'files' }>['preview'] = null
-      if (ref !== null) {
-        const text = browserPreview?.p === ref.p && browserPreview.out === !!ref.out ? browserPreview.text : undefined
-        const settings = await read($, settingsA)
-        discoverApps($)
-        preview = { ref, text, settings, apps: apps ?? [], appsUnavailable: appsFailed }
-      }
-      body = { tab, breakdown, preview, fold: fold() }
-    } else if (tab === 'map') {
-      const L = layout, index = I
-      if (L === undefined || index === undefined) {
-        body = failure !== undefined ? { tab, kind: 'failed', message: failure } : { tab, kind: 'loading', seconds: packingSince ? Math.round((Date.now() - packingSince) / 1000) : 0 }
-      } else {
-        const isZoomed = await read($, zoomed)
-        const camera = await read($, cameraA)
-        const play = await read($, playA)
-        await getBreakdown($, now)
-        const view3d = await read($, view3dA)
-        const cam3d = await read($, cam3dA)
-        body = { tab, kind: 'ready', layout: L, shallow, fold: { index, linked, connected }, state: { zoomed: isZoomed, camera, play, view3d, cam3d: e.surface === 'desktop' ? cameraDuringGesture(cam3d, gesture) : cam3d } }
-      }
-    } else if (tab === 'goal') {
-      body = { tab, connected }
-    } else if (tab === 'coach') {
-      const breakdown = await getBreakdown($, now)
-      const coach = await read($, coachA)
-      const root = I?.root ?? (await rootDir($))
-      const instructionFile = (await $.fs.exists(`${root}/AGENTS.md`).catch(() => false)) ? 'AGENTS.md' : 'CLAUDE.md'
-      body = { tab, breakdown, coach, instructionFile, fold: fold() }
-    } else {
-      const settings = await read($, settingsA)
-      discoverApps($)
-      body = { tab, settings, apps: apps ?? [], appsUnavailable: appsFailed }
-    }
-    const paneCells = { columns, rows: Math.max(0, e.props.scroll.bodyRows) }
-    const chrome = mapChrome?.columns === columns ? mapChrome.chrome : guessChrome(columns)
-    const mapBox = mapCells(paneCells, chrome)
-    const mapAspect = cellAspect(mapBox)
-    const fill = e.surface === 'desktop' && e.props.placement === 'dock'
-    // The root's pane-height upper bound lets Desktop's flex holder shrink to
-    // the allocated map; scrolling maps keep their natural height instead.
-    const hitBox = fill ? { box: `${columns}x${paneCells.rows}/${mapBox.columns}x${mapBox.rows}`, reach: paneCells.rows } : undefined
-    if (hitBox === undefined) hitBoxes.delete(e.surface)
-    else hitBoxes.set(e.surface, hitBox)
-    const dimensions = `${tab}/${columns}x${paneCells.rows}`
-    if (fill && tab !== 'map') {
-      if (bodyWindow?.dimensions !== dimensions) bodyWindow = { stamp: `${dimensions}/${++bodyGeneration}`, dimensions, paneRows: paneCells.rows, tab, offset: bodyWindow?.tab === tab ? bodyWindow.offset : 0, viewport: 0, measured: 0, reach: Math.max(1, paneCells.rows), end: bodyWindow?.tab === tab && bodyWindow.end }
-    } else if (e.surface === 'desktop') bodyWindow = undefined
-    const bodyFill = !fill || bodyWindow === undefined || tab === 'map' ? undefined : { stamp: bodyWindow.stamp, offset: visibleBodyOffset(), viewport: bodyWindow.viewport, content: bodyWindow.measured, reach: bodyWindow.reach }
-    const chromeShape = JSON.stringify([columns, paneCells.rows, paneCells.rows < 24, tab, lang])
-    if (fill && measuredChrome?.shape !== chromeShape) measuredChrome = { shape: chromeShape, stamp: `${++chromeGeneration}`, header: measuredChrome?.header ?? 0, footer: measuredChrome?.footer ?? 0, headerReach: Math.max(measuredChrome?.headerReach ?? 1, paneCells.rows), footerReach: Math.max(measuredChrome?.footerReach ?? 1, paneCells.rows) }
-    const chromeFill = !fill || measuredChrome === undefined ? undefined : {
-      stamp: measuredChrome.stamp, header: measuredChrome.header, footer: measuredChrome.footer,
-      headerReach: measuredChrome.headerReach, footerReach: measuredChrome.footerReach,
-      // Each measured height is rounded up; two root gaps occupy one compact row or two normal rows.
-      notice: measuredChrome.header > 0 && measuredChrome.footer > 0
-        ? measuredChrome.header + 1 + measuredChrome.footer + 1 + (paneCells.rows < 24 ? 1 : 2) >= paneCells.rows
-        : paneCells.rows < 6,
-    }
-    const snap: ViewSnapshot = { now, widthPx, lang, assistant: 'Claude', costInfoCommand: '/cost', palette: paletteValue, meter: meterValue, events: list, open, body, ...(fill && { fill: { rows: paneCells.rows, mapAspect, body: bodyFill, chrome: chromeFill } }) }
-    const out = renderPane(nativeRuntime(ui, hitBox), snap, nativeActions($, snap), maps)
-    if (e.surface === 'desktop') {
-      mapVisible = tab === 'map' && out.drawn !== undefined && chromeFill?.notice !== true
-      if (!mapVisible) gesture = GESTURE0
-    }
-    if ('Client' in ui && 'Svg' in ui) {
-      if (out.drawn?.kind === '2d') lastMap = { view: out.drawn.frame.view, L: out.drawn.frame.layout, touched: out.drawn.frame.touched }
-      else if (out.drawn?.kind === '3d') lastSpin = { view: out.drawn.frame.view, L: out.drawn.frame.layout, touched: out.drawn.frame.touched }
-    }
-    return out.node
-  })
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    if (e.props.command !== COMMAND || e.surface !== 'desktop') return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const fr = (await read($, langA)) === 'fr'
+    const active = launchSite === JSON.stringify([e.component, e.requestId, e.surface])
+    const copied = active && relay?.isClosed() === false && launchCopied?.generation === generation && launchCopied.expiresAt > Date.now()
+    return (
+      <Box flexDirection="row" alignItems="center" columnGap="sm" flexWrap="wrap">
+        <Text>{fr ? 'Collez le lien dans la barre d’adresse du navigateur, pas dans la conversation.' : 'Paste the link into the browser address bar, not the conversation.'}</Text>
+        {!(active && launchBusy) && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
+        {active && launchBusy && <Text>{fr ? 'Copie…' : 'Copying…'}</Text>}
+        {active && launchError && <Text>{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
+        {copied && <Text>{fr ? 'Copié.' : 'Copied.'}</Text>}
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
 }
 
 const rank2 = (z: 'ok' | 'warn' | 'bad') => (z === 'ok' ? 0 : z === 'warn' ? 1 : 2)

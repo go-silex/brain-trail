@@ -41,18 +41,12 @@ declare module 'claude-code' {
       events: Shaped<TrailEvent[]>
       totals: Shaped<Totals>
       meter: Shaped<Meter>
-      tab: Tab
       lang: Lang
       zoomed: boolean
-      camera: Shaped<{ x: number; y: number; side: number } | null>
-      view3d: boolean
-      cam3d: Shaped<{ yaw: number; pitch: number; zoom: number; pan: { x: number; y: number }; spin: boolean; at: number }>
       play: Shaped<{ step: number | null; playing: boolean }>
       preview: Shaped<{ p: string; out?: boolean } | null>
       coach: Shaped<{ text: string; patch?: string; at: number; busy: boolean; error?: string }>
-      open: string[]
       settings: Shaped<TrailSettings>
-      handoff: Shaped<Handoff>
     }
   }
 }

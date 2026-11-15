@@ -155,7 +155,6 @@ const en = {
   hoEmpty: 'Nothing to hand off yet: the session has no exchange.',
   // footer
   clear: 'Clear trail', lang: 'Français',
-  opened: 'Brain Trail opened.', later: 'Brain Trail opens once the app is attached to the session.',
   toastWarn: 'Context past 50%. Brain Trail: think about compacting.',
   toastBad: 'Context past 75%. Brain Trail: hand off to a new session.',
 }
@@ -308,7 +307,6 @@ const fr: Strings = {
   hoFailed: "La passation n'a pas pu être écrite :",
   hoEmpty: "Rien à transmettre : la session n'a pas encore d'échange.",
   clear: 'Effacer le parcours', lang: 'English',
-  opened: 'Brain Trail ouvert.', later: "Brain Trail s'ouvrira quand l'app sera attachée à la session.",
   toastWarn: 'Contexte au-delà de 50 %. Brain Trail : pense à compacter.',
   toastBad: 'Contexte au-delà de 75 %. Brain Trail : passe à une nouvelle session.',
 }

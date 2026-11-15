@@ -33,6 +33,9 @@ export interface RelayClient {
   isClosed(): boolean
   listApps(): Promise<string[]>
   prepareBrowser(): Promise<string>
+  prepareBrowserLink(
+    generation: number,
+  ): Promise<{ url: string; expiresAt: number }>
   openBrowser(generation: number): Promise<LaunchReceipt>
   prepareFile(
     root: string,
@@ -102,6 +105,16 @@ export async function startRelay(
   let published = 0
   let publishing: Promise<void> | undefined
   const launches = new Map<string, number>()
+  let linkSequence = 0
+  let linkQueue: Promise<unknown> = Promise.resolve()
+  let stateQueue: Promise<unknown> = Promise.resolve()
+  const serializeState = <T>(operation: () => Promise<T>): Promise<T> => {
+    const next = stateQueue.then(operation)
+    stateQueue = next.catch(() => {})
+    return next
+  }
+  let notifiedGeneration: number | undefined
+  let notifiedEnd = false
   let ended: Extract<ServerEvent, { kind: 'ended' }> | undefined
   let unsubscribe = () => {}
   let resolveHello!: () => void
@@ -233,12 +246,15 @@ export async function startRelay(
       throw new RelayRefusal(code, message, response.status)
     return result
   }
+  let sentGeneration = 0
   const event = async (value: ServerEvent) => {
+    if (value.generation < sentGeneration) return
     await request('event', value)
+    sentGeneration = value.generation
   }
   const flush = (): Promise<void> => {
     if (publishing) return publishing
-    publishing = (async () => {
+    publishing = serializeState(async () => {
       if (!stopped && clients > 0 && published !== version) {
         const target = version
         const pendingEnd = ended
@@ -270,7 +286,7 @@ export async function startRelay(
             throw new RelayRefusal('invalid', 'Invalid relay ready response')
         }
       }
-    })().then(
+    }).then(
       () => {
         publishing = undefined
         if (!stopped && clients > 0 && published !== version)
@@ -291,6 +307,31 @@ export async function startRelay(
     }
   }
   const changed = (value?: ServerEvent) => {
+    if (
+      value &&
+      !stopped &&
+      socket &&
+      (value.generation !== notifiedGeneration ||
+        (value.kind === 'ended' && !notifiedEnd))
+    ) {
+      notifiedGeneration = value.generation
+      notifiedEnd = value.kind === 'ended'
+      const changedEvent = value
+      void serializeState(async () => {
+        if (changedEvent.kind === 'ended') {
+          await event(changedEvent)
+          if (ended === changedEvent) ended = undefined
+        } else {
+          await request('generation', {
+            generation: changedEvent.generation,
+            ended: false,
+          })
+          sentGeneration = Math.max(sentGeneration, changedEvent.generation)
+        }
+      }).catch((error: unknown) =>
+        fail(error, 'Relay generation update failed'),
+      )
+    }
     if (value)
       clearStaleLaunches(value.kind === 'ended' ? -1 : value.generation)
     if (value?.kind === 'ended') {
@@ -437,6 +478,57 @@ export async function startRelay(
       throw new RelayRefusal('invalid', 'Invalid relay socket path')
     return `${socket.slice(0, separator + 1)}open.html`
   }
+  const checkLinkGeneration = (generation: number) => {
+    if (stopped) throw terminalFailure ?? disconnected()
+    if (
+      !Number.isSafeInteger(generation) ||
+      generation < 0 ||
+      feed.current().generation !== generation ||
+      endedGeneration === generation
+    )
+      throw new RelayRefusal('stale-generation', 'Stale launch generation')
+  }
+  const prepareBrowserLink = (
+    generation: number,
+  ): Promise<{ url: string; expiresAt: number }> => {
+    checkLinkGeneration(generation)
+    const sequence = ++linkSequence
+    const operation = linkQueue.then(() =>
+      serializeState(async () => {
+        checkLinkGeneration(generation)
+        if (sequence !== linkSequence)
+          throw new RelayRefusal('stale-generation', 'Launch link replaced')
+        const result = await request('launch', { link: true, generation })
+        sentGeneration = Math.max(sentGeneration, generation)
+        checkLinkGeneration(generation)
+        if (sequence !== linkSequence)
+          throw new RelayRefusal('stale-generation', 'Launch link replaced')
+        if (
+          !object(result) ||
+          result.ok !== true ||
+          typeof result.url !== 'string' ||
+          typeof result.expiresAt !== 'number' ||
+          !Number.isSafeInteger(result.expiresAt)
+        )
+          throw new RelayRefusal('invalid', 'Invalid relay launch response')
+        const match =
+          /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/launch\/[A-Za-z0-9_-]{43}$/.exec(
+            result.url,
+          )
+        const now = Date.now()
+        if (
+          !match ||
+          Number(match[1]) > 65535 ||
+          result.expiresAt <= now ||
+          result.expiresAt > now + 121_000
+        )
+          throw new RelayRefusal('invalid', 'Invalid relay launch response')
+        return { url: result.url, expiresAt: result.expiresAt }
+      }),
+    )
+    linkQueue = operation.catch(() => {})
+    return operation
+  }
   const launch = async (
     route: string,
     generation: number,
@@ -481,6 +573,7 @@ export async function startRelay(
       return result.apps as string[]
     },
     prepareBrowser,
+    prepareBrowserLink,
     async openBrowser(generation) {
       return launch('launch', generation, (id) => ({
         open: true,

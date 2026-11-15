@@ -1,16 +1,16 @@
 import type { SessionMeasureInput } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-
 const PANE = {
   plugin: 'brain-trail-v2',
-  component: 'Pane',
-  requestId: 'brain-trail-v2',
+  component: 'AbovePrompt',
+  requestId: 'compact-band',
   props: {
-    title: 'Brain Trail',
-    isFocused: false,
-    bodyColumns: 60,
-    placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: false,
+    maxRows: 8,
+    bodyColumns: 80,
+    scroll: { offset: 0, bodyRows: 8 },
     view: {},
   },
 } as const
@@ -66,16 +66,16 @@ test('after a compaction, the gauge drops to the estimate instead of keeping the
   })
   await $.session.measure(ctx(62))
   let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /^62 %$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /62 %/ })).toBeDefined()
   await ui.unmount()
   // the engine clears the fill on a compaction
   await $.session.measure(ctx(undefined))
   ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /≈ 11 %/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /11 %/ })).toBeDefined()
   await ui.unmount()
   // the next reply brings the real figure back
   await $.session.measure(ctx(14))
   ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /^14 %$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /14 %/ })).toBeDefined()
   await ui.unmount()
 })

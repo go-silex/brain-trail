@@ -19,7 +19,7 @@ import {
   type DragAction,
   type PointerButton,
 } from '../../hooks/pointer'
-import { ZOOM_MAX, ZOOM_MIN } from '../../hooks/spin'
+import { ZOOM_MAX, ZOOM_MIN } from '../../hooks/scene3d'
 import type { Scene3dProps } from '../../types/view'
 
 type Pose = {

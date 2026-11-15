@@ -1,30 +1,33 @@
 {
   "baseline": "68b45cf54508e4cfde7a44572fa751a69fcda085",
-  "reason": "The inline and browser 3D toolbars gain an always-visible whole-scene fit button, so an off-screen pan can be recovered. Only the added button and toolbar child count change; SVG sources and viewports remain identical. Exact tree differences were independently reviewed; no operational failure is waived.",
+  "reason": "Independent review of the launcher-free cutover approved only these nine band tree changes: explicit Desktop Copy entry, removal of terminal pane buttons, and Desktop entry before meter availability. Retired native panes are not approved; gauge SVGs are unchanged.",
   "cases": {
-    "inline3d-desktop-dark-en": {
-      "tree": "af2acbec4ead3cd083a7aa4efcc9fa1cc6eeb5be953485c6a6e12aba9981703e"
+    "band-desktop-dark-en": {
+      "tree": "5fdc5eb3c66d931ba55f7a8b57543681bf3f6aaff269a5d3965129247f62c634"
     },
-    "inline3d-desktop-dark-fr": {
-      "tree": "63403a4491fb214acee129a0db3fe376c1b43b44795604cf6c131a4fc38fe106"
+    "band-desktop-light-en": {
+      "tree": "5fdc5eb3c66d931ba55f7a8b57543681bf3f6aaff269a5d3965129247f62c634"
     },
-    "inline3d-desktop-light-en": {
-      "tree": "08a91039fc31d8a5d993ba39e475925a22e5e19b6ce1efd80f1d352f8ab82914"
+    "band-desktop-dark-fr": {
+      "tree": "f9edb71a36e8ec64deff872402689f5efba6b765804f9f07fa6f5d7014d473d4"
     },
-    "inline3d-desktop-light-fr": {
-      "tree": "3c42c49445b3402cd559351e265ff5c921ce45a18d429ccd35ee6b0f761ec7cc"
+    "band-desktop-light-fr": {
+      "tree": "f9edb71a36e8ec64deff872402689f5efba6b765804f9f07fa6f5d7014d473d4"
     },
-    "browser3d-desktop-dark-en": {
-      "tree": "af2acbec4ead3cd083a7aa4efcc9fa1cc6eeb5be953485c6a6e12aba9981703e"
+    "band-terminal-dark-en": {
+      "tree": "430e369eb90fa7cddf29d769f5dca0389355678f9e7616952a8bc8b5a96cc783"
     },
-    "browser3d-desktop-dark-fr": {
-      "tree": "63403a4491fb214acee129a0db3fe376c1b43b44795604cf6c131a4fc38fe106"
+    "band-terminal-light-en": {
+      "tree": "430e369eb90fa7cddf29d769f5dca0389355678f9e7616952a8bc8b5a96cc783"
     },
-    "browser3d-desktop-light-en": {
-      "tree": "08a91039fc31d8a5d993ba39e475925a22e5e19b6ce1efd80f1d352f8ab82914"
+    "band-terminal-dark-fr": {
+      "tree": "7b4b4bc5dcc8e11ffa39ea70dd9a38f76eed7254dd988c4384b3da83eddd6294"
     },
-    "browser3d-desktop-light-fr": {
-      "tree": "3c42c49445b3402cd559351e265ff5c921ce45a18d429ccd35ee6b0f761ec7cc"
+    "band-terminal-light-fr": {
+      "tree": "7b4b4bc5dcc8e11ffa39ea70dd9a38f76eed7254dd988c4384b3da83eddd6294"
+    },
+    "band-meter-unavailable-desktop-dark-en": {
+      "tree": "baa6d32024a57d94faa0c52c9ff544e915ddf08f4b0d9c9b9a53bbcb1def3902"
     }
   }
 }

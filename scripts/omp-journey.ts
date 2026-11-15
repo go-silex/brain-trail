@@ -992,13 +992,13 @@ async function until<T>(
         null,
         2,
       ).replace(
-        /http:\/\/127\.0\.0\.1:\d+\/(?:s|launch)\/[^\s"'\\)]+/g,
+        /https?:\/\/[^\s/"'\\]+\/(?:s|launch)\/[^\s"'\\)]+/g,
         '[private browser URL]',
       ),
     )
     throw new Error(
       (error instanceof Error ? error.message : String(error)).replace(
-        /http:\/\/127\.0\.0\.1:\d+\/(?:s|launch)\/[^\s"'\\)]+/g,
+        /https?:\/\/[^\s/"'\\]+\/(?:s|launch)\/[^\s"'\\)]+/g,
         '[private browser URL]',
       ),
     )

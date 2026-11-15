@@ -4,7 +4,7 @@
 
 # Brain Trail
 
-A pane beside the Claude Code chat. It shows what your session put in front of the model: the files it read and wrote, the ones it only saw in a search or through a link, and the tools it called.
+A browser dashboard for your Claude Code session, with a native prompt band and command to copy its launch link. It shows the files the session read and wrote, the ones it only saw in a search or through a link, and the tools it called.
 
 You see why Claude answers the way it does, what it never looked at, and when its context starts to work against you.
 
@@ -60,15 +60,17 @@ claude plugin update brain-trail-v2
 claude plugin uninstall brain-trail-v2
 ```
 
-Had an earlier copy in `~/.claude/mods/`? Remove it, or two panes open.
+Had an earlier copy in `~/.claude/mods/`? Remove it to avoid loading the plugin twice.
 
 </details>
 
 ### 2. Open a new session
 
-The pane opens by itself beside the chat, whatever the folder: a code project, an Obsidian vault, a client folder. Closed it? Type `/brain-trail-v2`.
+In the Desktop prompt band, click **Copy link**. If the band is disabled or collapsed, type `/brain-trail-v2` and use **Copy link** in the command output. Paste the link into the address bar of a live tab in Claude's Browser, not into the chat. You can instead paste it into an external browser. Opening the dashboard requires this manual step; it does not open automatically.
 
-The map is drawn in the desktop app. The terminal shows the text tabs only.
+The link is private, expires shortly and works once. If it expires or has already been used, click **Copy link** again. Treat it like a password and do not share it.
+
+The native plugin captures session activity, owns state and permissions, and provides the relay and prompt band. The map and all dashboard tabs are rendered in the browser; there is no separate Brain Trail dashboard pane.
 
 ### Oh My Pi
 
@@ -78,7 +80,7 @@ With Oh My Pi 18.18.9, install a local checkout and start a new session:
 omp install /path/to/brain-trail
 ```
 
-Type `/brain-trail` to open the dashboard in your browser. Claude and OMP use the same views and controller: the native pane uses SVG and the browser offers WebGL. Both use the Go relay's application registry and the same opening-settings model, while each host retains its own settings. An optional context and cost band appears above the OMP input; you can turn it on or off in Settings.
+Type `/brain-trail` to open the same dashboard in your browser. OMP and Claude use the Go relay's application registry and the same opening-settings model, while each host retains its own settings. An optional context and cost band appears above the OMP input; you can turn it on or off in Settings.
 
 ChatGPT is not supported yet.
 
@@ -96,41 +98,24 @@ Your folder as one disc: one circle per folder, one dot per file. Every file tha
 
 The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc with their logo and their call count. The legend under the map counts each colour; click it to list the files.
 
-Follow the session as it works and replay it step by step. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
+Follow the session as it works and replay it step by step. The **3D** button switches between the browser's 2D SVG and 3D Three.js views. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each browser surface.
 
-These navigation gestures are shared by the pane and browser:
+Dashboard navigation:
 
 | Gesture | 2D | 3D |
 | --- | --- | --- |
-| Wheel | Zoom toward the pointer, when the host supplies wheel input | Zoom toward the pointer, when the host supplies wheel input |
+| Wheel | Zoom toward the pointer | Zoom toward the pointer |
 | Middle-button vertical drag | Zoom out when dragging down, in when dragging up | Same |
 | Left-button drag | Move the map | Turn the scene |
 | Right-button drag | Move the map | Move the scene without turning it |
 
 Only a left click opens a note; pressing several mouse buttons together never opens one. Wheel zoom during a drag is retained when the drag continues. Manual navigation stops following Claude; a drag pauses automatic rotation and restores the prior rotation choice when it ends. The **⤢** control in the 3D toolbar fits the scene back into view. Resetting either view preserves the other view's camera.
 
-**Claude Desktop wheel limitation:** some Desktop versions report only scrolling that already moved the pane, without a wheel pointer. A fitted, fixed-height map cannot receive wheel zoom through that route. Use the middle-button drag or **+ / −** there; the browser supports wheel zoom directly. Brain Trail does not add an invisible scrolling area to work around this host limitation.
-
 Browser 3D adapts to the theme: dark mode uses restrained ambient connections and activity glows; light mode retains its point rendering without bloom.
 
-Opening the browser or a file reports that the launch was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
+Copying a link does not open the dashboard; paste it into a browser address bar. OMP browser launches and file launches report that an opener was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
 
-In a docked Claude Desktop pane, every tab stays within the available height:
-the header and footer remain fixed, and the map fits the space between them.
-Long text tabs navigate inside their body with the wheel, page keys, or the
-First, Previous, Next and Last page buttons. The host reports Home/End like
-page keys, so use First/Last to jump to the ends. Extremely short panes ask you
-to enlarge the pane; the full interface returns when space is available. Inline panes, the terminal
-and the OMP dashboard retain their content-height layout. Desktop sizing uses
-the host's cell measurements, so font and density settings affect pixel scale.
-The map's Client holder uses a pane-height bound and Desktop's flex-shrink
-behavior to match the allocated paint height.
-The map image stretches across its allocated paint area on Desktop.
-Fitted 3D activity glows are bounded so new reads and writes do not move the
-camera. Hiding the map during a drag preserves its final orientation and
-restores rotation only if it was running before the drag. Version 2.3.2 resets
-the saved 3D camera once when introducing screen-plane panning; session history
-and opening preferences are preserved.
+The browser dashboard adapts to its available space. Resizing and fit behavior should be checked in the actual browser surface used with the host.
 
 Inside an Obsidian vault, the map shows the whole vault, even when the session started in a sub-folder.
 

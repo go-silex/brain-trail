@@ -714,7 +714,132 @@ export async function captureBrowserScene(
       revealed.canvas.height <= 0
     )
       throw new Error('WebGL scene did not survive hide/reveal')
+    const compactMeasurements = []
+    for (const height of [430, 320, 430]) {
+      await page.setViewportSize({ width: 700, height })
+      // Playwright polls a synchronous predicate. An async predicate returns a
+      // truthy Promise before its animation-frame samples have completed.
+      await page.evaluate(() => {
+        window.__btCompactSample = undefined
+      })
+      await page.waitForFunction((expected) => {
+        const app = document.querySelector('#app')
+        const brand = !!document.querySelector('[data-key="brand"]')
+        const canvas = document.querySelector('.bt-scene3d canvas')
+        const header = document.querySelector('[data-key="pane-header"]')
+        const footer = document.querySelector('[data-key="pane-footer"]')
+        const wantsBrand = expected >= 408
+        if (
+          !app ||
+          app.clientHeight !== expected ||
+          brand !== wantsBrand ||
+          !canvas ||
+          !header ||
+          !footer
+        ) {
+          window.__btCompactSample = undefined
+          return false
+        }
+        const c = canvas.getBoundingClientRect()
+        const h = header.getBoundingClientRect()
+        const f = footer.getBoundingClientRect()
+        const values = [
+          c.left,
+          c.top,
+          c.width,
+          c.height,
+          h.bottom,
+          f.top,
+          f.bottom,
+        ]
+        const fits =
+          c.width > 0 &&
+          c.height > 0 &&
+          c.top >= h.bottom - 1 &&
+          c.bottom <= f.top + 1 &&
+          f.bottom <= innerHeight + 1
+        const previous = window.__btCompactSample
+        const stable =
+          fits &&
+          previous &&
+          values.every(
+            (value, index) => Math.abs(value - previous.values[index]) < 0.1,
+          )
+        const count = stable ? previous.count + 1 : 0
+        window.__btCompactSample = { values, count }
+        return count >= 3
+      }, height)
+      const compact = await page.evaluate(() => {
+        const app = document.querySelector('#app')
+        const canvas = document.querySelector('.bt-scene3d canvas')
+        const header = document.querySelector('[data-key="pane-header"]')
+        const footer = document.querySelector('[data-key="pane-footer"]')
+        const c = canvas?.getBoundingClientRect()
+        const h = header?.getBoundingClientRect()
+        const f = footer?.getBoundingClientRect()
+        return {
+          appHeight: app?.clientHeight,
+          roots: app?.children.length,
+          maps: document.querySelectorAll('[data-key="t-map"]').length,
+          brand: !!document.querySelector('[data-key="brand"]'),
+          canvas: c && {
+            width: c.width,
+            height: c.height,
+            top: c.top,
+            bottom: c.bottom,
+          },
+          headerBottom: h?.bottom,
+          footerTop: f?.top,
+          footerBottom: f?.bottom,
+          viewportHeight: innerHeight,
+        }
+      })
+      if (
+        compact.roots !== 1 ||
+        compact.maps !== 1 ||
+        compact.brand !== compact.appHeight >= 408 ||
+        !compact.canvas ||
+        compact.canvas.width <= 0 ||
+        compact.canvas.height <= 0 ||
+        compact.headerBottom === undefined ||
+        compact.footerTop === undefined ||
+        compact.footerBottom === undefined ||
+        compact.canvas.top < compact.headerBottom - 1 ||
+        compact.canvas.bottom > compact.footerTop + 1 ||
+        compact.footerBottom > compact.viewportHeight + 1
+      )
+        throw new Error(
+          `invalid compact transition: ${JSON.stringify(compact)}`,
+        )
+      compactMeasurements.push(compact)
+    }
     await page.setViewportSize({ width: 1280, height: 720 })
+    // Local browser navigation is real; commands are refused by this fixture,
+    // so it cannot establish that a host mutation or file operation succeeded.
+    const tabs = {}
+    const landmarks = {
+      goal: '[data-key="plan-0"]',
+      files: '[data-key="kpi-start"]',
+      context: 'button[data-key="more-context"]',
+      coach: '[data-key="coach-run"]',
+      settings: '[data-key="lang-en"]',
+    }
+    for (const tab of ['goal', 'files', 'context', 'coach', 'settings']) {
+      const key = tab === 'settings' ? 'settings' : `t-${tab}`
+      await page.locator(`[data-key="${key}"]`).click()
+      await page.locator(landmarks[tab]).waitFor({ state: 'visible' })
+      tabs[tab] = await page.screenshot({ type: 'png', scale: 'css' })
+    }
+    await page.locator('[data-key="t-map"]').click()
+    await page.locator('[data-key="view-3d"]').click()
+    const svgMap = page.locator('[data-key="map-wrap"] .bt-svg')
+    await svgMap.waitFor({ state: 'visible' })
+    const mapBounds = await svgMap.boundingBox()
+    if (!mapBounds || mapBounds.width <= 0 || mapBounds.height <= 0)
+      throw new Error('2D map has no visible area')
+    tabs.map2d = await page.screenshot({ type: 'png', scale: 'css' })
+    await page.locator('[data-key="view-3d"]').click()
+    await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
     await page.waitForTimeout(100)
     if (errors.length) throw new Error(errors.join('; '))
     const png = await page.screenshot({ type: 'png', scale: 'css' })
@@ -834,6 +959,47 @@ export async function captureBrowserScene(
         `single touch opened the wrong file: ${JSON.stringify(positive)}`,
       )
     await cdp.detach()
+    // Synthetic presentation variants derived from the captured SDK feed;
+    // command execution and host-side failure are not asserted by this replay.
+    let probeRevision = snapshot.revision + 20
+    const publishVariant = (changes) => {
+      const event = {
+        ...snapshot,
+        revision: probeRevision++,
+        facts: { ...snapshot.facts, ...changes },
+      }
+      for (const client of clients)
+        client.write(`data: ${JSON.stringify(event)}\n\n`)
+    }
+    publishVariant({ workspace: { kind: 'loading', since: Date.now() } })
+    await page
+      .getByText(
+        scenario.lang === 'fr'
+          ? 'Je range le dossier en un disque'
+          : 'Packing the folder into one disc',
+        { exact: false },
+      )
+      .waitFor({ state: 'visible' })
+    tabs.loading = await page.screenshot({ type: 'png', scale: 'css' })
+    publishVariant({
+      workspace: { kind: 'failed', message: 'SYNTHETIC_INDEX_FAILURE' },
+    })
+    await page
+      .getByText('SYNTHETIC_INDEX_FAILURE', { exact: false })
+      .waitFor({ state: 'visible' })
+    await page.locator('[data-key="retry"]').waitFor({ state: 'visible' })
+    tabs.error = await page.screenshot({ type: 'png', scale: 'css' })
+    publishVariant({ events: [] })
+    await page.locator('[data-key="map-empty"]').waitFor({ state: 'visible' })
+    tabs.empty = await page.screenshot({ type: 'png', scale: 'css' })
+    await page.locator('[data-key="t-coach"]').click()
+    publishVariant({
+      coach: { text: '', at: 0, busy: false, error: 'SYNTHETIC_COACH_REFUSAL' },
+    })
+    await page
+      .getByText('SYNTHETIC_COACH_REFUSAL', { exact: false })
+      .waitFor({ state: 'visible' })
+    tabs.coachError = await page.screenshot({ type: 'png', scale: 'css' })
     for (const client of clients) client.end()
     await page
       .getByText('Connection lost. Reopen from the host.')
@@ -843,7 +1009,17 @@ export async function captureBrowserScene(
     if (errors.length) throw new Error(errors.join('; '))
     return {
       png,
-      probe: { initial, resized, revealed, readFilePixels: pixels },
+      tabs,
+      probe: {
+        initial,
+        resized,
+        revealed,
+        compactMeasurements,
+        mapBounds,
+        stateScreenshotLimit:
+          'State screenshots are manual diagnostics, not pixel equality proofs; empty-state WebGL paint timing is nondeterministic.',
+        readFilePixels: pixels,
+      },
     }
   } finally {
     await context.close()

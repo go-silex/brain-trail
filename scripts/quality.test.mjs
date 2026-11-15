@@ -818,23 +818,19 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
       actions: ['open-3d'],
     },
   }
-  assert.equal(
-    fixtureInputProblem(scenario, capture, structuredClone(capture)),
-    null,
-  )
-  const changed = structuredClone(capture)
+  const candidateCapture = structuredClone(capture)
+  candidateCapture.fixture.actions = ['copy-browser-link']
+  assert.equal(fixtureInputProblem(scenario, capture, candidateCapture), null)
+  const changed = structuredClone(candidateCapture)
   changed.fixture.input.state.events.value[0].p = 'notes/other.md'
-  assert.match(
-    fixtureInputProblem(scenario, capture, changed),
-    /transcripts differ/,
-  )
-  const omitted = structuredClone(capture)
+  assert.match(fixtureInputProblem(scenario, capture, changed), /inputs differ/)
+  const omitted = structuredClone(candidateCapture)
   omitted.fixture.actions = []
   assert.match(
     fixtureInputProblem(scenario, capture, omitted),
     /expected actions/,
   )
-  const missing = structuredClone(capture)
+  const missing = structuredClone(candidateCapture)
   delete missing.fixture.input.state.meter
   assert.match(fixtureInputProblem(scenario, capture, missing), /seeded state/)
   assert.match(
@@ -849,10 +845,12 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
     const next = structuredClone(capture)
     next.fixture.input.scenario = nextScenario
     next.fixture.actions = [action]
-    assert.equal(fixtureInputProblem(nextScenario, next, next), null)
+    const candidateNext = structuredClone(next)
+    candidateNext.fixture.actions = []
+    assert.equal(fixtureInputProblem(nextScenario, next, candidateNext), null)
     next.fixture.actions = []
     assert.match(
-      fixtureInputProblem(nextScenario, next, next),
+      fixtureInputProblem(nextScenario, next, candidateNext),
       /expected actions/,
     )
   }

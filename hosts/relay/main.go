@@ -33,6 +33,8 @@ type relay struct {
 	hostToken, token, host, assets, dir string
 	launch                              string
 	launchExpiry                        time.Time
+	launchGeneration                    int64
+	launchBound, generationEnded        bool
 	generation, revision                int64
 	layout, snapshot                    []byte
 	ready, initializing                 bool
@@ -73,6 +75,7 @@ func (l *limitedListener) Accept() (net.Conn, error) {
 		}
 	}
 }
+
 func boundedServer(handler http.Handler) *http.Server {
 	return &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024}
 }
@@ -215,6 +218,7 @@ func fail(w http.ResponseWriter, e error) {
 	jsonOut(w, map[string]any{"ok": false, "error": kind})
 }
 func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.hostToken)) != 1 {
 		w.WriteHeader(401)
 		return
@@ -236,6 +240,38 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/h/generation":
+		var q struct {
+			Generation *int64 `json:"generation"`
+			Ended      bool   `json:"ended"`
+		}
+		if json.Unmarshal(b, &q) != nil || q.Generation == nil || *q.Generation < 0 || *q.Generation > 9007199254740991 {
+			w.WriteHeader(400)
+			return
+		}
+		s.mu.Lock()
+		if *q.Generation > s.generation {
+			s.generation = *q.Generation
+			s.revision = 0
+			s.layout = nil
+			s.snapshot = nil
+			s.ready = false
+			s.generationEnded = false
+			if s.launchBound {
+				s.launch = ""
+				s.launchBound = false
+			}
+		}
+		if *q.Generation == s.generation && q.Ended {
+			s.generationEnded = true
+			s.layout = nil
+			s.snapshot = nil
+			s.ready = false
+			s.launch = ""
+			s.launchBound = false
+		}
+		s.mu.Unlock()
+		jsonOut(w, map[string]bool{"ok": true})
 	case "/h/event":
 		var ev struct {
 			V          int    `json:"v"`
@@ -248,12 +284,17 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
-		if ev.Generation < s.generation || (ev.Generation == s.generation && ev.Kind == "snapshot" && ev.Revision < s.revision) {
+		if ev.Generation < s.generation || (ev.Generation == s.generation && ((s.generationEnded && ev.Kind != "ended") || (ev.Kind == "snapshot" && ev.Revision < s.revision))) {
 			s.mu.Unlock()
 			w.WriteHeader(409)
 			return
 		}
 		if ev.Generation > s.generation {
+			if s.launchBound {
+				s.launch = ""
+				s.launchBound = false
+			}
+			s.generationEnded = false
 			s.generation = ev.Generation
 			s.revision = 0
 			s.layout = nil
@@ -268,6 +309,9 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			s.snapshot = append([]byte(nil), b...)
 			s.ready = !s.initializing
 		case "ended":
+			s.launch = ""
+			s.launchBound = false
+			s.generationEnded = true
 			s.layout = nil
 			s.snapshot = nil
 			s.ready = false
@@ -320,17 +364,23 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 	case "/h/launch":
 		var q struct {
 			Open       bool   `json:"open"`
+			Link       bool   `json:"link"`
 			ID         string `json:"id"`
 			Generation *int64 `json:"generation"`
 		}
-		if json.Unmarshal(b, &q) != nil || (q.Open && !validLaunchIdentity(q.ID, q.Generation)) {
+		if json.Unmarshal(b, &q) != nil || (q.Open && q.Link) || (q.Open && !validLaunchIdentity(q.ID, q.Generation)) || (q.Link && (q.Generation == nil || *q.Generation < 0 || *q.Generation > 9007199254740991)) {
 			w.WriteHeader(400)
 			return
 		}
 		s.launchMu.Lock()
 		defer s.launchMu.Unlock()
 		s.mu.Lock()
-		busy := s.launch != "" && time.Now().Before(s.launchExpiry)
+		if q.Link && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+			s.mu.Unlock()
+			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
+			return
+		}
+		busy := !q.Link && s.launch != "" && time.Now().Before(s.launchExpiry)
 		s.mu.Unlock()
 		if busy {
 			jsonOut(w, map[string]any{"ok": false, "error": "busy"})
@@ -342,10 +392,32 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
+		if q.Link && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+			s.mu.Unlock()
+			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
+			return
+		}
+		if q.Link && *q.Generation > s.generation {
+			s.generation = *q.Generation
+			s.generationEnded = false
+			s.revision = 0
+			s.layout = nil
+			s.snapshot = nil
+			s.ready = false
+		}
 		s.launch = code
 		s.launchExpiry = time.Now().Add(120 * time.Second)
+		s.launchBound = q.Link
+		if q.Link {
+			s.launchGeneration = *q.Generation
+		}
+		expiry := s.launchExpiry
 		s.mu.Unlock()
 		u := "http://" + s.host + "/launch/" + code
+		if q.Link {
+			jsonOut(w, map[string]any{"ok": true, "url": u, "expiresAt": expiry.UnixMilli()})
+			return
+		}
 		data := []byte(`<!doctype html><meta http-equiv="refresh" content="0;url=` + u + `"><title>Opening Brain Trail</title>`)
 		p := filepath.Join(s.dir, "open.html")
 		if err = os.WriteFile(p, data, 0600); err != nil {
@@ -448,10 +520,14 @@ func (s *relay) browserHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 		return
 	}
+	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+s.host {
+		w.WriteHeader(403)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/launch/") && r.Method == "GET" {
 		code := strings.TrimPrefix(r.URL.Path, "/launch/")
 		s.mu.Lock()
-		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
+		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && (!s.launchBound || (s.launchGeneration == s.generation && !s.generationEnded)) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
 		if ok {
 			s.launch = ""
 		}
@@ -666,7 +742,7 @@ func serve(assets string) error {
 	if _, e = privacyEvidence(dir, sock); e != nil {
 		return e
 	}
-	tcp, e := net.Listen("tcp", "127.0.0.1:0")
+	tcp, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {
 		return e
 	}

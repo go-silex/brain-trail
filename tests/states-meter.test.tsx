@@ -1,32 +1,33 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
+import { mountReady, type ViewCase } from './fixtures/views'
 
-import { mountReady, mountTarget, type ViewCase } from './fixtures/views'
-
-const METER: ViewCase = {
-  id: 'meter',
-  component: 'Pane',
+const scenario: ViewCase = {
+  id: 'meter-unavailable',
+  component: 'AbovePrompt',
   surface: 'desktop',
   theme: 'dark',
   lang: 'en',
   tab: 'context',
   phase: 'meter-unavailable',
   view3d: false,
-  browser3d: false,
+  browser3d: true,
   transition: 'none',
 }
 
-test('a meter with no percent draws a dash and leaves the band to the host', async ($, on: On) => {
-  const pane = await mountReady($, on, METER)
-  expect(await pane.ui.find({ type: 'Text', text: '–' })).toBeDefined()
-  expect(await pane.ui.find({ key: 'hdr-compact' })).toBeUndefined()
-  const band = await $.ui.mount(
-    mountTarget({ ...METER, id: 'band', component: 'AbovePrompt' }),
-  )
-  expect(await band.findAll({ type: 'Svg' })).toEqual([])
-  expect(
-    await band.find({ type: 'Button', key: 'band-handoff' }),
-  ).toBeUndefined()
-  await band.unmount()
-  await pane.ui.unmount()
+test('desktop Copy remains available before the first context measurement', async ($, on: On) => {
+  const { ui, host } = await mountReady($, on, scenario)
+  try {
+    expect(await ui.findAll({ type: 'Svg' })).toEqual([])
+    expect(
+      await ui.find({ type: 'Button', key: 'copy-browser-link' }),
+    ).toBeDefined()
+    expect(host.copyCalls).toEqual([])
+    await ui.press({ key: 'copy-browser-link' })
+    await host.browserReady
+    expect(host.copyCalls.length).toBe(1)
+  } finally {
+    host.disconnectRelay()
+    await ui.unmount()
+  }
 })

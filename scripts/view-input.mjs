@@ -13,7 +13,7 @@ const stable = (value) =>
 
 // Input mismatches are operational errors, never visual differences eligible for approval.
 export function fixtureInputProblem(scenario, baseline, candidate) {
-  const expectedActions =
+  const baselineActions =
     scenario.phase === 'loading'
       ? []
       : [
@@ -22,6 +22,10 @@ export function fixtureInputProblem(scenario, baseline, candidate) {
           ...(scenario.transition === 'replay' ? ['play'] : []),
           ...(scenario.phase === 'coach-error' ? ['coach-run'] : []),
         ]
+  const candidateActions =
+    scenario.phase !== 'loading' && scenario.browser3d
+      ? ['copy-browser-link']
+      : []
   for (const [side, capture] of [
     ['baseline', baseline],
     ['candidate', candidate],
@@ -30,7 +34,10 @@ export function fixtureInputProblem(scenario, baseline, candidate) {
     const input = fixture?.input
     if (!record(fixture) || !record(input) || !Array.isArray(fixture.actions))
       return `${side} fixture input/action transcript is missing`
-    if (stable(fixture.actions) !== stable(expectedActions))
+    if (
+      stable(fixture.actions) !==
+      stable(side === 'baseline' ? baselineActions : candidateActions)
+    )
       return `${side} fixture did not complete the expected actions`
     if (
       stable(input.scenario) !== stable(scenario) ||
@@ -84,7 +91,7 @@ export function fixtureInputProblem(scenario, baseline, candidate) {
     )
       return `${side} fixture seeded state or store is invalid`
   }
-  if (stable(baseline.fixture) !== stable(candidate.fixture))
-    return 'baseline and candidate fixture input/action transcripts differ'
+  if (stable(baseline.fixture.input) !== stable(candidate.fixture.input))
+    return 'baseline and candidate fixture inputs differ'
   return null
 }

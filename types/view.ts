@@ -2,8 +2,7 @@ import type { Index } from '../hooks/files'
 import type { Layout, Palette } from '../hooks/map'
 import type { MapFrame, PointerButton } from '../hooks/pointer'
 import type { FigureId } from '../hooks/readout'
-import type { Cam, SpinView } from '../hooks/spin'
-import type { SceneSemantics } from '../hooks/scene3d'
+import type { Cam, SceneSemantics } from '../hooks/scene3d'
 import type {
   Camera,
   Coach,
@@ -328,11 +327,8 @@ export type MapGesture =
   | { kind: 'dragend' }
 export type MapTip = { text: string; x: number; y: number }
 export type Drawn2d = { view: MapFrame; layout: Layout; touched: Set<number> }
-export type Drawn3d = { view: SpinView; layout: Layout; touched: Set<number> }
-export type DrawnMap =
-  | { kind: '2d'; frame: Drawn2d }
-  | { kind: '3d'; frame: Drawn3d }
-export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
+export type DrawnMap = { kind: '2d'; frame: Drawn2d }
+export type DrawnFrames = { d2: Drawn2d | undefined }
 export type MapPoint = { fx: number; fy: number }
 // A press in progress goes on in stretches: the frame its current stretch started from, where the
 // pointer was then (`from`) and where it was last seen (`at`). A wheel turned during the press
@@ -344,25 +340,9 @@ export type Drag2d = {
   from: MapPoint
   at: MapPoint
 }
-// in 3D, also the turn and the tilt the stretch started from
-// A 3D press keeps the turn and tilt of its stretch, and the layout it went down on, to frame
-// what it shows without waiting for a drawing.
-export type Drag3d = {
-  press: number
-  button: PointerButton
-  yaw: number
-  pitch: number
-  view: SpinView
-  layout: Layout
-  from: MapPoint
-  at: MapPoint
-}
 export type GestureMemory = {
   hover: MapPoint | undefined
   drag2d: Drag2d | undefined
-  drag3d: Drag3d | undefined
-  // the followed 3D drawing a zoom already left: until a newer drawing, zooms go on from the camera
-  leftFollow: SpinView | undefined
 }
 export type GestureResult = {
   memory: GestureMemory
