@@ -83,6 +83,114 @@ async function deniedWebGLProof(
       throw new Error(`unavailable notice is not localized or honest: ${text}`)
     const attempts = await page.evaluate(() => window.__glAttempts)
     if (!attempts) throw new Error('WebGL context denial was not exercised')
+    const assertLayout = async () => {
+      await page.evaluate(() => {
+        window.__btUnavailableSample = undefined
+      })
+      await page.waitForFunction(
+        () => {
+          const header = document.querySelector('[data-key="pane-header"]')
+          const footer = document.querySelector('[data-key="pane-footer"]')
+          const notice = document.querySelector('.bt-scene3d-unavailable')
+          if (!header || !footer || !notice) return false
+          const h = header.getBoundingClientRect()
+          const f = footer.getBoundingClientRect()
+          const n = notice.getBoundingClientRect()
+          const values = [
+            h.top,
+            h.bottom,
+            f.left,
+            f.top,
+            f.right,
+            f.bottom,
+            n.left,
+            n.top,
+            n.right,
+            n.bottom,
+            document.documentElement.scrollWidth,
+            document.documentElement.scrollHeight,
+            document.body.scrollWidth,
+            document.body.scrollHeight,
+          ]
+          const previous = window.__btUnavailableSample
+          const stable =
+            previous &&
+            values.every(
+              (value, index) => Math.abs(value - previous.values[index]) < 0.1,
+            )
+          const count = stable ? previous.count + 1 : 0
+          window.__btUnavailableSample = { values, count }
+          return count >= 3
+        },
+        null,
+        { polling: 'raf' },
+      )
+      const geometry = await page.evaluate(() => {
+        const header = document.querySelector('[data-key="pane-header"]')
+        const footer = document.querySelector('[data-key="pane-footer"]')
+        const notice = document.querySelector('.bt-scene3d-unavailable')
+        const rect = (element) => {
+          const bounds = element.getBoundingClientRect()
+          const style = getComputedStyle(element)
+          return {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+            width: bounds.width,
+            height: bounds.height,
+            visible:
+              style.display !== 'none' &&
+              style.visibility === 'visible' &&
+              Number(style.opacity) > 0,
+          }
+        }
+        return {
+          header: rect(header),
+          footer: rect(footer),
+          notice: rect(notice),
+          width: innerWidth,
+          height: innerHeight,
+          scrollWidth: Math.max(
+            document.documentElement.scrollWidth,
+            document.body.scrollWidth,
+          ),
+          scrollHeight: Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight,
+          ),
+          scrollX,
+          scrollY,
+        }
+      })
+      const { header, footer, notice, width, height } = geometry
+      if (
+        !header.visible ||
+        !footer.visible ||
+        !notice.visible ||
+        footer.width <= 0 ||
+        footer.height <= 0 ||
+        notice.width <= 0 ||
+        notice.height <= 0 ||
+        footer.left < -1 ||
+        footer.right > width + 1 ||
+        footer.top < -1 ||
+        footer.bottom > height + 1 ||
+        notice.left < -1 ||
+        notice.right > width + 1 ||
+        notice.top < header.bottom - 1 ||
+        notice.bottom > footer.top + 1 ||
+        geometry.scrollWidth > width + 1 ||
+        geometry.scrollHeight > height + 1 ||
+        geometry.scrollX !== 0 ||
+        geometry.scrollY !== 0
+      )
+        throw new Error(
+          `invalid unavailable WebGL layout: ${JSON.stringify(geometry)}`,
+        )
+      return geometry
+    }
+    const unavailableLayouts = [await assertLayout()]
     for (const [index, width] of [900, 1100, 1280].entries()) {
       await page.setViewportSize({ width, height: 720 })
       const event = {
@@ -118,6 +226,7 @@ async function deniedWebGLProof(
         throw new Error(
           `denied WebGL update leaked roots or retried: ${JSON.stringify(state)}`,
         )
+      unavailableLayouts.push(await assertLayout())
     }
     for (const [tab, landmark] of [
       ['t-goal', '[data-key="plan-0"]'],
@@ -153,6 +262,7 @@ async function deniedWebGLProof(
     return {
       notice: text,
       initialContextAttempts: attempts,
+      layouts: unavailableLayouts,
       updates: 3,
       tabs: 5,
       explicit2D: true,
