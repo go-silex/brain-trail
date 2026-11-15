@@ -1,6 +1,166 @@
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+
+async function rendererFailureProof(browser, root) {
+  const temp = await mkdtemp(path.join(tmpdir(), 'renderer-failure-'))
+  const dependencies = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../node_modules',
+  )
+  const link = path.join(root, 'node_modules')
+  let linked = false
+  try {
+    await symlink(dependencies, link, 'dir')
+    linked = true
+    const output = path.join(temp, 'fixture.js')
+    await execFileAsync(
+      'bun',
+      [
+        'build',
+        path.join(root, 'tests/fixtures/renderer-failure.ts'),
+        '--target=browser',
+        `--outfile=${output}`,
+      ],
+      { cwd: root },
+    )
+    const context = await browser.newContext()
+    try {
+      const page = await context.newPage()
+      await page.setContent('<!doctype html><body></body>')
+      await page.addScriptTag({ content: await readFile(output, 'utf8') })
+      return await page.evaluate(() => window.rendererFailureProof())
+    } finally {
+      await context.close()
+    }
+  } finally {
+    if (linked) await rm(link, { force: true })
+    await rm(temp, { recursive: true, force: true })
+  }
+}
+
+async function deniedWebGLProof(
+  browser,
+  origin,
+  clients,
+  layout,
+  snapshot,
+  lang,
+) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+  })
+  try {
+    const page = await context.newPage()
+    const errors = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.addInitScript(() => {
+      const original = HTMLCanvasElement.prototype.getContext
+      window.__glAttempts = 0
+      HTMLCanvasElement.prototype.getContext = function (kind, ...args) {
+        if (['webgl2', 'webgl', 'experimental-webgl'].includes(kind)) {
+          window.__glAttempts++
+          return null
+        }
+        return original.call(this, kind, ...args)
+      }
+    })
+    await page.goto(origin, { waitUntil: 'load' })
+    const notice = page.locator('.bt-scene3d-unavailable[role="status"]')
+    await notice.waitFor({ state: 'visible' })
+    const text = await notice.innerText()
+    if (
+      !/webgl/i.test(text) ||
+      !/2D/.test(text) ||
+      !(lang === 'fr' ? /indisponible/i : /unavailable/i).test(text)
+    )
+      throw new Error(`unavailable notice is not localized or honest: ${text}`)
+    const attempts = await page.evaluate(() => window.__glAttempts)
+    if (!attempts) throw new Error('WebGL context denial was not exercised')
+    for (const [index, width] of [900, 1100, 1280].entries()) {
+      await page.setViewportSize({ width, height: 720 })
+      const event = {
+        ...snapshot,
+        revision: snapshot.revision + index + 1,
+        facts: {
+          ...snapshot.facts,
+          meter: { ...snapshot.facts.meter, percent: 51 + index },
+        },
+      }
+      for (const client of clients) {
+        client.write(`data: ${JSON.stringify(layout)}\n\n`)
+        client.write(`data: ${JSON.stringify(event)}\n\n`)
+      }
+      await page
+        .getByText(`${51 + index} %`, { exact: false })
+        .first()
+        .waitFor({ state: 'visible' })
+      const state = await page.evaluate(() => ({
+        roots: document.querySelector('#app')?.children.length,
+        headers: document.querySelectorAll('[data-key="pane-header"]').length,
+        footers: document.querySelectorAll('[data-key="pane-footer"]').length,
+        notices: document.querySelectorAll('.bt-scene3d-unavailable').length,
+        attempts: window.__glAttempts,
+      }))
+      if (
+        state.roots !== 1 ||
+        state.headers !== 1 ||
+        state.footers !== 1 ||
+        state.notices !== 1 ||
+        state.attempts !== attempts
+      )
+        throw new Error(
+          `denied WebGL update leaked roots or retried: ${JSON.stringify(state)}`,
+        )
+    }
+    for (const [tab, landmark] of [
+      ['t-goal', '[data-key="plan-0"]'],
+      ['t-files', '[data-key="kpi-start"]'],
+      ['t-context', 'button[data-key="more-context"]'],
+      ['t-coach', '[data-key="coach-run"]'],
+      ['settings', '[data-key="lang-en"]'],
+    ]) {
+      await page.locator(`[data-key="${tab}"]`).click()
+      await page.locator(landmark).waitFor({ state: 'visible' })
+    }
+    const langRequest = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === '/command' &&
+        request.postDataJSON()?.command?.kind === 'lang',
+    )
+    await page
+      .locator(`[data-key="lang-${lang === 'fr' ? 'en' : 'fr'}"]`)
+      .click()
+    await langRequest
+    await page.locator('[data-key="t-map"]').click()
+    await notice.waitFor({ state: 'visible' })
+    await page.locator('[data-key="view-3d"]').click()
+    await page
+      .locator('[data-key="map-wrap"] .bt-svg')
+      .waitFor({ state: 'visible' })
+    if (
+      (await page.locator('[data-key="view-3d"]').innerText()).trim() !== '3D'
+    )
+      throw new Error('explicit 2D control did not switch dimensions')
+    if (errors.length)
+      throw new Error(`denied WebGL caused page errors: ${errors.join('; ')}`)
+    return {
+      notice: text,
+      initialContextAttempts: attempts,
+      updates: 3,
+      tabs: 5,
+      explicit2D: true,
+    }
+  } finally {
+    await context.close()
+  }
+}
 
 // Replay the actual adapter's captured feed through the built application. Commands
 // are deliberately refused: this transport does not stand in for a live host.
@@ -10,6 +170,7 @@ export async function captureBrowserScene(
   captured,
   scenario,
   semantic = false,
+  candidate = false,
 ) {
   const events = captured.browserEvents
   if (!Array.isArray(events))
@@ -69,6 +230,9 @@ export async function captureBrowserScene(
     ),
   )
   const clients = new Set()
+  let deferWhole = false
+  let wholeArrived = () => {}
+  let releaseWhole
   const server = createServer((req, res) => {
     if (req.url === '/events') {
       res.writeHead(200, {
@@ -86,8 +250,23 @@ export async function captureBrowserScene(
       })
       res.end(assets.get(name))
     } else if (req.url === '/command') {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end('{"ok":false,"error":"unsupported"}')
+      let body = ''
+      req.on('data', (chunk) => {
+        body += chunk
+      })
+      req.on('end', () => {
+        const command = JSON.parse(body).command
+        res.writeHead(200, { 'content-type': 'application/json' })
+        if (
+          deferWhole &&
+          command?.kind === 'view' &&
+          command.intent?.kind === 'whole'
+        ) {
+          deferWhole = false
+          releaseWhole = () => res.end('{"ok":true}')
+          wholeArrived()
+        } else res.end('{"ok":false,"error":"unsupported"}')
+      })
     } else if (req.url === '/') {
       res.writeHead(200, { 'content-type': 'text/html' })
       res.end(
@@ -132,6 +311,19 @@ export async function captureBrowserScene(
     return route.continue()
   })
   try {
+    const failureProof =
+      candidate && semantic ? await rendererFailureProof(browser, root) : null
+    const unavailableProof =
+      candidate && semantic
+        ? await deniedWebGLProof(
+            browser,
+            origin,
+            clients,
+            layout,
+            snapshot,
+            scenario.lang,
+          )
+        : null
     await page.clock.install({ time: new Date('2026-11-11T12:00:00.000Z') })
     await page.goto(origin, { waitUntil: 'load' })
     await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
@@ -668,6 +860,93 @@ export async function captureBrowserScene(
     )
     if (!(await canvas.evaluate((el) => el.isConnected)))
       throw new Error('ordinary settings update replaced the WebGL canvas')
+    // Screenshot the composited canvas during real Chromium input. Hide DOM
+    // labels/tooltip so their motion cannot masquerade as changed WebGL pixels.
+    const dragStyle = await page.addStyleTag({
+      content: '.bt-scene-labels, .bt-tip { visibility: hidden !important }',
+    })
+    const dragBounds = await canvas.boundingBox()
+    if (!dragBounds) throw new Error('held drag needs visible canvas bounds')
+    const dragClip = {
+      x: Math.ceil(dragBounds.x),
+      y: Math.ceil(dragBounds.y),
+      width: Math.floor(dragBounds.width) - 1,
+      height: Math.floor(dragBounds.height) - 1,
+    }
+    await canvas.evaluate((element) => {
+      window.__btHeldMoves = []
+      element.addEventListener('pointermove', (event) => {
+        if (event.isTrusted && event.buttons === 1)
+          window.__btHeldMoves.push([event.clientX, event.clientY])
+      })
+    })
+    const frame = async () => {
+      await page.clock.runFor(180)
+      return page.screenshot({ type: 'png', scale: 'css', clip: dragClip })
+    }
+    const x = dragBounds.x + dragBounds.width * 0.5
+    const y = dragBounds.y + dragBounds.height * 0.5
+    await page.mouse.move(x, y)
+    const beforeWheel = await frame()
+    await page.mouse.wheel(0, 220)
+    const afterWheel = await frame()
+    const beforeDragProjection = await projected()
+    await page.mouse.down()
+    await page.mouse.move(x + 55, y + 15, { steps: 5 })
+    const heldFirst = await frame()
+    const firstDragProjection = await projected()
+    await page.mouse.move(x + 115, y + 35, { steps: 5 })
+    const heldSecond = await frame()
+    const secondDragProjection = await projected()
+    const heldMoves = await page.evaluate(() => window.__btHeldMoves.length)
+    // Both screenshots were captured above while the primary button was held.
+    await page.mouse.up()
+    await dragStyle.evaluate((element) => element.remove())
+    const pixelChanges = await page.evaluate(
+      async (sources) => {
+        const buffers = []
+        for (const source of sources) {
+          const image = new Image()
+          image.src = source
+          await image.decode()
+          const canvas = document.createElement('canvas')
+          canvas.width = image.naturalWidth
+          canvas.height = image.naturalHeight
+          const context = canvas.getContext('2d')
+          if (!context) throw new Error('cannot decode gesture screenshots')
+          context.drawImage(image, 0, 0)
+          buffers.push(
+            context.getImageData(0, 0, canvas.width, canvas.height).data,
+          )
+        }
+        return buffers.slice(1).map((right, index) => {
+          const left = buffers[index]
+          let changed = 0
+          for (let i = 0; i < right.length; i += 4)
+            if (
+              left[i] !== right[i] ||
+              left[i + 1] !== right[i + 1] ||
+              left[i + 2] !== right[i + 2]
+            )
+              changed++
+          return changed
+        })
+      },
+      [beforeWheel, afterWheel, heldFirst, heldSecond].map(
+        (png) => `data:image/png;base64,${png.toString('base64')}`,
+      ),
+    )
+    if (
+      heldMoves < 2 ||
+      pixelChanges.some((count) => count < 20) ||
+      JSON.stringify(beforeDragProjection) ===
+        JSON.stringify(firstDragProjection) ||
+      JSON.stringify(firstDragProjection) ===
+        JSON.stringify(secondDragProjection)
+    )
+      throw new Error(
+        `wheel/held drag did not paint distinct frames: ${JSON.stringify({ heldMoves, pixelChanges })}`,
+      )
     if (
       !snapshot.facts.breakdown?.memoryFiles?.some(
         (file) => file.path === '/work/demo/CLAUDE.md' && file.tokens === 900,
@@ -828,6 +1107,31 @@ export async function captureBrowserScene(
       const key = tab === 'settings' ? 'settings' : `t-${tab}`
       await page.locator(`[data-key="${key}"]`).click()
       await page.locator(landmarks[tab]).waitFor({ state: 'visible' })
+      if (tab === 'goal') {
+        const current = await page.locator('[data-key="goal"]').innerText()
+        const plan = await page.locator('[data-key="plan"]').innerText()
+        const complete = await page.locator('[data-key="plan-0"]').innerText()
+        const active = await page.locator('[data-key="plan-1"]').innerText()
+        if (
+          !current.includes('Check the final summary') ||
+          !plan.includes('1/2') ||
+          !complete.includes('✓') ||
+          !complete.includes('Read the note') ||
+          !active.includes('●') ||
+          !active.includes('Write the summary')
+        )
+          throw new Error(
+            'goal or plan progress does not match captured events',
+          )
+        const history = await page.locator('[data-key="history"]').innerText()
+        if (
+          history.indexOf('Check the final summary') < 0 ||
+          history.indexOf('Summarise the notes') < 0 ||
+          history.indexOf('Check the final summary') >=
+            history.indexOf('Summarise the notes')
+        )
+          throw new Error('goal history is not newest first')
+      }
       tabs[tab] = await page.screenshot({ type: 'png', scale: 'css' })
     }
     await page.locator('[data-key="t-map"]').click()
@@ -959,6 +1263,57 @@ export async function captureBrowserScene(
         `single touch opened the wrong file: ${JSON.stringify(positive)}`,
       )
     await cdp.detach()
+    if (candidate) {
+      // A controlled delayed success tests the real page's response race. It
+      // does not stand in for a host executing the command.
+      await page.locator('[data-key="view-3d"]').click()
+      const mapImage = page.locator('[data-key="map-wrap"] .bt-svg')
+      await mapImage.waitFor({ state: 'visible' })
+      const viewBox = async () => {
+        const src = await mapImage.getAttribute('src')
+        return /viewBox="([^"]+)"/.exec(decodeURIComponent(src ?? ''))?.[1]
+      }
+      const originalBox = await viewBox()
+      const mapRect = await mapImage.boundingBox()
+      if (!mapRect || !originalBox) throw new Error('2D race probe has no map')
+      await page.mouse.move(
+        mapRect.x + mapRect.width / 2,
+        mapRect.y + mapRect.height / 2,
+      )
+      await page.mouse.wheel(0, -360)
+      await page.clock.runFor(200)
+      const zoomedBox = await viewBox()
+      if (!zoomedBox || zoomedBox === originalBox)
+        throw new Error(
+          '2D race probe could not establish a non-default camera',
+        )
+      await page.locator('[data-key="view-3d"]').click()
+      await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
+      const arrival = new Promise((resolve) => {
+        wholeArrived = resolve
+      })
+      deferWhole = true
+      await page.locator('[data-key="whole"]').click()
+      await arrival
+      await page.locator('[data-key="view-3d"]').click()
+      await mapImage.waitFor({ state: 'visible' })
+      const beforeReplyBox = await viewBox()
+      if (beforeReplyBox !== zoomedBox)
+        throw new Error('2D camera changed before delayed 3D reset completed')
+      const wholeResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === '/command' &&
+          response.request().postDataJSON()?.command?.intent?.kind === 'whole',
+      )
+      releaseWhole()
+      releaseWhole = undefined
+      await wholeResponse
+      await page.clock.runFor(100)
+      if ((await viewBox()) !== beforeReplyBox)
+        throw new Error('delayed 3D reset changed the current 2D camera')
+      await page.locator('[data-key="view-3d"]').click()
+      await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
+    }
     // Synthetic presentation variants derived from the captured SDK feed;
     // command execution and host-side failure are not asserted by this replay.
     let probeRevision = snapshot.revision + 20
@@ -1011,6 +1366,8 @@ export async function captureBrowserScene(
       png,
       tabs,
       probe: {
+        failureProof,
+        unavailableProof,
         initial,
         resized,
         revealed,
@@ -1022,6 +1379,7 @@ export async function captureBrowserScene(
       },
     }
   } finally {
+    releaseWhole?.()
     await context.close()
     for (const client of clients) client.end()
     await new Promise((resolve) => server.close(resolve))

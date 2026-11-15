@@ -108,6 +108,8 @@ const EVENTS = [
   { k: 'seen', ps: ['notes/b.md'], via: 'search', at: 4_000 },
   { k: 'mcp', server: 'linear', tool: 'list_issues', label: 'bugs', at: 5_000 },
   { k: 'done', at: 6_000 },
+  { k: 'prompt', text: 'Check the final summary', at: 7_000 },
+  { k: 'act', tool: 'Read', what: 'notes/b.md', at: 8_000 },
 ]
 
 const SHAPES: Record<string, string> = {

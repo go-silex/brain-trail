@@ -133,10 +133,13 @@ test(
   { timeoutMs: 20_000 },
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
+    const command = await mountCommandOutput($)
     host.holdLink()
     try {
-      const preparing = ui.press({ key: 'copy-browser-link' })
+      const preparing = command.press({ key: 'copy-browser-link' })
       await host.linkStarted
+      await ui.redraw()
+      expect(await ui.find({ key: 'copy-browser-link' })).toBeUndefined()
       await $.session.start({
         cwd: CWD,
         surface: 'desktop',
@@ -147,10 +150,12 @@ test(
       await ui.redraw()
       expect(host.copyCalls).toEqual([])
       expect(await ui.find({ type: 'Text', text: /copied/i })).toBeUndefined()
+      expect(await ui.find({ key: 'copy-browser-link' })).toBeDefined()
       expect(await renderedContains(ui, url('a'))).toBe(false)
     } finally {
       host.releaseLink()
       host.disconnectRelay()
+      await command.unmount()
       await ui.unmount()
     }
   },
@@ -207,6 +212,8 @@ test(
     try {
       await ui.press({ key: 'copy-browser-link' })
       await host.browserReady
+      await ui.redraw()
+      expect(await ui.find({ type: 'Text', text: /copied/i })).toBeDefined()
       await terminal.redraw()
       expect(await terminal.find({ key: 'copy-browser-link' })).toBeUndefined()
       expect(
@@ -217,6 +224,9 @@ test(
       await host.clock.settle()
       await ui.redraw()
       expect(await ui.find({ type: 'Text', text: /copied/i })).toBeUndefined()
+      expect(
+        await ui.find({ type: 'Text', text: /copy failed/i }),
+      ).toBeUndefined()
       expect(await ui.find({ key: 'copy-browser-link' })).toBeDefined()
       expect(host.copyCalls.length).toBe(1)
     } finally {
@@ -242,6 +252,9 @@ test(
       await copying
       await ui.redraw()
       expect(await ui.find({ type: 'Text', text: /copied/i })).toBeUndefined()
+      expect(
+        await ui.find({ type: 'Text', text: /copy failed/i }),
+      ).toBeDefined()
       expect(await renderedContains(ui, url('a'))).toBe(false)
       expect(host.copyCalls.length).toBe(1)
     } finally {
@@ -472,13 +485,22 @@ test(
     const command = await mountCommandOutput($)
     const other = await mountCommandOutput($, 'desktop', 'other-command')
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      host.holdLink()
+      const bandCopy = ui.press({ key: 'copy-browser-link' })
+      await host.linkStarted
+      await ui.redraw()
+      await command.redraw()
+      expect(await ui.find({ key: 'copy-browser-link' })).toBeUndefined()
+      expect(await command.find({ key: 'copy-browser-link' })).toBeUndefined()
+      host.releaseLink()
+      await bandCopy
       await ui.redraw()
       await command.redraw()
       expect(await ui.find({ type: 'Text', text: /copied/i })).toBeDefined()
       expect(
         await command.find({ type: 'Text', text: /copied/i }),
       ).toBeUndefined()
+      expect(await command.find({ key: 'copy-browser-link' })).toBeDefined()
       await command.press({ key: 'copy-browser-link' })
       await ui.redraw()
       await command.redraw()
@@ -490,8 +512,11 @@ test(
       expect(
         await other.find({ type: 'Text', text: /copied/i }),
       ).toBeUndefined()
+      expect(await ui.find({ key: 'copy-browser-link' })).toBeDefined()
+      expect(await other.find({ key: 'copy-browser-link' })).toBeDefined()
       expect(host.copyCalls.length).toBe(2)
     } finally {
+      host.releaseLink()
       host.disconnectRelay()
       await other.unmount()
       await command.unmount()
@@ -570,3 +595,38 @@ test(
     }
   },
 )
+
+for (const lifecycle of ['clear', 'end'] as const) {
+  test(
+    `${lifecycle} removes mounted copy feedback without a forced redraw`,
+    { timeoutMs: 20_000 },
+    async ($, on: On) => {
+      if (lifecycle === 'clear')
+        on('command.run', { command: 'clear' }, () => ({ text: '' }))
+      else on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+      const { ui, host } = await mountReady($, on, scenario)
+      try {
+        await ui.press({ key: 'copy-browser-link' })
+        expect(await ui.find({ type: 'Text', text: /copied/i })).toBeDefined()
+        if (lifecycle === 'clear')
+          await $.command.run({
+            command: 'clear',
+            args: '',
+            origin: { kind: 'composer' },
+            presentation: { isFullscreen: false, columns: 80 },
+          })
+        else
+          await $.session.end({
+            reason: 'other',
+            sessionId: 'synthetic-session',
+            resume: { id: 'synthetic-session' },
+          })
+        expect(await ui.find({ type: 'Text', text: /copied/i })).toBeUndefined()
+        expect(host.copyCalls.length).toBe(1)
+      } finally {
+        host.disconnectRelay()
+        await ui.unmount()
+      }
+    },
+  )
+}

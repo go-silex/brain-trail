@@ -158,6 +158,14 @@ body {
   min-height: 0;
   overflow: hidden;
 }
+.bt-scene3d-unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--fg);
+  text-align: center;
+}
 .bt-scene3d canvas {
   display: block;
   width: 100%;

@@ -341,7 +341,8 @@ let launchError = false
 let launchSite: string | undefined
 let launchOperation = 0
 let launchExpiry: { cancel: () => void } | undefined
-const resetLaunch = () => {
+const resetLaunch = ($: EngineInterface, redraw = true) => {
+  const visible = launchBusy || launchError || launchCopied !== undefined
   launchOperation++
   launchCopied = undefined
   launchBusy = false
@@ -349,6 +350,7 @@ const resetLaunch = () => {
   launchSite = undefined
   launchExpiry?.cancel()
   launchExpiry = undefined
+  if (redraw && visible) $.ui.invalidate('ui.render')
 }
 let sessionId: string | undefined
 let revision = 0
@@ -385,7 +387,7 @@ const checkSession = async ($: EngineInterface) => {
   else if (sessionId !== id) {
     sessionId = id
     generation++
-    resetLaunch()
+    resetLaunch($)
     invalidateCoach($)
     resetApps()
     revision = 0
@@ -463,7 +465,7 @@ const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: st
 }
 const invalidateTrail = ($: EngineInterface) => {
   generation++; revision = 0; lastLayout = undefined; breakdown = undefined
-  resetLaunch()
+  resetLaunch($)
   invalidateCoach($)
   syncReplayClock($, false)
 }
@@ -574,7 +576,7 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
 const ensureRelay = async ($: EngineInterface, reopen = false) => {
   if (reopen) { appsEpoch++; appDiscovery = undefined }
   if (relay?.isClosed()) {
-    if (launchCopied !== undefined) { const site = launchSite; resetLaunch(); launchSite = site; launchError = true; $.ui.invalidate('ui.render') }
+    if (launchCopied !== undefined) resetLaunch($)
     if (!reopen) throw new Error('Relay disconnected; reopen the browser from Brain Trail')
     relay = undefined
     apps = undefined; appDiscovery = undefined
@@ -600,10 +602,9 @@ const ensureRelay = async ($: EngineInterface, reopen = false) => {
         const notifyFailure = io.onFailure
         io.onFailure = error => {
           if (relayOwner === owner) {
-            const site = launchSite
-            resetLaunch()
-            launchSite = site
-            launchError = true
+            const busy = launchBusy, site = launchSite
+            resetLaunch($, false)
+            if (busy) { launchSite = site; launchError = true }
             $.ui.invalidate('ui.render')
           }
           notifyFailure(error)
@@ -683,7 +684,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     void closeOwnPane($)
     generation++; revision = 0; sessionId = await $.session.id(); lastLayout = undefined; breakdown = undefined
-    resetLaunch()
+    resetLaunch($)
     invalidateCoach($)
     syncReplayClock($, false)
     resetApps()
@@ -702,7 +703,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     generation++
-    resetLaunch()
+    resetLaunch($)
     invalidateCoach($)
     relayOwner++; relay?.close(); relay = undefined; startingRelay = undefined
     resetApps()
@@ -720,7 +721,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'clear' }, async ($, e, next) => {
     generation++; revision = 0; lastLayout = undefined; breakdown = undefined
-    resetLaunch()
+    resetLaunch($)
     invalidateCoach($)
     syncReplayClock($, false)
     const result = await next(e)
@@ -850,8 +851,8 @@ export const register: Register = (on, options) => {
         {limitOf(m, 'five_hour') !== undefined && <Text size="caption" dimColor tabular>· {S.band5h(Math.round(limitOf(m, 'five_hour')!.percentUsed))}</Text>}
         {limitOf(m, 'seven_day') !== undefined && <Text size="caption" dimColor tabular>· {S.band7d(Math.round(limitOf(m, 'seven_day')!.percentUsed))}</Text>}
         <Box flexGrow={1} />
-        {e.surface === 'desktop' && !(active && launchBusy) && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
-        {active && launchBusy && <Text size="caption">{fr ? 'Copie…' : 'Copying…'}</Text>}
+        {e.surface === 'desktop' && !launchBusy && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
+        {e.surface === 'desktop' && launchBusy && <Text size="caption">{fr ? 'Copie…' : 'Copying…'}</Text>}
         {active && launchError && <Text size="caption">{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
         {copied && <Text size="caption">{fr ? 'Copié : collez dans la barre d’adresse.' : 'Copied: paste into the address bar.'}</Text>}
       </Box>
@@ -867,8 +868,8 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="row" alignItems="center" columnGap="sm" flexWrap="wrap">
         <Text>{fr ? 'Collez le lien dans la barre d’adresse du navigateur, pas dans la conversation.' : 'Paste the link into the browser address bar, not the conversation.'}</Text>
-        {!(active && launchBusy) && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
-        {active && launchBusy && <Text>{fr ? 'Copie…' : 'Copying…'}</Text>}
+        {!launchBusy && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
+        {launchBusy && <Text>{fr ? 'Copie…' : 'Copying…'}</Text>}
         {active && launchError && <Text>{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
         {copied && <Text>{fr ? 'Copié.' : 'Copied.'}</Text>}
       </Box>

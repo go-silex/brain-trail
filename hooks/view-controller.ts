@@ -18,7 +18,7 @@ import type {
   ViewState,
 } from '../types/view'
 import type { Strings } from './i18n'
-import { BANNER_ASPECT, BANNER_MAX, fileName, SIZE, tilt } from './map'
+import { fileName, SIZE, tilt } from './map'
 import {
   dragAction,
   dragZoom,
@@ -29,7 +29,6 @@ import {
   wheelZoom,
   zoomFrame,
   type MapFrame,
-  type PointerButton,
 } from './pointer'
 import { CAM0, ZOOM_MAX, ZOOM_MIN, yawAt, type Cam } from './scene3d'
 
@@ -48,33 +47,6 @@ export const GESTURE0: GestureMemory = {
   hover: undefined,
   drag2d: undefined,
 }
-// A drawing follows the pane: one of its pixels is one pixel of the screen, at any width.
-export const paneWidthPx = (columns: number) => Math.max(240, columns * 8 - 24)
-
-// A docked pane's rows are a frame: the header on top, the footer at the bottom, the map in what
-// they leave. Hosts count that room in cells; a row is this many times as tall as a column is wide
-// (the desktop's line height over its cell advance, the same at both of its densities).
-export const CELL_RATIO = 2.46
-export type Cells = { columns: number; rows: number }
-// What the header and the footer take around the map, until the host measures it: the banner (it
-// grows with the pane up to its cap), then the meter, the tabs, the legend and the credit. Guessed
-// generously, so the map is first drawn for a box no taller than the one it gets.
-export const guessChrome = (columns: number): Cells => ({
-  columns: 0,
-  rows:
-    Math.round(
-      (Math.min(paneWidthPx(columns), BANNER_MAX) * BANNER_ASPECT) /
-        (8 * CELL_RATIO),
-    ) + 10,
-})
-export const mapCells = (pane: Cells, chrome: Cells): Cells => ({
-  columns: Math.max(0, pane.columns - chrome.columns),
-  rows: Math.max(0, pane.rows - chrome.rows),
-})
-// Measurements are rounded down to cells; use a half-cell estimate, including at zero.
-export const cellAspect = (box: Cells) =>
-  ((Math.max(0, box.rows) + 0.5) * CELL_RATIO) /
-  (Math.max(0, box.columns) + 0.5)
 // The 3D picture back on the brain's middle.
 const centred = (k: Cam): Cam =>
   k.pan.x === 0 && k.pan.y === 0 ? k : { ...k, pan: { x: 0, y: 0 } }
@@ -300,81 +272,6 @@ export const replayTick =
       ? { step: steps - 1, playing: false }
       : { step: next, playing: true }
   }
-// A measurement carries the exact pane/map stamp it was drawn for.
-export const parseBox = (
-  data: unknown,
-): (Cells & { for: string; pane: Cells }) | undefined => {
-  if (typeof data !== 'object' || data === null) return undefined
-  const d: Record<string, unknown> = Object.fromEntries(Object.entries(data))
-  if (
-    d.kind !== 'box' ||
-    typeof d.for !== 'string' ||
-    typeof d.columns !== 'number' ||
-    typeof d.rows !== 'number' ||
-    !Number.isSafeInteger(d.columns) ||
-    !Number.isSafeInteger(d.rows) ||
-    d.columns <= 0 ||
-    d.rows < 0
-  )
-    return undefined
-  const stamp = /^(\d+)x(\d+)\/(\d+)x(\d+)$/.exec(d.for)
-  if (!stamp) return undefined
-  const [columns, rows, mapColumns, mapRows] = stamp.slice(1).map(Number)
-  if (
-    ![columns, rows].every(
-      (n) => n !== undefined && Number.isSafeInteger(n) && n > 0,
-    ) ||
-    ![mapColumns, mapRows].every(
-      (n) => n !== undefined && Number.isSafeInteger(n) && n >= 0,
-    )
-  )
-    return undefined
-  return {
-    columns: d.columns,
-    rows: d.rows,
-    for: d.for,
-    pane: { columns: columns!, rows: rows! },
-  }
-}
-const finite = (v: unknown): v is number =>
-  typeof v === 'number' && Number.isFinite(v)
-const buttonOf = (v: unknown): PointerButton | undefined =>
-  v === 'left' || v === 'middle' || v === 'right' ? v : undefined
-export const parseGesture = (data: unknown): MapGesture | undefined => {
-  if (typeof data !== 'object' || data === null) return undefined
-  const d: Record<string, unknown> = Object.fromEntries(Object.entries(data))
-  if (d.kind === 'leave' || d.kind === 'dragend') return { kind: d.kind }
-  if (!finite(d.fx) || !finite(d.fy)) return undefined
-  if (d.kind === 'hover')
-    return {
-      kind: 'hover',
-      fx: d.fx,
-      fy: d.fy,
-      x: finite(d.x) ? d.x : 0,
-      y: finite(d.y) ? d.y : 0,
-    }
-  const button = buttonOf(d.button)
-  if (button === undefined) return undefined
-  if (d.kind === 'click') return { kind: 'click', fx: d.fx, fy: d.fy, button }
-  if (
-    d.kind === 'drag' &&
-    finite(d.sfx) &&
-    finite(d.sfy) &&
-    typeof d.press === 'number' &&
-    Number.isSafeInteger(d.press) &&
-    d.press > 0
-  )
-    return {
-      kind: 'drag',
-      press: d.press,
-      button,
-      fx: d.fx,
-      fy: d.fy,
-      sfx: d.sfx,
-      sfy: d.sfy,
-    }
-  return undefined
-}
 // The camera a 2D stretch asks for with the pointer at `p`: the middle button zooms around the
 // frame's middle (up in, down out), the others pan.
 const drag2dCamera = (d: Drag2d, view: MapFrame, p: MapPoint): Camera =>

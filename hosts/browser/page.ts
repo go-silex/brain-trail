@@ -179,10 +179,15 @@ export function startPage(
   const intent = async (i: ViewIntent) => {
     if (ended || generation === 0) return
     if (isSharedViewIntent(i)) {
+      const origin3d = state.view3d
       const result = await command({ kind: 'view', intent: i })
       if (result === undefined) return
       apply(
-        plan(i, { now: Date.now(), frames, view3d: state.view3d }).filter(
+        plan(i, {
+          now: Date.now(),
+          frames,
+          view3d: i.kind === 'whole' ? origin3d : state.view3d,
+        }).filter(
           (step) =>
             step.key !== 'zoomed' &&
             step.key !== 'play' &&
@@ -194,7 +199,7 @@ export function startPage(
       // brain again, whatever its own camera did, even when the props did not change; a reset
       // of the 2D map leaves the 3D scene's camera alone
       if (
-        (i.kind === 'whole' && state.view3d) ||
+        (i.kind === 'whole' && origin3d && state.view3d) ||
         (i.kind === 'follow' && i.following)
       )
         dom.resetScene()

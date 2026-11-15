@@ -389,6 +389,7 @@ const prove = async (baseRef, output, receipt, onlyCase) => {
         semantic,
         semanticScenario,
         true,
+        true,
       )
       await writeFile(path.join(output, 'semantic-browser.png'), scene.png)
       receipt.semanticBrowser = scene.probe
@@ -1050,6 +1051,8 @@ const compareCase = async (
           candidateRoot,
           candidate,
           scenario,
+          false,
+          true,
         )
         await writeFile(path.join(sceneDir, 'baseline.png'), leftShot.png)
         for (const [tab, png] of Object.entries(rightShot.tabs ?? {}))

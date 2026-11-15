@@ -100,6 +100,8 @@ The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc
 
 Follow the session as it works and replay it step by step. The **3D** button switches between the browser's 2D SVG and 3D Three.js views. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each browser surface.
 
+3D requires WebGL in the browser hosting the dashboard. If WebGL is unavailable, a notice preserves access to the rest of the dashboard: choose **2D** or use a browser with WebGL. Where supported, check the host's graphics acceleration settings.
+
 Dashboard navigation:
 
 | Gesture | 2D | 3D |

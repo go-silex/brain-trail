@@ -135,21 +135,6 @@ export type ViewSnapshot = {
   fill?: {
     rows: number
     mapAspect: number
-    body?: {
-      stamp: string
-      offset: number
-      viewport: number
-      content: number
-      reach: number
-    }
-    chrome?: {
-      stamp: string
-      header: number
-      footer: number
-      headerReach: number
-      footerReach: number
-      notice: boolean
-    }
   }
 }
 
@@ -246,15 +231,6 @@ export type ViewRuntime<N, Press> = {
   Code: ViewTag<ViewCodeProps, N> | undefined
   MapHit: ViewTag<Keyed, N> | undefined
   Scene3d?: ViewTag<Scene3dProps, N>
-  Measure?: ViewTag<
-    Keyed & {
-      stamp: string
-      expectedRows: number
-      reach: number
-      kind: 'viewport' | 'content' | 'header' | 'footer'
-    },
-    N
-  >
 }
 
 export type ViewIntent =
@@ -294,7 +270,6 @@ export type CompactOutcome =
   | { kind: 'skipped'; reason: string }
   | { kind: 'failed' }
 export type ViewActions<Press> = {
-  scrollBody?: (to: 'first' | 'previous' | 'next' | 'last') => void
   intent: (i: ViewIntent) => Promise<void>
   openFile: (ref: PreviewRef) => Promise<void>
   openIn: (ref: PreviewRef, app: string) => Promise<void>

@@ -42,29 +42,24 @@ type Press = {
   from?: Pose
   wrote?: Pose
 }
+export class WebGLUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('WebGL context creation failed', { cause })
+    this.name = 'WebGLUnavailableError'
+  }
+}
 
 // A scene belongs to one mounted map, not to an individual render of the pane.
 export class WebGLScene {
-  private readonly renderer = new THREE.WebGLRenderer({
-    antialias: true,
-    powerPreference: 'high-performance',
-  })
-  private readonly scene = new THREE.Scene()
-  private readonly camera = new THREE.PerspectiveCamera(52, 1, 0.5, 30000)
-  private readonly controls = new OrbitControls(
-    this.camera,
-    this.renderer.domElement,
-  )
-  private readonly composer = new EffectComposer(this.renderer)
-  private readonly bloom = new UnrealBloomPass(
-    new THREE.Vector2(1, 1),
-    0.85,
-    0.5,
-    0.32,
-  )
-  private readonly output = new OutputPass()
-  private readonly content = new THREE.Group()
-  private readonly background = new THREE.Group()
+  private readonly renderer!: THREE.WebGLRenderer
+  private readonly scene!: THREE.Scene
+  private readonly camera!: THREE.PerspectiveCamera
+  private readonly controls!: OrbitControls
+  private readonly composer!: EffectComposer
+  private readonly bloom!: UnrealBloomPass
+  private readonly output!: OutputPass
+  private readonly content!: THREE.Group
+  private readonly background!: THREE.Group
   private backgroundLayout?: Scene3dProps['layout']
   private backgroundColor = ''
   private backgroundLight?: boolean
@@ -72,14 +67,16 @@ export class WebGLScene {
   private readonly pointer = new THREE.Vector2()
   private readonly labels = document.createElement('div')
   private readonly tip = document.createElement('div')
+  private readonly cleanup: (() => void)[] = []
+  private readonly resources = new Set<{ dispose(): void }>()
   private labelItems: { element: HTMLElement; position: THREE.Vector3 }[] = []
   private hoverNames = true
   private adjusted = false
   // An OrbitControls touch turn or pan in progress: the spin waits for it, then resumes if it was on.
   private gesturing = false
-  private readonly observer: ResizeObserver
+  private readonly observer!: ResizeObserver
   private points?: THREE.Points
-  private readonly halo = this.makeHalo()
+  private readonly halo!: THREE.Texture
   private readonly logos = new Map<string, THREE.Texture>()
   private comets: {
     sprite: THREE.Sprite
@@ -114,58 +111,117 @@ export class WebGLScene {
     props: Scene3dProps,
   ) {
     this.props = props
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    this.renderer.domElement.tabIndex = 0
-    this.renderer.domElement.setAttribute('aria-label', 'Interactive 3D map')
-    element.appendChild(this.renderer.domElement)
-    this.labels.className = 'bt-scene-labels'
-    element.appendChild(this.labels)
-    this.tip.className = 'bt-tip'
-    this.tip.hidden = true
-    element.appendChild(this.tip)
-    this.scene.add(this.content)
-    this.scene.add(this.background)
-    this.composer.addPass(new RenderPass(this.scene, this.camera))
-    this.composer.addPass(this.bloom)
-    this.composer.addPass(this.output)
-    this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.07
-    this.controls.rotateSpeed = 0.55
-    this.controls.enableZoom = false
-    this.controls.screenSpacePanning = true
-    // Mouse and pen drags follow the maps' shared policy (`drag`), whatever modifier is held:
-    // OrbitControls keeps touch and the spin, none of its button or modifier mappings.
-    this.controls.mouseButtons = { LEFT: null, MIDDLE: null, RIGHT: null }
-    this.controls.addEventListener('start', this.grab)
-    this.controls.addEventListener('end', this.release)
-    this.renderer.domElement.addEventListener('pointerdown', this.pointerDown)
-    this.renderer.domElement.addEventListener('pointerup', this.pointerUp)
-    this.renderer.domElement.addEventListener(
-      'pointercancel',
-      this.pointerCancel,
-    )
-    this.renderer.domElement.addEventListener(
-      'lostpointercapture',
-      this.pointerCancel,
-    )
-    this.renderer.domElement.addEventListener('mousedown', this.mouseDown)
-    this.renderer.domElement.addEventListener('pointermove', this.pointerMove)
-    this.renderer.domElement.addEventListener('pointerleave', this.pointerLeave)
-    this.renderer.domElement.addEventListener('dblclick', this.doubleClick)
-    this.renderer.domElement.addEventListener('wheel', this.wheel, {
-      passive: false,
-    })
-    this.renderer.domElement.addEventListener('keydown', this.keyDown)
-    this.renderer.domElement.addEventListener('keyup', this.keyUp)
-    this.renderer.domElement.addEventListener('blur', this.blur)
-    this.observer = new ResizeObserver(() => this.resize())
-    this.observer.observe(element)
-    this.build()
-    this.fit()
-    this.resize()
-    this.follow()
-    this.positionLabels()
-    this.frame = requestAnimationFrame(this.tick)
+    try {
+      try {
+        this.renderer = new THREE.WebGLRenderer({
+          antialias: true,
+          powerPreference: 'high-performance',
+        })
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message === 'Error creating WebGL context.' ||
+            error.message ===
+              'Error creating WebGL context with your selected attributes.')
+        )
+          throw new WebGLUnavailableError(error)
+        throw error
+      }
+      this.cleanup.push(() => this.renderer.dispose())
+      this.cleanup.push(() => this.renderer.forceContextLoss())
+      this.cleanup.push(() => this.renderer.domElement.remove())
+      this.cleanup.push(() => this.labels.remove())
+      this.cleanup.push(() => this.tip.remove())
+      this.scene = new THREE.Scene()
+      this.camera = new THREE.PerspectiveCamera(52, 1, 0.5, 30000)
+      this.content = new THREE.Group()
+      this.background = new THREE.Group()
+      this.cleanup.push(() => {
+        for (const resource of this.resources) this.releaseResource(resource)
+      })
+      this.cleanup.push(() => this.clearGroup(this.content))
+      this.cleanup.push(() => this.clearGroup(this.background))
+      this.cleanup.push(() => {
+        for (const texture of this.logos.values()) {
+          try {
+            texture.dispose()
+          } catch {}
+        }
+        this.logos.clear()
+      })
+      this.controls = new OrbitControls(this.camera, this.renderer.domElement)
+      this.cleanup.push(() => this.controls.dispose())
+      this.composer = new EffectComposer(this.renderer)
+      this.cleanup.push(() => this.composer.dispose())
+      this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.85, 0.5, 0.32)
+      this.cleanup.push(() => this.bloom.dispose())
+      this.output = new OutputPass()
+      this.cleanup.push(() => this.output.dispose())
+      this.halo = this.makeHalo()
+      this.cleanup.push(() => this.halo.dispose())
+      this.cleanup.push(() => this.removeListeners())
+      this.cleanup.push(() => clearTimeout(this.openTimer))
+      this.cleanup.push(() => cancelAnimationFrame(this.frame))
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+      this.renderer.domElement.tabIndex = 0
+      this.renderer.domElement.setAttribute('aria-label', 'Interactive 3D map')
+      element.appendChild(this.renderer.domElement)
+      this.labels.className = 'bt-scene-labels'
+      element.appendChild(this.labels)
+      this.tip.className = 'bt-tip'
+      this.tip.hidden = true
+      element.appendChild(this.tip)
+      this.scene.add(this.content)
+      this.scene.add(this.background)
+      this.composer.addPass(new RenderPass(this.scene, this.camera))
+      this.composer.addPass(this.bloom)
+      this.composer.addPass(this.output)
+      this.controls.enableDamping = true
+      this.controls.dampingFactor = 0.07
+      this.controls.rotateSpeed = 0.55
+      this.controls.enableZoom = false
+      this.controls.screenSpacePanning = true
+      // Mouse and pen drags follow the maps' shared policy (`drag`), whatever modifier is held:
+      // OrbitControls keeps touch and the spin, none of its button or modifier mappings.
+      this.controls.mouseButtons = { LEFT: null, MIDDLE: null, RIGHT: null }
+      this.controls.addEventListener('start', this.grab)
+      this.controls.addEventListener('end', this.release)
+      this.renderer.domElement.addEventListener('pointerdown', this.pointerDown)
+      this.renderer.domElement.addEventListener('pointerup', this.pointerUp)
+      this.renderer.domElement.addEventListener(
+        'pointercancel',
+        this.pointerCancel,
+      )
+      this.renderer.domElement.addEventListener(
+        'lostpointercapture',
+        this.pointerCancel,
+      )
+      this.renderer.domElement.addEventListener('mousedown', this.mouseDown)
+      this.renderer.domElement.addEventListener('pointermove', this.pointerMove)
+      this.renderer.domElement.addEventListener(
+        'pointerleave',
+        this.pointerLeave,
+      )
+      this.renderer.domElement.addEventListener('dblclick', this.doubleClick)
+      this.renderer.domElement.addEventListener('wheel', this.wheel, {
+        passive: false,
+      })
+      this.renderer.domElement.addEventListener('keydown', this.keyDown)
+      this.renderer.domElement.addEventListener('keyup', this.keyUp)
+      this.renderer.domElement.addEventListener('blur', this.blur)
+      this.observer = new ResizeObserver(() => this.resize())
+      this.cleanup.push(() => this.observer.disconnect())
+      this.observer.observe(element)
+      this.build()
+      this.fit()
+      this.resize()
+      this.follow()
+      this.positionLabels()
+      this.frame = requestAnimationFrame(this.tick)
+    } catch (error) {
+      this.dispose()
+      throw error
+    }
   }
 
   update(props: Scene3dProps) {
@@ -218,6 +274,18 @@ export class WebGLScene {
     return new THREE.CanvasTexture(canvas)
   }
 
+  private own<T extends { dispose(): void }>(resource: T): T {
+    this.resources.add(resource)
+    return resource
+  }
+
+  private releaseResource(resource: { dispose(): void }) {
+    if (!this.resources.delete(resource)) return
+    try {
+      resource.dispose()
+    } catch {}
+  }
+
   private clearGroup(group: THREE.Group) {
     group.traverse((obj) => {
       if (
@@ -226,11 +294,15 @@ export class WebGLScene {
         obj instanceof THREE.Mesh ||
         obj instanceof THREE.Sprite
       ) {
-        if (!(obj instanceof THREE.Sprite)) obj.geometry.dispose()
+        if (!(obj instanceof THREE.Sprite)) {
+          this.releaseResource(obj.geometry)
+        }
         const materials = Array.isArray(obj.material)
           ? obj.material
           : [obj.material]
-        for (const material of materials) material.dispose()
+        for (const material of materials) {
+          this.releaseResource(material)
+        }
       }
     })
     group.clear()
@@ -298,7 +370,7 @@ export class WebGLScene {
       }
       color.set([c.r, c.g, c.b], i * 3)
     }
-    const geometry = new THREE.BufferGeometry()
+    const geometry = this.own(new THREE.BufferGeometry())
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setAttribute('color', new THREE.BufferAttribute(color, 3))
     geometry.setAttribute('pointSize', new THREE.BufferAttribute(sizes, 1))
@@ -308,24 +380,26 @@ export class WebGLScene {
     }
     this.points = new THREE.Points(
       geometry,
-      new THREE.ShaderMaterial({
-        uniforms: {
-          scale: { value: Math.max(1, this.height) * 1.3 },
-          time: { value: 0 },
-        },
-        vertexShader: lightBackground
-          ? 'attribute float pointSize; uniform float scale; uniform float time; varying vec3 vColor; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float pulse = 0.9 + 0.1*sin(time*1.1 + position.x*.02 + position.z*.01); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * pulse; }'
-          : 'attribute float pointSize; attribute float phase; attribute float glow; uniform float scale; uniform float time; varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float tw = 0.8 + 0.2 * sin(time * 1.1 + phase * 6.283); float pulse = 1.0 + glow * 0.28 * sin(time * 2.6 + phase * 6.283); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * mix(tw, 1.0, glow); vGlow = glow; vFar = 1.0 - smoothstep(1400.0, 9000.0, -mv.z); }',
-        fragmentShader: lightBackground
-          ? 'varying vec3 vColor; void main(){ float d = length(gl_PointCoord - vec2(0.5)); if (d > 0.5) discard; float a = pow(1.0 - d * 2.0, 1.5); gl_FragColor = vec4(vColor, a); }'
-          : 'varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard; float core = 1.0 - smoothstep(0.0, 0.5, d); float a = pow(core, mix(2.2, 1.3, vGlow)); gl_FragColor = vec4(vColor, a * mix(0.5, 1.0, vGlow) * mix(0.35, 1.0, vFar)); }',
-        transparent: true,
-        depthWrite: false,
-        blending: lightBackground
-          ? THREE.NormalBlending
-          : THREE.AdditiveBlending,
-        vertexColors: true,
-      }),
+      this.own(
+        new THREE.ShaderMaterial({
+          uniforms: {
+            scale: { value: Math.max(1, this.height) * 1.3 },
+            time: { value: 0 },
+          },
+          vertexShader: lightBackground
+            ? 'attribute float pointSize; uniform float scale; uniform float time; varying vec3 vColor; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float pulse = 0.9 + 0.1*sin(time*1.1 + position.x*.02 + position.z*.01); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * pulse; }'
+            : 'attribute float pointSize; attribute float phase; attribute float glow; uniform float scale; uniform float time; varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float tw = 0.8 + 0.2 * sin(time * 1.1 + phase * 6.283); float pulse = 1.0 + glow * 0.28 * sin(time * 2.6 + phase * 6.283); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * mix(tw, 1.0, glow); vGlow = glow; vFar = 1.0 - smoothstep(1400.0, 9000.0, -mv.z); }',
+          fragmentShader: lightBackground
+            ? 'varying vec3 vColor; void main(){ float d = length(gl_PointCoord - vec2(0.5)); if (d > 0.5) discard; float a = pow(1.0 - d * 2.0, 1.5); gl_FragColor = vec4(vColor, a); }'
+            : 'varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard; float core = 1.0 - smoothstep(0.0, 0.5, d); float a = pow(core, mix(2.2, 1.3, vGlow)); gl_FragColor = vec4(vColor, a * mix(0.5, 1.0, vGlow) * mix(0.35, 1.0, vFar)); }',
+          transparent: true,
+          depthWrite: false,
+          blending: lightBackground
+            ? THREE.NormalBlending
+            : THREE.AdditiveBlending,
+          vertexColors: true,
+        }),
+      ),
     )
     this.content.add(this.points)
     const point = (n: number) =>
@@ -383,7 +457,7 @@ export class WebGLScene {
               )
         }
       }
-      const synapses = new THREE.BufferGeometry()
+      const synapses = this.own(new THREE.BufferGeometry())
       synapses.setAttribute(
         'position',
         new THREE.Float32BufferAttribute(segments, 3),
@@ -391,34 +465,38 @@ export class WebGLScene {
       this.background.add(
         new THREE.LineSegments(
           synapses,
-          new THREE.LineBasicMaterial({
-            color: lightBackground ? palette.fg : '#9fb6c4',
-            transparent: true,
-            opacity: lightBackground ? 0.08 : 0.045,
-            blending: lightBackground
-              ? THREE.NormalBlending
-              : THREE.AdditiveBlending,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.LineBasicMaterial({
+              color: lightBackground ? palette.fg : '#9fb6c4',
+              transparent: true,
+              opacity: lightBackground ? 0.08 : 0.045,
+              blending: lightBackground
+                ? THREE.NormalBlending
+                : THREE.AdditiveBlending,
+              depthWrite: false,
+            }),
+          ),
         ),
       )
       const rim = (color: string, opacity: number) =>
-        new THREE.ShaderMaterial({
-          uniforms: {
-            tint: { value: new THREE.Color(color) },
-            strength: { value: opacity },
-          },
-          vertexShader:
-            'varying vec3 n; varying vec3 v; void main(){ vec4 p = modelViewMatrix * vec4(position,1.0); n = normalize(normalMatrix * normal); v = normalize(-p.xyz); gl_Position = projectionMatrix * p; }',
-          fragmentShader:
-            'uniform vec3 tint; uniform float strength; varying vec3 n; varying vec3 v; void main(){ float f = pow(1.0 - abs(dot(n,v)),4.5) * strength; gl_FragColor = vec4(tint*f,f); }',
-          transparent: true,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-        })
+        this.own(
+          new THREE.ShaderMaterial({
+            uniforms: {
+              tint: { value: new THREE.Color(color) },
+              strength: { value: opacity },
+            },
+            vertexShader:
+              'varying vec3 n; varying vec3 v; void main(){ vec4 p = modelViewMatrix * vec4(position,1.0); n = normalize(normalMatrix * normal); v = normalize(-p.xyz); gl_Position = projectionMatrix * p; }',
+            fragmentShader:
+              'uniform vec3 tint; uniform float strength; varying vec3 n; varying vec3 v; void main(){ float f = pow(1.0 - abs(dot(n,v)),4.5) * strength; gl_FragColor = vec4(tint*f,f); }',
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+          }),
+        )
       const membrane = new THREE.Mesh(
-        new THREE.SphereGeometry(1, 64, 32),
+        this.own(new THREE.SphereGeometry(1, 64, 32)),
         rim('#35b0ff', 0.1),
       )
       membrane.scale.set(
@@ -430,7 +508,7 @@ export class WebGLScene {
       this.background.add(membrane)
       for (const label of shape.labels) {
         const lobe = new THREE.Mesh(
-          new THREE.SphereGeometry(1, 32, 16),
+          this.own(new THREE.SphereGeometry(1, 32, 16)),
           rim('#8fb0c4', 0.13),
         )
         lobe.position.set(
@@ -460,18 +538,20 @@ export class WebGLScene {
           i * 3,
         )
       }
-      const dustGeometry = new THREE.BufferGeometry()
+      const dustGeometry = this.own(new THREE.BufferGeometry())
       dustGeometry.setAttribute('position', new THREE.BufferAttribute(dust, 3))
       this.background.add(
         new THREE.Points(
           dustGeometry,
-          new THREE.PointsMaterial({
-            color: '#5b6b75',
-            size: 14,
-            transparent: true,
-            opacity: 0.45,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.PointsMaterial({
+              color: '#5b6b75',
+              size: 14,
+              transparent: true,
+              opacity: 0.45,
+              depthWrite: false,
+            }),
+          ),
         ),
       )
     }
@@ -492,20 +572,24 @@ export class WebGLScene {
       const curve = new THREE.QuadraticBezierCurve3(start, mid, end)
       curves.push(curve)
       const material = b.gap
-        ? new THREE.LineDashedMaterial({
-            color: colors.gap,
-            dashSize: 10,
-            gapSize: 8,
-            transparent: true,
-            opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
-          })
-        : new THREE.LineBasicMaterial({
-            color: colors.read,
-            transparent: true,
-            opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
-          })
+        ? this.own(
+            new THREE.LineDashedMaterial({
+              color: colors.gap,
+              dashSize: 10,
+              gapSize: 8,
+              transparent: true,
+              opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
+            }),
+          )
+        : this.own(
+            new THREE.LineBasicMaterial({
+              color: colors.read,
+              transparent: true,
+              opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
+            }),
+          )
       const line = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(curve.getPoints(40)),
+        this.own(new THREE.BufferGeometry()).setFromPoints(curve.getPoints(40)),
         material,
       )
       if (b.gap) line.computeLineDistances()
@@ -544,21 +628,25 @@ export class WebGLScene {
       stations.set(name, position)
       addLabel(`${name} · ${count}`, position)
       const halo = new THREE.Sprite(
-        new THREE.SpriteMaterial({
-          map: this.halo,
-          color: '#35b0ff',
-          transparent: true,
-          opacity: 0.55,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
+        this.own(
+          new THREE.SpriteMaterial({
+            map: this.halo,
+            color: '#35b0ff',
+            transparent: true,
+            opacity: 0.55,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          }),
+        ),
       )
       halo.position.copy(position)
       halo.scale.set(150, 150, 1)
       this.content.add(halo)
       const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(Math.max(8, layout.size / 120), 12, 8),
-        new THREE.MeshBasicMaterial({ color: '#35b0ff' }),
+        this.own(
+          new THREE.SphereGeometry(Math.max(8, layout.size / 120), 12, 8),
+        ),
+        this.own(new THREE.MeshBasicMaterial({ color: '#35b0ff' })),
       )
       marker.position.copy(position)
       this.content.add(marker)
@@ -567,15 +655,17 @@ export class WebGLScene {
         let texture = this.logos.get(src)
         if (texture === undefined) {
           texture = new THREE.TextureLoader().load(src)
-          texture.colorSpace = THREE.SRGBColorSpace
           this.logos.set(src, texture)
+          texture.colorSpace = THREE.SRGBColorSpace
         }
         const logo = new THREE.Sprite(
-          new THREE.SpriteMaterial({
-            map: texture,
-            transparent: true,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.SpriteMaterial({
+              map: texture,
+              transparent: true,
+              depthWrite: false,
+            }),
+          ),
         )
         logo.position.copy(position)
         logo.scale.set(64, 64, 1)
@@ -597,25 +687,31 @@ export class WebGLScene {
       curves.push(curve)
       this.content.add(
         new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(curve.getPoints(24)),
-          new THREE.LineBasicMaterial({
-            color: call.err ? colors.gap : '#35b0ff',
-            transparent: true,
-            opacity: 0.6,
-          }),
+          this.own(new THREE.BufferGeometry()).setFromPoints(
+            curve.getPoints(24),
+          ),
+          this.own(
+            new THREE.LineBasicMaterial({
+              color: call.err ? colors.gap : '#35b0ff',
+              transparent: true,
+              opacity: 0.6,
+            }),
+          ),
         ),
       )
     }
     curves.slice(-8).forEach((curve, i) => {
       for (let j = 0; j < 2; j++) {
         const sprite = new THREE.Sprite(
-          new THREE.SpriteMaterial({
-            map: this.halo,
-            color: '#ffc9a8',
-            transparent: true,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.SpriteMaterial({
+              map: this.halo,
+              color: '#ffc9a8',
+              transparent: true,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false,
+            }),
+          ),
         )
         sprite.scale.set(26, 26, 1)
         this.content.add(sprite)
@@ -1122,11 +1218,17 @@ export class WebGLScene {
   dispose() {
     if (this.disposed) return
     this.disposed = true
-    cancelAnimationFrame(this.frame)
-    this.observer.disconnect()
+    for (const cleanup of this.cleanup.reverse()) {
+      try {
+        cleanup()
+      } catch {}
+    }
+    this.cleanup.length = 0
+  }
+
+  private removeListeners() {
     this.controls.removeEventListener('start', this.grab)
     this.controls.removeEventListener('end', this.release)
-    this.controls.dispose()
     const canvas = this.renderer.domElement
     canvas.removeEventListener('pointerdown', this.pointerDown)
     canvas.removeEventListener('pointerup', this.pointerUp)
@@ -1140,19 +1242,5 @@ export class WebGLScene {
     canvas.removeEventListener('keydown', this.keyDown)
     canvas.removeEventListener('keyup', this.keyUp)
     canvas.removeEventListener('blur', this.blur)
-    clearTimeout(this.openTimer)
-    this.tip.remove()
-    this.clear()
-    this.clearGroup(this.background)
-    this.bloom.dispose()
-    this.output.dispose()
-    this.composer.dispose()
-    this.halo.dispose()
-    for (const texture of this.logos.values()) texture.dispose()
-    this.logos.clear()
-    this.renderer.dispose()
-    this.renderer.forceContextLoss()
-    this.labels.remove()
-    canvas.remove()
   }
 }
