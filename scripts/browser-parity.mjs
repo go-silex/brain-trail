@@ -24,7 +24,7 @@ async function rendererFailureProof(browser, root) {
       'bun',
       [
         'build',
-        path.join(root, 'tests/fixtures/renderer-failure.ts'),
+        path.join(root, 'scripts/fixtures/renderer-failure.ts'),
         '--target=browser',
         `--outfile=${output}`,
       ],

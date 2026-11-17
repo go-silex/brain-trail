@@ -1,4 +1,3 @@
 {
-  "extends": "./.claude-plugin/sdk/tsconfig.json",
-  "exclude": ["tests/fixtures/renderer-failure.ts"]
+  "extends": "./.claude-plugin/sdk/tsconfig.json"
 }

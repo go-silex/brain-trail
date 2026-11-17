@@ -13,6 +13,6 @@
   "include": [
     "hosts/browser/*.ts",
     "hosts/mcp-app/*.ts",
-    "tests/fixtures/renderer-failure.ts"
+    "scripts/fixtures/renderer-failure.ts"
   ]
 }

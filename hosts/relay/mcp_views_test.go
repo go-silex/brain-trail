@@ -81,7 +81,7 @@ func TestMCPUnpairedViewCanPairAfterIdle(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := privacyEvidence(dir, socket); err != nil {
-				t.Fatalf("relay privacy evidence: %v", err)
+				t.Fatalf("relay privacy evidence: %v; %s", err, privacyTestDiagnostic(dir, socket))
 			}
 			if err := mcpRelaySocketValid(socket); err != nil {
 				t.Fatalf("MCP relay socket validation: %v", err)
