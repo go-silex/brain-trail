@@ -117,6 +117,8 @@
         "types/model.ts",
         "types/contracts.ts",
         "types/browser.ts",
+        "types/apps.ts",
+        "hooks/app-binding.ts",
         "hooks/acts.ts",
         "hooks/fold.ts",
         "hooks/readout.ts",

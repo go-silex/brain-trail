@@ -333,7 +333,7 @@ export async function captureBrowserScene(
     throw new Error('captured adapter layout geometry or language is invalid')
   const assets = new Map(
     await Promise.all(
-      ['app.js', 'app.css'].map(async (name) => [
+      ['app.js', 'app.css', 'index.html'].map(async (name) => [
         name,
         await readFile(path.join(root, 'hosts/browser/dist', name)),
       ]),
@@ -379,9 +379,7 @@ export async function captureBrowserScene(
       })
     } else if (req.url === '/') {
       res.writeHead(200, { 'content-type': 'text/html' })
-      res.end(
-        '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="app.css"><main id="app"></main><div id="status" role="status"></div><div id="toast" role="status"></div><script type="module" src="app.js"></script>',
-      )
+      res.end(assets.get('index.html'))
     } else {
       res.writeHead(404)
       res.end()

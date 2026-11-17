@@ -606,6 +606,7 @@ export const installHost = (
         '/h/launch',
         '/h/generation',
         '/h/apps',
+        '/h/app/revoke',
         '/h/file/prepare',
         '/h/file/read',
         '/h/file/open',
@@ -625,6 +626,37 @@ export const installHost = (
       body?: unknown
     }
     let response: unknown = { ok: true }
+    if (e.url.endsWith('/h/app/revoke')) {
+      const body = request as unknown as {
+        v?: unknown
+        target?: {
+          kind?: unknown
+          owner?: { host?: unknown; sessionId?: unknown }
+          generation?: unknown
+        }
+        reason?: unknown
+      }
+      const target = body.target
+      if (
+        JSON.stringify(Object.keys(body).sort()) !==
+          JSON.stringify(['reason', 'target', 'v']) ||
+        body.v !== 1 ||
+        body.reason !== 'generation-ended' ||
+        !target ||
+        JSON.stringify(Object.keys(target).sort()) !==
+          JSON.stringify(['generation', 'kind', 'owner']) ||
+        target.kind !== 'generation' ||
+        !target.owner ||
+        JSON.stringify(Object.keys(target.owner).sort()) !==
+          JSON.stringify(['host', 'sessionId']) ||
+        target.owner.host !== 'code' ||
+        target.owner.sessionId !== 'synthetic-session' ||
+        !Number.isSafeInteger(target.generation) ||
+        (target.generation as number) < 1
+      )
+        throw new Error('Unexpected fixture app revoke request')
+      response = { v: 1, ok: true, value: null }
+    }
     if (e.url.endsWith('/launch') && request.open === true)
       response = { ok: true, status: 'dispatched' }
     if (e.url.endsWith('/launch') && request.link === true) {

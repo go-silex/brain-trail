@@ -21,6 +21,9 @@ import { RelayRefusal, startRelay, type RelayClient } from '../hosts/relay/clien
 import { relayBinary, relayIO } from '../hosts/native/io'
 import { withNativeFile } from '../hosts/native/files'
 import { applySettingsPatch } from './view-settings'
+import type { CommandScope } from '../types/browser'
+import { isAdapterOperation, parseOpenerToolName } from '../types/apps'
+import { bindCodeOpen } from './app-binding'
 import { weather } from './views'
 
 const COMMAND = 'brain-trail-v2'
@@ -121,34 +124,39 @@ const setLayout = (root: string, list: string[]) => {
   layout = packFiles(list, root.split('/').pop() || root)
 }
 
-const refresh = async ($: EngineInterface) => {
+const refresh = async ($: EngineInterface, guard?: () => Promise<void>) => {
   const root = await mapRoot($)
   const list = await listFiles($, root)
+  await guard?.()
   if (layout !== undefined && I?.root === root && list.length === I.paths.length && list.every((p, i) => p === I!.paths[i])) return layout
   setLayout(root, list)
   linked.clear(); metaRead.clear()
-  void $.fs.write(await cacheFile($, root), JSON.stringify({ root, files: list })).catch(() => {})
+  const cache = await cacheFile($, root)
+  await guard?.()
+  void $.fs.write(cache, JSON.stringify({ root, files: list })).catch(() => {})
   queuePublish($)
   $.ui.invalidate('ui.render')
   return layout!
 }
 
-const load = ($: EngineInterface) => {
+const load = ($: EngineInterface, guard?: () => Promise<void>) => {
   if (layout !== undefined) return Promise.resolve(layout)
   if (packing === undefined) {
     packingSince = Date.now()
     packing = (async () => {
       const root = await mapRoot($)
       const cached = await $.fs.read(await cacheFile($, root)).then(t => JSON.parse(t) as { root: string; files: string[] }).catch(() => undefined)
+      await guard?.()
       if (cached !== undefined && cached.root === root && cached.files.length > 0) {
         setLayout(root, cached.files)
-        void refresh($).catch(() => {})
+        void refresh($, guard).catch(() => {})
         queuePublish($)
         return layout!
       }
-      return refresh($)
-    })().then(L => { failure = undefined; return L }, (err: unknown) => {
+      return refresh($, guard)
+    })().then(async L => { await guard?.(); failure = undefined; return L }, async (err: unknown) => {
       packing = undefined
+      await guard?.()
       failure = err instanceof Error ? err.message : String(err)
       $.ui.invalidate('ui.render')
       throw err
@@ -205,10 +213,12 @@ const getBreakdown = async ($: EngineInterface, now: number, fresh = false) => {
 
 let chain: Promise<unknown> = Promise.resolve()
 const enqueue = (work: () => Promise<unknown>) => { chain = chain.then(work, work).catch(() => {}) }
-const record = async ($: EngineInterface, list: TrailEvent[]) => {
+const record = async ($: EngineInterface, list: TrailEvent[], guard?: () => Promise<void>) => {
   if (list.length === 0) return
   const first = list[0]!.at
+  await guard?.()
   await update($, totals, t => ({ steps: t.steps + list.length, first: t.first ?? first }))
+  await guard?.()
   await update($, events, l => [...l, ...list].slice(-MAX_EVENTS))
   queuePublish($)
 }
@@ -220,8 +230,9 @@ let toasted: 'ok' | 'warn' | 'bad' = 'ok'
 
 // The engine drops the window's fill on a compaction and only reports it again with the next
 // reply. Until then the gauge shows the /context estimate (marked ≈) instead of the old figure.
-const applyContext = async ($: EngineInterface, c: { tokens?: number; window: number; percent?: number }) => {
+const applyContext = async ($: EngineInterface, c: { tokens?: number; window: number; percent?: number }, guard?: () => Promise<void>) => {
   const prev = await read($, meter)
+  await guard?.()
   if (c.percent !== undefined) {
     if (prev.percent !== c.percent || prev.tokens !== c.tokens || prev.window !== c.window || prev.estimated) {
       await update($, meter, m => ({ ...m, tokens: c.tokens, window: c.window, percent: c.percent, estimated: undefined }))
@@ -232,6 +243,7 @@ const applyContext = async ($: EngineInterface, c: { tokens?: number; window: nu
   if (prev.percent === undefined || prev.estimated) return
   breakdown = undefined
   const b = await getBreakdown($, Date.now())
+  await guard?.()
   const window = c.window || prev.window
   if (b === undefined || !(window > 0)) return
   const tokens = b.totalTokens
@@ -239,12 +251,15 @@ const applyContext = async ($: EngineInterface, c: { tokens?: number; window: nu
   toasted = zoneOf(Math.round((tokens / window) * 100))
   // the compact hook may not have run (another plugin can answer it first): mark it on the trail here
   const at = await $.clock.now()
+  await guard?.()
   const list = await read($, events)
-  if (!list.some(ev => ev.k === 'compact' && at - ev.at < 120_000)) enqueue(() => record($, [{ k: 'compact', at }]))
+  await guard?.()
+  if (!list.some(ev => ev.k === 'compact' && at - ev.at < 120_000)) enqueue(() => record($, [{ k: 'compact', at }], guard))
 }
-const refreshMeter = async ($: EngineInterface) => {
+const refreshMeter = async ($: EngineInterface, guard?: () => Promise<void>) => {
   const u = await $.session.usage().catch(() => undefined)
-  if (u !== undefined) await applyContext($, u.context)
+  await guard?.()
+  if (u !== undefined) await applyContext($, u.context, guard)
 }
 let meterTimer: { cancel: () => void } | undefined
 
@@ -376,15 +391,37 @@ const emit = (event: ServerEvent) => { for (const listener of feedListeners) lis
 const shared = async ($: EngineInterface): Promise<SharedView> => ({
   preview: await read($, previewA), zoomed: await read($, zoomed), play: await read($, playA),
 })
-const setShared = async ($: EngineInterface, value: SharedView) => {
+const setShared = async ($: EngineInterface, value: SharedView, guard?: () => Promise<void>) => {
+  await guard?.()
   await update($, previewA, () => value.preview)
+  await guard?.()
   await update($, zoomed, () => value.zoomed)
+  await guard?.()
   await update($, playA, () => value.play)
 }
+const revokeGeneration = async (id: string | undefined, old: number) => {
+  const client = relay
+  if (!client || !id) return
+  try { await client.revokeApp({ v: 1, target: { kind: 'generation', owner: { host: 'code', sessionId: id }, generation: old }, reason: 'generation-ended' }) }
+  catch { client.close() }
+}
+let sessionCheck: Promise<void> | undefined
+const sourceLabel = async ($: EngineInterface) => {
+  const value = (I?.root ?? await rootDir($)).replace(/\p{Cc}/gu, '')
+  let label = ''
+  for (const character of value) {
+    if (new TextEncoder().encode(label + character).length > 512) break
+    label += character
+  }
+  return label
+}
 const checkSession = async ($: EngineInterface) => {
+  if (sessionCheck) { await sessionCheck; return checkSession($) }
+  const work = (async () => {
   const id = await $.session.id()
   if (sessionId === undefined) sessionId = id
   else if (sessionId !== id) {
+    await revokeGeneration(sessionId, generation)
     sessionId = id
     generation++
     resetLaunch($)
@@ -396,6 +433,9 @@ const checkSession = async ($: EngineInterface) => {
     syncReplayClock($, false)
     await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } })
   }
+  })()
+  sessionCheck = work
+  try { await work } finally { if (sessionCheck === work) sessionCheck = undefined }
 }
 let publications: Promise<void> = Promise.resolve()
 const publish = ($: EngineInterface) => {
@@ -458,10 +498,13 @@ const knownRef = async ($: EngineInterface, ref: { p: string; out?: boolean }) =
   const entry = projectFiles([], current.memoryFiles, I?.root ?? '').get(ref.p)
   return entry?.start === true && !!entry.out === !!ref.out
 }
-const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: string; out?: boolean }, action: { kind: 'preview' } | { kind: 'open'; app: string }, use: (client: RelayClient, id: string) => Promise<T>): Promise<T> => {
+const secureFile = async <T,>($: EngineInterface, expected: number, ref: { p: string; out?: boolean }, action: { kind: 'preview' } | { kind: 'open'; app: string }, use: (client: RelayClient, id: string) => Promise<T>, scope?: CommandScope): Promise<T> => {
   if (!relay || !I) throw new Error('forbidden')
   const client = relay
-  return withNativeFile(client, { root: I.root, generation: expected, refreshGeneration: () => checkSession($), currentGeneration: () => generation, known: candidate => knownRef($, candidate), apps: await installedApps($) }, ref, action, id => use(client, id))
+  await scope?.assertCurrent()
+  const apps = await installedApps($)
+  await scope?.assertCurrent()
+  return withNativeFile(client, { root: I.root, generation: expected, refreshGeneration: () => checkSession($), currentGeneration: () => generation, known: candidate => knownRef($, candidate), apps, scope }, ref, action, id => use(client, id))
 }
 const invalidateTrail = ($: EngineInterface) => {
   generation++; revision = 0; lastLayout = undefined; breakdown = undefined
@@ -469,23 +512,26 @@ const invalidateTrail = ($: EngineInterface) => {
   invalidateCoach($)
   syncReplayClock($, false)
 }
-const clearTrailState = async ($: EngineInterface) => {
+const clearTrailState = async ($: EngineInterface, guard?: () => Promise<void>) => {
+  await guard?.()
   await update($, events, () => [])
+  await guard?.()
   await update($, totals, () => ({ steps: 0 }))
-  await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } })
+  await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } }, guard)
 }
-const executeCommand = async ($: EngineInterface, expected: number, command: HostCommand): Promise<CommandReplies[HostCommand['kind']] | CommandRefusal> => {
+const executeCommand = async ($: EngineInterface, expected: number, command: HostCommand, scope?: CommandScope): Promise<CommandReplies[HostCommand['kind']] | CommandRefusal> => {
   await checkSession($)
   if (expected !== generation) return { ok: false, error: 'stale-generation' }
   try {
-    const guard = async () => { await checkSession($); if (expected !== generation) throw new Error('stale-generation') }
+    const guard = async () => { await checkSession($); if (expected !== generation) throw new Error('stale-generation'); await scope?.assertCurrent() }
+    await guard()
     switch (command.kind) {
       case 'open': {
-        const launch = await secureFile($, expected, command.ref, { kind: 'open', app: command.app }, (client, id) => client.openFile(id, command.app === 'default' ? undefined : command.app, expected))
+        const launch = await secureFile($, expected, command.ref, { kind: 'open', app: command.app }, (client, id) => client.openFile(id, command.app === 'default' ? undefined : command.app, expected), scope)
         return { ok: true, launch }
       }
       case 'preview-read': {
-        const text = await secureFile($, expected, command.ref, { kind: 'preview' }, (client, id) => client.readFile(id))
+        const text = await secureFile($, expected, command.ref, { kind: 'preview' }, (client, id) => client.readFile(id), scope)
         return { ok: true, text }
       }
       case 'settings': {
@@ -494,7 +540,9 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
         await serial(async () => {
           await guard()
           const next = applySettingsPatch(await read($, settingsA), command.patch)
+          await guard()
           await $.store.set('settings', next)
+          await guard()
           await update($, settingsA, () => next)
         })
         break
@@ -503,7 +551,7 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
         const intent = command.intent
         const operation = intent.kind === 'preview' ? ++previewOperation : undefined
         if (intent.kind === 'preview' && intent.ref !== null) {
-          await secureFile($, expected, intent.ref, { kind: 'preview' }, (client, id) => client.readFile(id))
+          await secureFile($, expected, intent.ref, { kind: 'preview' }, (client, id) => client.readFile(id), scope)
         }
         await serial(async () => {
           await guard()
@@ -512,23 +560,37 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
           const prior = await shared($)
           const next = reduceSharedView(prior, intent, count)
           await guard()
-          await setShared($, next)
+          await setShared($, next, guard)
+          await guard()
           if (timerEffect(intent) !== 'none') syncReplayClock($, next.play.playing)
         })
         break
       }
       case 'lang':
-        await serial(async () => { await guard(); await $.store.set('lang', command.lang); await update($, langA, () => command.lang) }); break
+        await serial(async () => { await guard(); await $.store.set('lang', command.lang); await guard(); await update($, langA, () => command.lang) }); break
       case 'clear-trail':
-        await serial(async () => { await guard(); await clearTrailState($) }); break
+        await serial(async () => {
+          await guard()
+          const old = generation
+          const owner = sessionId
+          invalidateTrail($)
+          expected = generation
+          scope = undefined
+          if (relay && owner) await relay.revokeApp({ v: 1, target: { kind: 'generation', owner: { host: 'code', sessionId: owner }, generation: old }, reason: 'generation-ended' }).catch(() => { relay?.close() })
+          await guard()
+          await clearTrailState($, guard)
+        }); break
       case 'compact': {
+        await guard()
         const result = await $.session.compact({}).catch(() => undefined)
+        await guard()
         const outcome = result === undefined ? { kind: 'failed' as const } : 'skip' in result && result.skip !== undefined ? { kind: 'skipped' as const, reason: result.skip } : { kind: 'done' as const }
         await publish($)
+        await guard()
         return { ok: true, outcome }
       }
-      case 'refresh-meter': await refreshMeter($); break
-      case 'retry-layout': failure = undefined; void load($).then(() => publish($)).catch(() => publish($)); break
+      case 'refresh-meter': await guard(); await refreshMeter($, guard); await guard(); break
+      case 'retry-layout': await guard(); failure = undefined; await load($, guard); await guard(); break
       case 'coach-analyse': {
         const lang = await read($, langA)
         const root = I?.root ?? await rootDir($)
@@ -542,6 +604,7 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
           return accepted
         })
         if (operation === undefined) return { ok: false, error: 'busy' }
+        await guard()
         const result = await $.model.fork({ prompt: coachPrompt(lang, file, 'Claude') }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
         await serial(async () => {
           await guard()
@@ -558,10 +621,13 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
         if (!coach.patch) return { ok: false, error: 'invalid' }
         await guard()
         const filled = (await $.prompt.fill({ text: strings(lang, 'Claude').applyPrompt(file, coach.patch) }).catch(() => undefined)) !== undefined
+        await guard()
         return { ok: true, filled }
       }
     }
+    await guard()
     await publish($)
+    await guard()
     $.ui.invalidate('ui.render')
     return { ok: true }
   } catch (error) {
@@ -590,10 +656,8 @@ const ensureRelay = async ($: EngineInterface, reopen = false) => {
         await publish($)
         const feed: DashboardFeed = {
           current: () => { if (!currentFeed) throw new Error('Feed unavailable'); return currentFeed },
-          execute: <C extends HostCommand,>(g: number, c: C) => {
-            if (c.kind === 'clear-trail' && g === generation) { invalidateTrail($); g = generation }
-            return executeCommand($, g, c) as Promise<CommandReplies[C['kind']] | CommandRefusal>
-          },
+          execute: <C extends HostCommand,>(g: number, c: C, scope?: CommandScope) =>
+            executeCommand($, g, c, scope) as Promise<CommandReplies[C['kind']] | CommandRefusal>,
           subscribe: listener => { feedListeners.add(listener); return () => { feedListeners.delete(listener) } },
         }
         const binary = await relayBinary($)
@@ -609,7 +673,18 @@ const ensureRelay = async ($: EngineInterface, reopen = false) => {
           }
           notifyFailure(error)
         }
-        const client = await startRelay(io, binary, `${$.plugin.root}/hosts/browser/dist`, feed)
+        const client = await startRelay(io, binary, `${$.plugin.root}/hosts/browser/dist`, feed, {
+          current: async () => {
+            await checkSession($)
+            if (!sessionId) throw new Error('session unavailable')
+            const id = sessionId, expected = generation
+            await publish($)
+            const label = await sourceLabel($)
+            await checkSession($)
+            if (id !== sessionId || expected !== generation) throw new Error('stale-generation')
+            return { owner: { host: 'code', sessionId: id }, generation: expected, label }
+          },
+        })
         if (generation !== startedGeneration) { client.close(); throw new Error('stale-generation') }
         return client
       })()
@@ -668,6 +743,63 @@ const copyLink = async ($: EngineInterface, press: UiPressArgument) => {
     }
   }
 }
+let nativeControlBusy = false
+let nativeControlStatus = ''
+const bindResult = async ($: EngineInterface, server: string, text: string, id: string, expected: number, signal?: AbortSignal) => {
+  const current = async () => { await checkSession($); return !signal?.aborted && sessionId === id && generation === expected }
+  if (!(await current())) return false
+  const client = await ensureRelay($)
+  if (!(await current()) || relay !== client) return false
+  const label = await sourceLabel($)
+  return bindCodeOpen($, client, server, text, { host: 'code', sessionId: id }, expected, label, current, signal)
+}
+const openNative = async ($: EngineInterface) => {
+  if (nativeControlBusy) return
+  nativeControlBusy = true; nativeControlStatus = ''; $.ui.invalidate('ui.render')
+  try {
+    await checkSession($)
+    const id = sessionId, expected = generation
+    const candidates = (await $.tool.list()).map(tool => tool.name).filter(name => parseOpenerToolName(name) !== undefined)
+    if (!id || candidates.length !== 1) throw new Error('opener unavailable or ambiguous')
+    const name = candidates[0]!
+    const server = parseOpenerToolName(name)!
+    const result = await $.tool.call({ tool: name as `mcp__${string}__${string}` })
+    if (result.deny !== undefined || result.isError || !(await bindResult($, server, result.text ?? '', id, expected))) throw new Error('open failed')
+    nativeControlStatus = 'Brain Trail attached'
+  } catch { nativeControlStatus = 'Brain Trail could not be opened' }
+  finally { nativeControlBusy = false; $.ui.invalidate('ui.render') }
+}
+const pairChat = async ($: EngineInterface, press: UiPressArgument) => {
+  if (nativeControlBusy) return
+  nativeControlBusy = true; nativeControlStatus = ''; $.ui.invalidate('ui.render')
+  let client: RelayClient | undefined
+  let pairId: string | undefined
+  let copied = false
+  try {
+    await checkSession($)
+    const id = sessionId, expected = generation
+    if (!id) throw new Error('session unavailable')
+    client = await ensureRelay($)
+    await checkSession($)
+    if (id !== sessionId || expected !== generation || client !== relay) throw new Error('stale-generation')
+    pairId = relayIO($, () => true).randomToken()
+    const approved = await client.approveApp({ v: 1, owner: { host: 'code', sessionId: id }, generation: expected, label: await sourceLabel($), approval: { kind: 'chat', pairId } })
+    await checkSession($)
+    if (!approved.envelope || id !== sessionId || expected !== generation || approved.expiresAt <= Date.now()) throw new Error('pairing unavailable')
+    const result = await $.ui.copy({ text: JSON.stringify(approved.envelope), surface: press.surface })
+    await checkSession($)
+    copied = result.isCopied && id === sessionId && expected === generation && approved.expiresAt > Date.now()
+    if (!copied) throw new Error('copy failed')
+    nativeControlStatus = 'Pairing copied; paste it in the Chat app'
+  } catch { nativeControlStatus = 'Pairing failed' }
+  finally {
+    if (!copied && client && pairId) {
+      try { await client.revokeApp({ v: 1, target: { kind: 'approval', approval: { kind: 'chat', pairId } }, reason: 'failed' }) }
+      catch { client.close() }
+    }
+    nativeControlBusy = false; $.ui.invalidate('ui.render')
+  }
+}
 const closeOwnPane = async ($: EngineInterface) => {
   try {
     if (!(await $.ui.panes()).some(pane => pane.id === PANE)) return
@@ -683,13 +815,14 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     void closeOwnPane($)
+    await revokeGeneration(sessionId, generation)
     generation++; revision = 0; sessionId = await $.session.id(); lastLayout = undefined; breakdown = undefined
     resetLaunch($)
     invalidateCoach($)
     syncReplayClock($, false)
     resetApps()
     await setShared($, { preview: null, zoomed: false, play: { step: null, playing: false } })
-    await $.command.register({ name: COMMAND, description: 'Open Brain Trail in a browser' })
+    await $.command.register({ name: COMMAND, description: 'Open Brain Trail or pair with Chat' })
     const saved = await $.store.get('lang').catch(() => undefined)
     await update($, langA, () => (saved === 'fr' || saved === 'en' ? saved : defaultLang))
     const savedSet = await $.store.get('settings').catch(() => undefined) as Partial<TrailSettings> | undefined
@@ -720,6 +853,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'clear' }, async ($, e, next) => {
+    await revokeGeneration(sessionId, generation)
     generation++; revision = 0; lastLayout = undefined; breakdown = undefined
     resetLaunch($)
     invalidateCoach($)
@@ -734,7 +868,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: COMMAND }, async $ => {
     void closeOwnPane($)
     const fr = (await read($, langA)) === 'fr'
-    return { text: fr ? 'Dans Claude Desktop, copiez le lien, puis collez-le dans la barre d’adresse du navigateur, pas dans la conversation.' : 'In Claude Desktop, copy the link, then paste it into the browser address bar, not the conversation.' }
+    return { text: fr ? 'Dans Claude Desktop, ouvrez Brain Trail, associez Chat ou copiez un lien pour la barre d’adresse du navigateur.' : 'In Claude Desktop, open Brain Trail, pair with Chat, or copy a link for the browser address bar.' }
   })
 
   // the gauge follows the engine's own measure, pushed after each turn
@@ -776,10 +910,19 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
+    const tool = String(e.tool)
+    const opener = e.agentId === undefined ? parseOpenerToolName(tool) : undefined
+    if (opener) {
+      await checkSession($).catch(() => {})
+      const id = sessionId, expected = generation
+      const ran = await next(e)
+      if (id && !next.signal.aborted && ran.deny === undefined && !ran.isError) await bindResult($, opener, ran.text ?? '', id, expected, next.signal).catch(() => false)
+      return ran
+    }
+    if (isAdapterOperation(tool)) return next(e)
     const at = await $.clock.now()
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
-    const tool = String(e.tool)
     const agent = e.agentId !== undefined ? (true as const) : undefined
     const input = e as unknown as Record<string, unknown>
     const output = ran.text ?? ''
@@ -807,7 +950,7 @@ export const register: Register = (on, options) => {
       await record($, assembleCapture({ tool, input, output, at, agent, isError, searchPaths, touch }))
     })
     return ran
-  }).catch(($, e, next) => next(e))
+  })
 
   // the end of a turn of the main conversation: the goal it worked on is done for now
   on('turn.complete', async ($, e, next) => {
@@ -851,10 +994,13 @@ export const register: Register = (on, options) => {
         {limitOf(m, 'five_hour') !== undefined && <Text size="caption" dimColor tabular>· {S.band5h(Math.round(limitOf(m, 'five_hour')!.percentUsed))}</Text>}
         {limitOf(m, 'seven_day') !== undefined && <Text size="caption" dimColor tabular>· {S.band7d(Math.round(limitOf(m, 'seven_day')!.percentUsed))}</Text>}
         <Box flexGrow={1} />
+        {e.surface === 'desktop' && !nativeControlBusy && <Button key="open-brain-trail" label={fr ? 'Ouvrir Brain Trail' : 'Open Brain Trail'} onPress={() => openNative($)} />}
+        {e.surface === 'desktop' && !nativeControlBusy && <Button key="pair-chat" label={fr ? 'Associer Chat' : 'Pair with Chat'} onPress={press => pairChat($, press)} />}
+        {e.surface === 'desktop' && nativeControlStatus !== '' && <Text size="caption">{nativeControlStatus}</Text>}
         {e.surface === 'desktop' && !launchBusy && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
         {e.surface === 'desktop' && launchBusy && <Text size="caption">{fr ? 'Copie…' : 'Copying…'}</Text>}
         {active && launchError && <Text size="caption">{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
-        {copied && <Text size="caption">{fr ? 'Copié : collez dans la barre d’adresse.' : 'Copied: paste into the address bar.'}</Text>}
+        {copied && <Text key="browser-copy-success" size="caption">{fr ? 'Copié : collez dans la barre d’adresse.' : 'Copied: paste into the address bar.'}</Text>}
       </Box>
     )
   }).catch(($, e, next) => next(e))
@@ -867,11 +1013,14 @@ export const register: Register = (on, options) => {
     const copied = active && relay?.isClosed() === false && launchCopied?.generation === generation && launchCopied.expiresAt > Date.now()
     return (
       <Box flexDirection="row" alignItems="center" columnGap="sm" flexWrap="wrap">
-        <Text>{fr ? 'Collez le lien dans la barre d’adresse du navigateur, pas dans la conversation.' : 'Paste the link into the browser address bar, not the conversation.'}</Text>
+        <Text>{fr ? 'Ouvrez Brain Trail ou associez Chat. Pour le navigateur, copiez le lien dans la barre d’adresse, pas dans la conversation.' : 'Open Brain Trail or pair with Chat. For a browser, paste the copied link into the address bar, not the conversation.'}</Text>
+        {!nativeControlBusy && <Button key="open-brain-trail" label={fr ? 'Ouvrir Brain Trail' : 'Open Brain Trail'} onPress={() => openNative($)} />}
+        {!nativeControlBusy && <Button key="pair-chat" label={fr ? 'Associer Chat' : 'Pair with Chat'} onPress={press => pairChat($, press)} />}
+        {nativeControlStatus !== '' && <Text>{nativeControlStatus}</Text>}
         {!launchBusy && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
         {launchBusy && <Text>{fr ? 'Copie…' : 'Copying…'}</Text>}
         {active && launchError && <Text>{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
-        {copied && <Text>{fr ? 'Copié.' : 'Copied.'}</Text>}
+        {copied && <Text key="browser-copy-success">{fr ? 'Copié.' : 'Copied.'}</Text>}
       </Box>
     )
   }).catch(($, e, next) => next(e))

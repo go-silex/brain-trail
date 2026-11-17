@@ -30,32 +30,17 @@ import type {
   ServerEvent,
 } from '../../types/browser'
 import { DomRenderer, runtime } from './dom'
+import type { DashboardTransport, PageBootstrap } from './transport'
 
 export function startPage(
   container: HTMLElement,
   status: HTMLElement,
   toastElement: HTMLElement,
+  transport: DashboardTransport,
+  bootstrap: PageBootstrap = {},
 ) {
-  const handoffUrl = new URL(window.location.href)
-  const rawGeneration = handoffUrl.searchParams.get('generation')
-  const path = handoffUrl.searchParams.get('file')
-  const hadHandoff = rawGeneration !== null || path !== null
-  const requestedGeneration =
-    rawGeneration !== null && /^[1-9]\d*$/.test(rawGeneration)
-      ? Number(rawGeneration)
-      : 0
-  let pendingFile =
-    Number.isSafeInteger(requestedGeneration) &&
-    requestedGeneration > 0 &&
-    path !== null &&
-    path !== ''
-      ? { generation: requestedGeneration, p: path }
-      : undefined
-  if (hadHandoff) {
-    handoffUrl.searchParams.delete('generation')
-    handoffUrl.searchParams.delete('file')
-    history.replaceState(history.state, '', handoffUrl)
-  }
+  let pendingFile = bootstrap.handoff
+  container.inert = false
   let state: ViewState = { ...VIEW_STATE0, view3d: true },
     memory: GestureMemory = { ...GESTURE0 }
   let generation = 0,
@@ -74,16 +59,17 @@ export function startPage(
       | { ref: PreviewRef; status: 'failed' }
       | undefined,
     previewSerial = 0,
-    ended = false
+    ended = false,
+    disposed = false
   const theme = matchMedia('(prefers-color-scheme: light)')
   const toast = (message: string) => {
+    if (disposed) return
     toastElement.textContent = message
     clearTimeout(toastTimer)
     toastTimer = window.setTimeout(() => {
       toastElement.textContent = ''
     }, 5000)
   }
-  if (hadHandoff && pendingFile === undefined) toast('Invalid file link')
   const reset = (next: number) => {
     generation = next
     revision = 0
@@ -131,27 +117,27 @@ export function startPage(
   const command = async <C extends HostCommand>(
     cmd: C,
   ): Promise<CommandReplies[C['kind']] | undefined> => {
-    if (ended || generation === 0) {
+    if (disposed || ended || generation === 0) {
       toast('Session unavailable')
       return undefined
     }
     const currentGeneration = generation
     try {
-      const response = await fetch('command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ v: 1, generation, command: cmd }),
-        referrerPolicy: 'no-referrer',
+      const result = await transport.execute({
+        v: 1,
+        generation: currentGeneration,
+        command: cmd,
       })
-      const result: CommandReplies[C['kind']] | { ok: false; error: string } =
-        await response.json()
-      if (ended || generation !== currentGeneration) return undefined
+      if (disposed || ended || generation !== currentGeneration)
+        return undefined
       if (!result.ok) {
         toast(result.error)
         return undefined
       }
       return result
     } catch (error) {
+      if (disposed || ended || generation !== currentGeneration)
+        return undefined
       toast(error instanceof Error ? error.message : 'Command failed')
       return undefined
     }
@@ -164,6 +150,7 @@ export function startPage(
     preview = { ref, status: 'pending' }
     const result = await command({ kind: 'preview-read', ref })
     if (
+      disposed ||
       ended ||
       generation !== currentGeneration ||
       serial !== previewSerial ||
@@ -360,7 +347,7 @@ export function startPage(
     },
   })
   function render() {
-    if (facts === undefined || ended) return
+    if (disposed || facts === undefined || ended) return
     container.dataset.tab = state.tab
     const f = facts,
       connected = new Map(f.connected.map(([k, v]) => [k, new Set(v)])),
@@ -462,7 +449,11 @@ export function startPage(
       lang: f.lang,
       assistant: f.assistant,
       costInfoCommand: '/session info',
-      palette: theme.matches ? LIGHT : DARK,
+      palette:
+        document.documentElement.dataset.theme === 'light' ||
+        (document.documentElement.dataset.theme !== 'dark' && theme.matches)
+          ? LIGHT
+          : DARK,
       meter: f.meter,
       events: f.events,
       open: state.open,
@@ -489,27 +480,8 @@ export function startPage(
     dom.hoverNames = f.settings.hover
     dom.render(out.node)
   }
-  const events = new EventSource('events')
-  events.onopen = () => {
-    status.textContent = ''
-  }
-  events.onerror = () => {
-    events.close()
-    ended = true
-    previewSerial++
-    container.inert = true
-    dom.dispose()
-    status.textContent = 'Connection lost. Reopen from the host.'
-  }
-  events.onmessage = (message) => {
-    if (ended) return
-    let event: ServerEvent
-    try {
-      event = JSON.parse(message.data) as ServerEvent
-    } catch {
-      toast('Invalid dashboard event')
-      return
-    }
+  const onEvent = (event: ServerEvent) => {
+    if (disposed || ended) return
     if (event.v !== 1 || event.generation < generation) return
     if (
       pendingFile !== undefined &&
@@ -520,12 +492,7 @@ export function startPage(
     }
     if (event.generation > generation) reset(event.generation)
     if (event.kind === 'ended') {
-      ended = true
-      previewSerial++
-      container.inert = true
-      dom.dispose()
-      status.textContent = 'Session ended'
-      events.close()
+      close('ended')
       return
     }
     if (event.kind === 'layout') {
@@ -559,21 +526,60 @@ export function startPage(
   }
   const resizeObserver = new ResizeObserver(render)
   resizeObserver.observe(container)
+  const themeObserver = new MutationObserver(render)
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
   theme.addEventListener('change', render)
   const redraw = window.setInterval(() => {
     if (!ended && facts?.workspace.kind === 'loading') render()
   }, 1000)
-  window.addEventListener(
-    'pagehide',
-    () => {
-      ended = true
-      events.close()
-      resizeObserver.disconnect()
-      theme.removeEventListener('change', render)
-      clearInterval(redraw)
-      clearTimeout(toastTimer)
-      dom.dispose()
+  let unsubscribe = () => {}
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    ended = true
+    previewSerial++
+    unsubscribe()
+    resizeObserver.disconnect()
+    theme.removeEventListener('change', render)
+    window.removeEventListener('pagehide', dispose)
+    themeObserver.disconnect()
+    clearInterval(redraw)
+    clearTimeout(toastTimer)
+    pendingFile = undefined
+    facts = undefined
+    layout = undefined
+    index = undefined
+    preview = undefined
+    state = { ...VIEW_STATE0, view3d: true }
+    memory = { ...GESTURE0 }
+    frames = { d2: undefined }
+    maps = createMapRenderer()
+    container.inert = true
+    delete container.dataset.tab
+    dom.dispose()
+    toastElement.textContent = ''
+  }
+  const close = (reason: 'ended' | 'revoked' | 'disconnected') => {
+    if (disposed) return
+    dispose()
+    status.textContent =
+      reason === 'ended'
+        ? 'Session ended'
+        : reason === 'revoked'
+          ? 'Access revoked'
+          : 'Connection lost. Reopen from the host.'
+  }
+  window.addEventListener('pagehide', dispose)
+  unsubscribe = transport.listen({
+    ready: () => {
+      if (!disposed) status.textContent = ''
     },
-    { once: true },
-  )
+    event: onEvent,
+    closed: close,
+  })
+  if (disposed) unsubscribe()
+  return dispose
 }

@@ -252,6 +252,12 @@ test('release CLI decides the shipped source against an explicit baseline', () =
     )
     writeFileSync(hookConfig, maintained)
 
+    mkdirSync(join(dir, 'hosts', 'mcp-app'), { recursive: true })
+    const appEntry = join(dir, 'hosts', 'mcp-app', 'main.ts')
+    writeFileSync(appEntry, 'export const entry = true\n')
+    assertFailed(run([published]), 'hosts/mcp-app/main.ts')
+    rmSync(appEntry)
+
     writeFileSync(map, mapV2)
     writeManifests(dir, '2.1.1-rc.2')
     const downgrade = run([published])

@@ -1,4 +1,25 @@
 import {
+  isCursor,
+  isExactObject,
+  isGuard,
+  isLabel,
+  isOwner,
+  isToken,
+  parseChatEnvelope,
+  parseStrictJSON,
+} from '../../types/apps'
+import type {
+  Approved,
+  Checked,
+  Guard,
+  HostApprove,
+  HostCheck,
+  HostRevoke,
+  Owner,
+  CurrentEvent,
+  Cursor,
+} from '../../types/apps'
+import {
   parseCommand,
   type DashboardFeed,
   type ServerEvent,
@@ -6,6 +27,9 @@ import {
 } from '../../types/browser'
 
 export type LaunchOutcome = { id: string; generation: number; code: number }
+export type AppNativeHost = {
+  current(): Promise<{ owner: Owner; generation: number; label: string }>
+}
 
 export interface RelayIO {
   start(
@@ -32,6 +56,9 @@ export interface RelayClient {
   close(): void
   isClosed(): boolean
   listApps(): Promise<string[]>
+  approveApp(request: HostApprove): Promise<Approved>
+  checkApp(request: HostCheck): Promise<Checked>
+  revokeApp(request: HostRevoke): Promise<void>
   prepareBrowser(): Promise<string>
   prepareBrowserLink(
     generation: number,
@@ -40,6 +67,7 @@ export interface RelayClient {
   prepareFile(
     root: string,
     path: string,
+    appScope?: Guard,
   ): Promise<{ id: string; path: string; inside: boolean }>
   readFile(id: string): Promise<string>
   verifyFile(id: string): Promise<boolean>
@@ -93,6 +121,7 @@ export async function startRelay(
   binary: string,
   assets: string,
   feed: DashboardFeed,
+  appHost?: AppNativeHost,
 ): Promise<RelayClient> {
   const token = io.randomToken()
   let socket = ''
@@ -176,9 +205,13 @@ export async function startRelay(
       close()
     }
   }
-  const request = async (route: string, body: unknown): Promise<unknown> => {
+  const request = async (
+    route: string,
+    body: unknown,
+    serialized?: string,
+  ): Promise<unknown> => {
     if (stopped || !socket) throw terminalFailure ?? disconnected()
-    const encoded = ascii(body)
+    const encoded = serialized ?? ascii(body)
     if (encoded.length > requestLimit)
       throw new RelayRefusal('too-large', 'Relay request too large')
     let response: { status: number; body: string }
@@ -199,7 +232,7 @@ export async function startRelay(
       )
     let result: unknown
     try {
-      result = JSON.parse(response.body)
+      result = parseStrictJSON(response.body)
     } catch {
       if (response.status < 200 || response.status >= 300)
         throw new RelayRefusal(
@@ -245,6 +278,79 @@ export async function startRelay(
     )
       throw new RelayRefusal(code, message, response.status)
     return result
+  }
+  const appResult = async (route: string, body: unknown): Promise<unknown> => {
+    const result = await request(`app/${route}`, body)
+    if (
+      !isExactObject(result, ['v', 'ok', 'value']) ||
+      result.v !== 1 ||
+      result.ok !== true
+    )
+      throw new RelayRefusal('invalid', 'Invalid app relay response')
+    return result.value
+  }
+  const checkApp = async (body: HostCheck): Promise<Checked> => {
+    const value = await appResult('check', body)
+    if (isExactObject(value, ['kind']) && value.kind === 'operation')
+      return { kind: 'operation' }
+    if (
+      isExactObject(value, ['kind', 'state', 'grantId', 'expiresAt']) &&
+      value.kind === 'approval' &&
+      ['missing', 'pending', 'claimed', 'revoked', 'expired'].includes(
+        value.state as string,
+      ) &&
+      (value.grantId === null || isToken(value.grantId)) &&
+      (value.expiresAt === null ||
+        (Number.isSafeInteger(value.expiresAt) &&
+          (value.expiresAt as number) > 0)) &&
+      (value.state !== 'missing' ||
+        (value.grantId === null && value.expiresAt === null)) &&
+      (value.state !== 'pending' ||
+        (value.grantId === null && value.expiresAt !== null)) &&
+      (value.state !== 'claimed' ||
+        (value.grantId !== null && value.expiresAt !== null))
+    )
+      return value as Checked
+    throw new RelayRefusal('invalid', 'Invalid app check response')
+  }
+  const revokeApp = async (body: HostRevoke): Promise<void> => {
+    if ((await appResult('revoke', body)) !== null)
+      throw new RelayRefusal('invalid', 'Invalid app revoke response')
+  }
+  const approveApp = async (body: HostApprove): Promise<Approved> => {
+    const value = await appResult('approve', body)
+    if (
+      !isExactObject(value, ['relay', 'approval', 'expiresAt', 'envelope']) ||
+      !isExactObject(value.relay, ['socket', 'relayId']) ||
+      typeof value.relay.socket !== 'string' ||
+      !value.relay.socket ||
+      !isToken(value.relay.relayId) ||
+      !Number.isSafeInteger(value.expiresAt) ||
+      (value.expiresAt as number) <= 0 ||
+      !isExactObject(
+        value.approval,
+        body.approval.kind === 'code' ? ['kind', 'openId'] : ['kind', 'pairId'],
+      ) ||
+      value.approval.kind !== body.approval.kind ||
+      (body.approval.kind === 'code'
+        ? value.approval.openId !== body.approval.openId ||
+          value.envelope !== null
+        : value.approval.pairId !== body.approval.pairId ||
+          !parseChatEnvelope(value.envelope))
+    )
+      throw new RelayRefusal('invalid', 'Invalid app approval response')
+    const envelope =
+      value.envelope === null ? null : parseChatEnvelope(value.envelope)
+    if (
+      envelope &&
+      (envelope.pairId !==
+        (body.approval.kind === 'chat' ? body.approval.pairId : '') ||
+        envelope.relay.socket !== value.relay.socket ||
+        envelope.relay.relayId !== value.relay.relayId ||
+        envelope.expiresAt !== value.expiresAt)
+    )
+      throw new RelayRefusal('invalid', 'Invalid app approval response')
+    return value as Approved
   }
   let sentGeneration = 0
   const event = async (value: ServerEvent) => {
@@ -364,6 +470,184 @@ export async function startRelay(
       fail(error, 'Relay reply failed')
     }
   }
+  const sameOwner = (a: Owner, b: Owner) =>
+    a.host === b.host && a.sessionId === b.sessionId
+  const nativeCurrent = async (generation: number, owner?: Owner) => {
+    if (!appHost)
+      throw new RelayRefusal('forbidden', 'Native authority unavailable')
+    const current = await appHost.current()
+    if (
+      !isOwner(current.owner) ||
+      !isLabel(current.label) ||
+      current.generation !== generation ||
+      feed.current().generation !== generation ||
+      endedGeneration === generation ||
+      (owner && !sameOwner(owner, current.owner))
+    )
+      throw new RelayRefusal('stale-generation', 'Native authority changed')
+    return current
+  }
+  const appFrame = async (
+    frame:
+      | { t: 'app-current'; scope: Guard; cursor: Cursor | null }
+      | { t: 'app-cmd'; scope: Guard; request: unknown },
+  ) => {
+    const guard = frame.scope
+    const scope = {
+      guard,
+      assertCurrent: async () => {
+        await nativeCurrent(guard.generation, guard.owner)
+        const checked = await checkApp({
+          v: 1,
+          target: { kind: 'operation', scope: guard },
+        })
+        if (checked.kind !== 'operation')
+          throw new RelayRefusal('forbidden', 'Operation no longer current')
+        await nativeCurrent(guard.generation, guard.owner)
+      },
+    }
+    let sending = false
+    try {
+      await scope.assertCurrent()
+      let posts: string[]
+      if (frame.t === 'app-current') {
+        const current = feed.current()
+        if (current.generation !== guard.generation)
+          throw new RelayRefusal('stale-generation', 'Native authority changed')
+        const cursor = {
+          generation: current.generation,
+          revision: current.revision,
+          layoutRev: current.layout?.layoutRev ?? null,
+        }
+        const events: CurrentEvent[] = []
+        if (
+          current.layout &&
+          (!frame.cursor ||
+            frame.cursor.generation !== cursor.generation ||
+            frame.cursor.layoutRev !== cursor.layoutRev)
+        )
+          events.push({
+            v: 1,
+            kind: 'layout',
+            generation: current.generation,
+            layout: current.layout,
+          })
+        if (
+          !frame.cursor ||
+          frame.cursor.generation !== cursor.generation ||
+          frame.cursor.revision !== cursor.revision
+        )
+          events.push({
+            v: 1,
+            kind: 'snapshot',
+            generation: current.generation,
+            revision: current.revision,
+            facts: current.facts,
+            shared: current.shared,
+          })
+        const parts = events.length === 2 ? 2 : 1
+        posts = Array.from({ length: parts }, (_, part) =>
+          ascii({
+            v: 1,
+            scope: guard,
+            result: {
+              ok: true,
+              value: {
+                kind: 'current',
+                chunk: {
+                  readId: guard.requestId,
+                  part,
+                  parts,
+                  cursor,
+                  events: events[part] ? [events[part]] : [],
+                },
+              },
+            },
+          }),
+        )
+      } else {
+        const parsed = parseCommand(frame.request)
+        const oversized = ascii(frame.request).length > 65_536
+        const reply = oversized
+          ? { ok: false as const, error: 'too-large' as const }
+          : parsed && parsed.generation === guard.generation
+            ? await feed.execute(parsed.generation, parsed.command, scope)
+            : { ok: false as const, error: 'invalid' as const }
+        posts = [
+          ascii({
+            v: 1,
+            scope: guard,
+            result:
+              reply.ok === false
+                ? reply
+                : { ok: true, value: { kind: 'command', reply } },
+          }),
+        ]
+      }
+      if (posts.some((post) => post.length > responseLimit))
+        posts = [
+          ascii({
+            v: 1,
+            scope: guard,
+            result: { ok: false, error: 'too-large' },
+          }),
+        ]
+      for (const post of posts) {
+        await scope.assertCurrent()
+        sending = true
+        const result = await request('app/reply', null, post)
+        if (
+          !isExactObject(result, ['v', 'ok', 'value']) ||
+          result.v !== 1 ||
+          result.ok !== true ||
+          result.value !== null
+        )
+          throw new RelayRefusal('invalid', 'Invalid app reply response')
+      }
+    } catch (error) {
+      if (!sending) {
+        try {
+          if (appHost) await scope.assertCurrent()
+          else
+            await checkApp({
+              v: 1,
+              target: { kind: 'operation', scope: guard },
+            })
+          const code =
+            error instanceof RelayRefusal &&
+            error.code !== 'http' &&
+            error.code !== 'missing'
+              ? error.code
+              : 'disconnected'
+          await appResult('reply', {
+            v: 1,
+            scope: guard,
+            result: { ok: false, error: code },
+          })
+        } catch {
+          /* A retired request cannot receive a reply. */
+        }
+      }
+    }
+  }
+  const pairFrame = async (requestId: string, generation: number) => {
+    let result: unknown
+    try {
+      const current = await nativeCurrent(generation)
+      const pairId = io.randomToken()
+      if (!isToken(pairId))
+        throw new RelayRefusal('invalid', 'Invalid pairing identifier')
+      await nativeCurrent(generation, current.owner)
+      result = { ok: true, value: { ...current, pairId } }
+    } catch {
+      result = { ok: false, error: 'stale-generation' }
+    }
+    try {
+      await appResult('browser-pair-reply', { v: 1, requestId, result })
+    } catch {
+      /* Request already retired or transport failed; never retry issuance. */
+    }
+  }
   const frame = (value: unknown) => {
     if (!object(value) || typeof value.t !== 'string')
       throw new Error('Invalid relay frame')
@@ -395,6 +679,41 @@ export async function startRelay(
       if (typeof value.id !== 'string' || !value.id)
         throw new Error('Invalid relay command id')
       void command(value.id, value.body)
+    } else if (value.t === 'app-current') {
+      if (
+        !isExactObject(value, ['v', 't', 'scope', 'cursor']) ||
+        value.v !== 1 ||
+        !isGuard(value.scope) ||
+        (value.cursor !== null && !isCursor(value.cursor))
+      )
+        throw new Error('Invalid app current frame')
+      void appFrame({
+        t: 'app-current',
+        scope: value.scope,
+        cursor: value.cursor,
+      })
+    } else if (value.t === 'app-cmd') {
+      if (
+        !isExactObject(value, ['v', 't', 'scope', 'request']) ||
+        value.v !== 1 ||
+        !isGuard(value.scope)
+      )
+        throw new Error('Invalid app command frame')
+      void appFrame({
+        t: 'app-cmd',
+        scope: value.scope,
+        request: value.request,
+      })
+    } else if (value.t === 'app-pair') {
+      if (
+        !isExactObject(value, ['v', 't', 'requestId', 'generation']) ||
+        value.v !== 1 ||
+        !isToken(value.requestId) ||
+        !Number.isSafeInteger(value.generation) ||
+        (value.generation as number) <= 0
+      )
+        throw new Error('Invalid app pair frame')
+      void pairFrame(value.requestId, value.generation as number)
     } else if (value.t === 'launch-exit') {
       if (
         typeof value.id !== 'string' ||
@@ -434,12 +753,18 @@ export async function startRelay(
           throw new RelayRefusal('too-large', 'Relay frame too large')
         const line = buffer.slice(0, end)
         buffer = buffer.slice(end + 1)
-        frame(JSON.parse(line))
+        frame(parseStrictJSON(line))
       }
       if (buffer.length > lineLimit)
         throw new RelayRefusal('too-large', 'Relay frame too large')
     } catch (error) {
-      fail(error, 'Relay protocol error', 'invalid')
+      fail(
+        error instanceof RelayRefusal
+          ? error
+          : new RelayRefusal('invalid', 'Invalid relay frame'),
+        'Relay protocol error',
+        'invalid',
+      )
     }
   }
 
@@ -572,6 +897,9 @@ export async function startRelay(
         throw new RelayRefusal('invalid', 'Invalid relay apps response')
       return result.apps as string[]
     },
+    approveApp,
+    checkApp,
+    revokeApp,
     prepareBrowser,
     prepareBrowserLink,
     async openBrowser(generation) {
@@ -581,8 +909,12 @@ export async function startRelay(
         generation,
       }))
     },
-    async prepareFile(root, path) {
-      const result = await request('file/prepare', { root, path })
+    async prepareFile(root, path, appScope) {
+      const result = await request('file/prepare', {
+        root,
+        path,
+        ...(appScope ? { appScope } : {}),
+      })
       if (
         !object(result) ||
         typeof result.id !== 'string' ||

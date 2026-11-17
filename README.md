@@ -4,7 +4,7 @@
 
 # Brain Trail
 
-A browser dashboard for your Claude Code session, with a native prompt band and command to copy its launch link. It shows the files the session read and wrote, the ones it only saw in a search or through a link, and the tools it called.
+A shared web dashboard for your native Claude Code or Oh My Pi session, available in a browser or a Desktop MCP App. It shows the files the session read and wrote, the ones it only saw in a search or through a link, and the tools it called. Chat can view an explicitly paired native session; it is not automatically traced.
 
 You see why Claude answers the way it does, what it never looked at, and when its context starts to work against you.
 
@@ -17,7 +17,7 @@ You see why Claude answers the way it does, what it never looked at, and when it
 
 <sub>A session preparing a client call, on a demo company brain (made-up notes). Claude reads the account, the kickoff notes and the proposal, checks the CRM, the inbox and the calendar, then writes a call prep.</sub>
 
-## Install (30 seconds)
+## Install
 
 ### 1. Get the plugin
 
@@ -64,13 +64,21 @@ Had an earlier copy in `~/.claude/mods/`? Remove it to avoid loading the plugin 
 
 </details>
 
-### 2. Open a new session
+### 2. Choose a dashboard surface
 
-In the Desktop prompt band, click **Copy link**. If the band is disabled or collapsed, type `/brain-trail-v2` and use **Copy link** in the command output. Paste the link into the address bar of a live tab in Claude's Browser, not into the chat. You can instead paste it into an external browser. Opening the dashboard requires this manual step; it does not open automatically.
+With the [Desktop MCP server](#desktop-mcp-app) registered, use **Open Brain Trail** in the Desktop prompt band. If the band is disabled or collapsed, type `/brain-trail-v2` for the same explicit controls. The native control calls the discovered opener directly; it does not send a model prompt. Actual Desktop rendering and routing remain release-acceptance checks.
 
-The link is private, expires shortly and works once. If it expires or has already been used, click **Copy link** again. Treat it like a password and do not share it.
+For a browser, choose **Copy link**, then paste into the address bar of a live Claude Browser tab or an external browser—not into the conversation. Copying does not open a tab automatically. The private link expires shortly and works once; issue a new one if it expires, and treat it like a password.
 
-The native plugin captures session activity, owns state and permissions, and provides the relay and prompt band. The map and all dashboard tabs are rendered in the browser; there is no separate Brain Trail dashboard pane.
+The native plugin captures activity and owns session state, permissions, files and the relay. The App and browser render the same dashboard; there is no second native graph engine.
+
+### Desktop MCP App
+
+The separate Desktop MCP server uses the matching shipped Go executable and App assets; it does not require end users to install Node, Bun or Go. For manual stdio configuration, register it under the key `brain-trail`, with the absolute executable path as command and `mcp` followed by the absolute App-assets directory as arguments. MCPB installation may assign a host-generated server name; that name and native Code binding to it are not established. Do not add a second server registration to the native plugin.
+
+The App is a viewer/controller for a deliberately paired native Code or OMP session, not automatic tracing of a Chat conversation. The six binary targets cover Linux, macOS and Windows on x64 and arm64; target availability is not proof of host installation or sandbox compatibility. Actual host tool forwarding, pairing and model-free opening require separate verification. Existing browser and OMP launch instructions remain independent of this registration.
+
+To view a native session in Chat, choose **Pair with Chat** in that session's native controls or browser dashboard. Paste the one-use envelope into the Brain Trail App's pairing field, not into the chat prompt. Detach before choosing another session. A restored view with missing private state remains detached; **Reset view** creates a fresh unpaired view, never automatic reconnection.
 
 ### Oh My Pi
 
@@ -160,4 +168,4 @@ Report vulnerabilities privately using the contact in [SECURITY.md](SECURITY.md)
 
 </details>
 
-MIT license. `hooks/vendor/d3-hierarchy` is ISC. The browser bundle includes its third-party licenses; Go and x/sys licenses are in `hosts/relay/bin/`.
+MIT license. `hooks/vendor/d3-hierarchy` is ISC. Web bundles include third-party notices; Go, MCP SDK and linked-module licenses are in `hosts/relay/bin/` and the MCPB archives.

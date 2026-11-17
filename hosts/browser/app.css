@@ -16,6 +16,44 @@
     --error: #b42318;
   }
 }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef2f4;
+  --fg: #0b0e10;
+  --dim: #6b767c;
+  --line: rgba(11, 14, 16, 0.16);
+  --error: #b42318;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0e10;
+  --fg: #ededed;
+  --dim: rgba(237, 237, 237, 0.48);
+  --line: rgba(255, 255, 255, 0.14);
+  --error: #ff7979;
+}
+.bt-app-shell {
+  display: flex;
+  flex-direction: column;
+}
+.bt-app-shell #app {
+  flex: 1;
+  height: auto;
+}
+.bt-app-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px 0;
+}
+.bt-app-controls textarea {
+  flex: 1 1 20em;
+  min-width: 0;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
 * {
   box-sizing: border-box;
 }

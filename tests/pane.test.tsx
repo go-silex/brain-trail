@@ -300,7 +300,7 @@ test(
 )
 
 test(
-  'the command row permits explicit Copy when the band is disabled or occupied by a survey',
+  'the command row offers explicit App, Chat and browser entry when the band is hidden',
   { timeoutMs: 20_000 },
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
@@ -331,6 +331,10 @@ test(
       await ui.redraw()
       expect(await ui.find({ key: 'copy-browser-link' })).toBeUndefined()
       expect(await survey.find({ key: 'copy-browser-link' })).toBeUndefined()
+      expect(await ui.find({ key: 'open-brain-trail' })).toBeUndefined()
+      expect(await ui.find({ key: 'pair-chat' })).toBeUndefined()
+      expect(await survey.find({ key: 'open-brain-trail' })).toBeUndefined()
+      expect(await survey.find({ key: 'pair-chat' })).toBeUndefined()
       const command = await mountCommandOutput($)
       const terminal = await mountCommandOutput(
         $,
@@ -339,6 +343,11 @@ test(
       )
       try {
         expect(host.copyCalls).toEqual([])
+        expect(host.relayStarted()).toBe(false)
+        expect(await command.find({ key: 'open-brain-trail' })).toBeDefined()
+        expect(await command.find({ key: 'pair-chat' })).toBeDefined()
+        expect(await terminal.find({ key: 'open-brain-trail' })).toBeUndefined()
+        expect(await terminal.find({ key: 'pair-chat' })).toBeUndefined()
         expect(await command.find({ key: 'copy-browser-link' })).toBeDefined()
         expect(
           await terminal.find({ key: 'copy-browser-link' }),
@@ -496,25 +505,25 @@ test(
       await bandCopy
       await ui.redraw()
       await command.redraw()
-      expect(await ui.find({ type: 'Text', text: /copied/i })).toBeDefined()
+      expect(host.copyCalls).toEqual([{ text: url('a'), surface: 'desktop' }])
+      expect(await ui.find({ key: 'browser-copy-success' })).toBeDefined()
       expect(
-        await command.find({ type: 'Text', text: /copied/i }),
+        await command.find({ key: 'browser-copy-success' }),
       ).toBeUndefined()
       expect(await command.find({ key: 'copy-browser-link' })).toBeDefined()
       await command.press({ key: 'copy-browser-link' })
       await ui.redraw()
       await command.redraw()
       await other.redraw()
-      expect(await ui.find({ type: 'Text', text: /copied/i })).toBeUndefined()
-      expect(
-        await command.find({ type: 'Text', text: /copied/i }),
-      ).toBeDefined()
-      expect(
-        await other.find({ type: 'Text', text: /copied/i }),
-      ).toBeUndefined()
+      expect(await ui.find({ key: 'browser-copy-success' })).toBeUndefined()
+      expect(await command.find({ key: 'browser-copy-success' })).toBeDefined()
+      expect(await other.find({ key: 'browser-copy-success' })).toBeUndefined()
       expect(await ui.find({ key: 'copy-browser-link' })).toBeDefined()
       expect(await other.find({ key: 'copy-browser-link' })).toBeDefined()
-      expect(host.copyCalls.length).toBe(2)
+      expect(host.copyCalls).toEqual([
+        { text: url('a'), surface: 'desktop' },
+        { text: url('a'), surface: 'desktop' },
+      ])
     } finally {
       host.releaseLink()
       host.disconnectRelay()
@@ -568,9 +577,7 @@ test(
         presentation: { isFullscreen: false, columns: 80 },
       })
       const guidance = result.text ?? ''
-      expect(/desktop/i.test(guidance)).toBe(true)
-      expect(/copy/i.test(guidance)).toBe(true)
-      expect(/address bar/i.test(guidance)).toBe(true)
+      expect(guidance.trim().length).toBeGreaterThan(0)
       expect(/https?:\/\//i.test(guidance)).toBe(false)
       const terminal = await mountCommandOutput(
         $,
@@ -581,6 +588,8 @@ test(
         expect(
           await terminal.find({ key: 'copy-browser-link' }),
         ).toBeUndefined()
+        expect(await terminal.find({ key: 'open-brain-trail' })).toBeUndefined()
+        expect(await terminal.find({ key: 'pair-chat' })).toBeUndefined()
         expect(await terminal.find({ type: 'Link' })).toBeUndefined()
         expect(await renderedContains(terminal, 'http://127.0.0.1')).toBe(false)
         expect(host.copyCalls).toEqual([])

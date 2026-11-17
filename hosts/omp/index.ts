@@ -44,7 +44,7 @@ const factory: ExtensionFactory = (pi) => {
   }
 
   const ensureServer = async (
-    feed: DashboardFeed,
+    currentFeed: DashboardFeed,
     explicit = false,
   ): Promise<DashboardServer> => {
     if (stopped) throw new Error('Brain Trail has shut down')
@@ -58,19 +58,23 @@ const factory: ExtensionFactory = (pi) => {
         )
       attempted = true
       starting = startDashboardServer(
-        feed,
+        currentFeed,
         (error) => {
           const message = `Brain Trail relay ${error.code}: ${error.message}. Reopen with /brain-trail.`
           if (bandContext?.hasUI) bandContext.ui.notify(message, 'warning')
           else process.stderr.write(`${message}\n`)
         },
         (outcome) => {
-          if (stopped || feed.current().generation !== outcome.generation)
+          if (
+            stopped ||
+            currentFeed.current().generation !== outcome.generation
+          )
             return
           const message = `Brain Trail opener process exited with error code ${outcome.code}.`
           if (bandContext?.hasUI) bandContext.ui.notify(message, 'warning')
           else process.stderr.write(`${message}\n`)
         },
+        { current: () => feed.nativeCurrent() },
       )
     }
     const pending = starting
@@ -100,6 +104,19 @@ const factory: ExtensionFactory = (pi) => {
   }
   const feed = registerCapture(pi, {
     authority: () => ensureServer(feed),
+    async revokeGeneration(owner, generation) {
+      if (!server || server.isClosed()) return
+      try {
+        await server.revokeApp({
+          v: 1,
+          target: { kind: 'generation', owner, generation },
+          reason: 'generation-ended',
+        })
+      } catch {
+        server.close()
+        server = undefined
+      }
+    },
     async onRootStart(ctx, current, autoOpen) {
       bandContext = ctx
       bandRendered = false

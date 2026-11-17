@@ -1,3 +1,4 @@
+import type { Guard } from './apps'
 import type { Layout } from '../hooks/map'
 import type {
   Coach,
@@ -95,6 +96,7 @@ export type CommandRefusal = {
     | 'disconnected'
 }
 export type CommandRequest = { v: 1; generation: number; command: HostCommand }
+export type CommandScope = { guard: Guard; assertCurrent(): Promise<void> }
 export type DashboardFeed = {
   current(): {
     generation: number
@@ -106,6 +108,7 @@ export type DashboardFeed = {
   execute<C extends HostCommand>(
     generation: number,
     command: C,
+    scope?: CommandScope,
   ): Promise<CommandReplies[C['kind']] | CommandRefusal>
   subscribe(listener: (event: ServerEvent) => void): () => void
 }

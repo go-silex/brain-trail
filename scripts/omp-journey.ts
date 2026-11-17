@@ -24,6 +24,7 @@ import { nameServer } from '../hooks/mcp.ts'
 import { brain } from '../hooks/scene3d.ts'
 import type { FactsWire, ServerEvent } from '../types/browser.ts'
 import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
+import { startMcpJourney, type McpJourney } from './mcp-journey-helper'
 
 type BrowserDom = {
   DOMParser: new () => {
@@ -40,7 +41,8 @@ type BrowserDom = {
 }
 
 const scratch = process.env.BRAIN_TRAIL_TEST_DIR
-if (!scratch || !process.env.PI_CODING_AGENT_DIR)
+const agentDir = process.env.PI_CODING_AGENT_DIR
+if (!scratch || !agentDir)
   throw new Error('Run through bun scripts/omp-test.mjs for isolation')
 
 async function until<T>(
@@ -68,6 +70,18 @@ async function until<T>(
   await writeFile(canary, canaryText)
   await symlink(outside, join(cwd, 'escape.txt'))
   const serverName = '7d6e65a1-5b8a-4ced-b960-7abc11bcf456'
+  const appServerName = 'braintrailproof'
+  const platform = process.platform === 'win32' ? 'windows' : process.platform
+  const arch = process.arch === 'x64' ? 'amd64' : process.arch
+  const appBinary = join(
+    import.meta.dir,
+    '..',
+    'hosts',
+    'relay',
+    'bin',
+    `brain-trail-relay-${platform}-${arch}${process.platform === 'win32' ? '.exe' : ''}`,
+  )
+  const appAssets = join(import.meta.dir, '..', 'hosts', 'browser', 'dist')
   // An explicit manager and an empty loader prevent all ambient MCP discovery.
   const manager = new MCPManager(cwd, null, async () => ({
     configs: {},
@@ -81,6 +95,11 @@ async function until<T>(
         args: [join(import.meta.dir, 'omp-mcp-server.ts')],
         cwd,
         env: { BRAIN_TRAIL_TEST_DIR: scratch },
+      },
+      [appServerName]: {
+        command: appBinary,
+        args: ['mcp', appAssets],
+        cwd,
       },
     },
     {},
@@ -97,6 +116,12 @@ async function until<T>(
       tool.mcpToolName === 'list_bank_accounts',
   )
   assert.ok(connectorTool)
+  const openerTool = mcpTools.find(
+    (tool) =>
+      tool.mcpServerName === appServerName &&
+      tool.mcpToolName === 'open_brain_trail',
+  )
+  assert.ok(openerTool, 'packaged MCP opener must be exposed to OMP')
   registerMockApi()
   let rootStep = 0
   let childStep = 0
@@ -192,6 +217,12 @@ async function until<T>(
               { type: 'toolCall', name: 'read', arguments: { path: outside } },
             ],
           }
+        case 5:
+          return {
+            content: [
+              { type: 'toolCall', name: openerTool.name, arguments: {} },
+            ],
+          }
         default:
           return { content: ['Root finished.'] }
       }
@@ -223,8 +254,11 @@ async function until<T>(
     ],
   })
   const trace: unknown[] = []
+  let openerRegistered = () => true
   const childFinished = Promise.withResolvers<string>()
   const observe: ExtensionFactory = (pi) => {
+    openerRegistered = () =>
+      pi.getAllTools().some((tool) => tool.name === openerTool.name)
     pi.events.on('task:subagent:event', (payload) => {
       trace.push({ channel: 'task:subagent:event', payload })
     })
@@ -263,6 +297,7 @@ async function until<T>(
   }
   let cancelReader: (() => Promise<void>) | undefined
   let browser: Browser | undefined
+  let mcpJourney: McpJourney | undefined
   const sessionResult = await createAgentSession({
     cwd,
     agentDir: process.env.PI_CODING_AGENT_DIR,
@@ -291,9 +326,10 @@ async function until<T>(
     noContextFiles: true,
     slashCommands: [],
     promptTemplates: [],
-    toolNames: ['task', 'read', 'write', connectorTool.name],
+    toolNames: ['task', 'read', 'write', connectorTool.name, openerTool.name],
   })
   const { session } = sessionResult
+  let phase = 'session initialization'
   try {
     assert.deepEqual(sessionResult.extensionsResult.errors, [])
     assert.ok(registry.find('mock', 'mock-model'))
@@ -693,6 +729,73 @@ async function until<T>(
     )
     assert.equal(reads.length, 2)
     assert.equal(await childFinished.promise, 'completed')
+    phase = 'OMP adapter capture privacy'
+    assert.ok(
+      trace.some((entry) => {
+        const value = JSON.stringify(entry)
+        return (
+          value.includes(openerTool.name) &&
+          value.includes('BRAIN_TRAIL_OPEN_V1:') &&
+          value.includes('mcpMeta') &&
+          value.includes('viewKey')
+        )
+      }),
+      'genuine OMP opener result with MCP metadata must be observed',
+    )
+    const captureIsPrivate = (facts: FactsWire) => {
+      const visible = JSON.stringify(facts.events)
+      assert.equal(
+        visible.includes(openerTool.name),
+        false,
+        'adapter operation must not enter visible capture',
+      )
+      assert.equal(
+        visible.includes('open_brain_trail'),
+        false,
+        'adapter operation must not enter visible capture',
+      )
+      assert.equal(
+        visible.includes('viewKey'),
+        false,
+        'adapter metadata must not enter visible capture',
+      )
+      assert.equal(
+        visible.includes('BRAIN_TRAIL_OPEN_V1:'),
+        false,
+        'opener content must not enter visible capture',
+      )
+      const db = new Database(join(agentDir, 'brain-trail', 'trail.sqlite'), {
+        readonly: true,
+      })
+      try {
+        const rows = db
+          .query<{ payload: string }, []>('SELECT payload FROM captures')
+          .all()
+        assert.ok(
+          rows.some((row) => row.payload.includes(connectorTool.name)),
+          'unrelated connector must be persisted',
+        )
+        assert.ok(
+          rows.every(
+            (row) =>
+              !row.payload.includes(openerTool.name) &&
+              !row.payload.includes('BRAIN_TRAIL_OPEN_V1:') &&
+              !row.payload.includes('"viewKey"'),
+          ),
+          'adapter result or metadata must not be persisted',
+        )
+      } finally {
+        db.close()
+      }
+    }
+    const captured = await until(
+      () =>
+        snapshot()?.facts.events.some((event) => event.k === 'done')
+          ? snapshot()
+          : undefined,
+      changed,
+    )
+    captureIsPrivate(captured.facts)
     const connector = await until(() => {
       const s = snapshot()
       return s?.facts.events.some(
@@ -887,8 +990,28 @@ async function until<T>(
       .waitFor({ state: 'visible' })
     await unlink(outside)
     await symlink(canary, outside)
+    phase = 'cross-process MCP pairing'
+    mcpJourney = await startMcpJourney(page, generation, serverName)
+    assert.ok(
+      openerRegistered(),
+      'opener descriptor must initially be registered',
+    )
+    phase = 'disconnected opener descriptor'
+    await manager.disconnectServer(appServerName)
+    const disconnectDeadline = Date.now() + 5000
+    while (openerRegistered() && Date.now() < disconnectDeadline) {
+      const delay = Promise.withResolvers<void>()
+      setTimeout(delay.resolve, 50)
+      await delay.promise
+    }
+    assert.equal(
+      openerRegistered(),
+      false,
+      'opener descriptor must be absent for disconnected restoration',
+    )
     await session.sessionManager.flush()
     await session.reload()
+    phase = 'session restoration'
     const deadline = AbortSignal.timeout(15000)
     const timeout = Promise.withResolvers<never>()
     deadline.addEventListener(
@@ -917,12 +1040,29 @@ async function until<T>(
           history.some(
             (e) => e.k === 'read' && e.p === 'root.txt' && !e.agent,
           ) &&
-          history.some((e) => e.k === 'read' && e.p === 'child.txt' && e.agent)
+          history.some(
+            (e) => e.k === 'read' && e.p === 'child.txt' && e.agent,
+          ) &&
+          history.some(
+            (e) =>
+              e.k === 'mcp' &&
+              e.server === serverName &&
+              e.tool === 'list_bank_accounts',
+          )
           ? s
           : undefined
       }, changed),
       timeout.promise,
     ])
+    assert.equal(
+      openerRegistered(),
+      false,
+      'restoration must not depend on a registered opener descriptor',
+    )
+    captureIsPrivate(outsideResumed.facts)
+    await mcpJourney.stale()
+    assert.equal(outsideResumed.shared.play.playing, false)
+    assert.equal(outsideResumed.shared.play.step, null)
     assert.ok(
       outsideResumed.facts.events.some(
         (e) => e.k === 'read' && e.p === outside && e.out,
@@ -976,34 +1116,13 @@ async function until<T>(
     assert.deepEqual(browserErrors, [])
     await reader.cancel()
     await pump
-  } catch (error) {
-    console.error(
-      'OMP journey failure trace:',
-      JSON.stringify(
-        {
-          trace,
-          journal: session.sessionManager.getBranch(),
-          mockCalls: mock.calls.map((call) => ({
-            messages: call.context.messages,
-            tools: call.context.tools?.map((tool) => tool.name),
-          })),
-          errors,
-        },
-        null,
-        2,
-      ).replace(
-        /https?:\/\/[^\s/"'\\]+\/(?:s|launch)\/[^\s"'\\)]+/g,
-        '[private browser URL]',
-      ),
-    )
-    throw new Error(
-      (error instanceof Error ? error.message : String(error)).replace(
-        /https?:\/\/[^\s/"'\\]+\/(?:s|launch)\/[^\s"'\\)]+/g,
-        '[private browser URL]',
-      ),
-    )
+  } catch {
+    // Tool results can contain App credentials; do not dump the OMP transcript,
+    // trace, model context, or arbitrary errors into diagnostics.
+    throw new Error(`OMP SDK journey failed: ${phase}`)
   } finally {
     await cancelReader?.().catch(() => {})
+    await mcpJourney?.close().catch(() => {})
     await browser?.close()
     await session.dispose()
     await manager.disconnectAll()

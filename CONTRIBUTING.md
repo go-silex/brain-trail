@@ -20,7 +20,13 @@ bun run verify
 
 `verify` checks browser-bundle and relay-binary freshness, the pinned Claude SDK, source-distribution version, tooling regressions, native plugin validation and tests, the OMP SDK journey, correctness lint, incremental formatting, four TypeScript boundaries (shared core, Claude, OMP host and browser), and view parity. It includes `bun run test:workspace-git`, a real-Git workspace inventory safety test; the authored test is included in the package gate. Formatting covers new handwritten code, not Pierre's original renderers.
 
-After changing browser sources, run `bun run build:browser` and commit `hosts/browser/dist/app.js` and `app.css`; `bun run check:browser-build` rebuilds and compares bytes. After changing relay sources, use Go 1.27.3 and run `bun run build:relay`, then commit `hosts/relay/bin/brain-trail-relay-{linux,darwin,windows}-{amd64,arm64}[.exe]`; `bun run check:relay-build` cross-builds and compares the six binaries. Browser Three.js 0.160.0, its used addons and their license are bundled locally. The relay distribution includes the x/sys license.
+After changing browser or MCP App sources, run `bun run build:browser` and commit `hosts/browser/dist/app.js`, `app.css`, `index.html`, `mcp-app.html` and `mcp-app-manifest.json`; `bun run check:browser-build` rebuilds both entries and compares all five files. The browser and App use the same shell and renderer; the browser retains external local scripts and styles, while the App HTML contains its assets. The manifest's `uiBuildId` fingerprints the unfinalized App shell and bundle; `assetDigest` is SHA-256 of final HTML bytes and identifies the immutable `ui://brain-trail/dashboard/<assetDigest>.html` resource. After changing relay sources, use Go 1.27.3 and run `bun run build:relay`, then commit `hosts/relay/bin/brain-trail-relay-{linux,darwin,windows}-{amd64,arm64}[.exe]`; `bun run check:relay-build` cross-builds and compares the six binaries. Browser Three.js 0.160.0, its used addons and their license are bundled locally. The relay distribution includes the x/sys license.
+
+The relay build also copies the exact license texts for the pinned Go MCP SDK and linked JSON schema, URI template and Segmentio modules from the Go module cache into `hosts/relay/bin/`; commit those `LICENSE-*` files alongside the binaries. The freshness check compares their bytes and MCPB packages include them together with the existing Go and x/sys licenses. Revisit the notice list when the linked dependency graph changes.
+
+After generating fresh browser assets and relay binaries, `bun run build:mcpb` creates six deterministic target-specific archives under `.artifacts/mcpb/`, named `brain-trail-<version>-<os>-<arch>.mcpb`. Each contains the matching binary, App HTML and manifest; packaging does not build or validate those inputs. Run the existing freshness and archive checks before release and validate the resulting bundles separately with the official MCPB tool. The MCPB format describes platform but not architecture: distribute the matching architecture explicitly. Binary targets are Linux, macOS and Windows on amd64/arm64; this is a build target list, not evidence of installation, sandbox or runtime support on those platforms. MCPB documentation describes Claude Desktop installation on macOS and Windows; Linux installation behavior requires separate validation.
+
+For manual Desktop stdio registration, an explicitly chosen `brain-trail` key is a stable routing option: use the matching absolute executable path with arguments `mcp` and the absolute directory containing the App assets. An MCPB host may generate a different server name; neither that name nor native Code binding to it is established. Do not register a duplicate server in the native plugin. The App views an explicitly paired native session and does not automatically capture Chat. Host tool forwarding, pairing, native binding, opening without a model turn and actual platform behavior remain separate acceptance checks.
 
 Install the optional local Lefthook checks with `bun run prepare`. The guarded installer never changes `core.hooksPath`. Git worktrees share their canonical hooks directory; existing hooks are accepted only when their exact bytes match this project's installation receipt. Unowned or modified hooks are left untouched.
 
@@ -66,19 +72,20 @@ source SHA-256 pair, or the complete viewport pair respectively. Unused or
 mismatched approvals fail. Declarations apply only to their exact baseline;
 browser execution failures and operational failures cannot be approved.
 
-These checks do not capture Claude Desktop's own pixels on Linux. Real Desktop acceptance must exercise copy, browser handoff and the browser interface.
+These checks do not capture Claude Desktop's own pixels on Linux. Real Desktop acceptance must exercise native App opening and pairing as well as browser handoff; an isolated web or MCP protocol proof is not Desktop evidence.
 
 ## Modules
 
 | Files | Interface and responsibility |
 | --- | --- |
-| `types/model.ts`, `types/view.ts`, `types/browser.ts` | Host-free session, shared view and browser protocol contracts. |
+| `types/model.ts`, `types/view.ts`, `types/browser.ts`, `types/apps.ts` | Host-free session, shared view, browser and App wire contracts, including native command scopes. |
 | `hooks/views.ts`, `hooks/view-*.ts`, `hooks/view-controller.ts`, `hooks/workspace.ts` | Shared view data, transitions and workspace logic, without Claude, Bun or DOM globals. |
 | `hooks/fold.ts`, `hooks/readout.ts`, `hooks/scene3d.ts` | Replay, context and file projections and shared scene geometry. |
 | `hooks/acts.ts`, `hooks/files.ts`, `hooks/mcp.ts` | Current tool names, file detection and connector interpretation. Host-free does not mean host-neutral. |
-| `hooks/register.tsx`, `hosts/native/` | Claude SDK calls, capture, host-owned state, lifecycle, storage, band, command and native adapter. |
-| `hooks/map.ts`, `hosts/browser/` | Shared map data and browser UI, including the SVG 2D and WebGL 3D renderers. |
-| `hosts/omp/`, `hosts/relay/` | OMP capture, lifecycle and persistence; Go relay, file authority and SDK-safe client shared by hosts. |
+| `hooks/register.tsx`, `hooks/app-binding.ts`, `hosts/native/` | Claude capture, lifecycle, native controls and verifier-bound binding; native command/file authority. |
+| `hooks/map.ts`, `hosts/browser/`, `hosts/mcp-app/` | One page/controller and SVG 2D/WebGL 3D renderer; browser SSE/POST and App-only MCP adapters. |
+| `hosts/omp/` | OMP capture, lifecycle, persistence and native command authority. |
+| `hosts/relay/` | Packaged Go browser/private relay and stdio MCP server; approved grants, leases and requests; shared native client. |
 
 The host owns replay and shared preview, zoomed and play state. Tabs and WebGL camera remain surface-local. Hosts retain separate durable stores.
 
@@ -90,13 +97,15 @@ ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT
 
 `bun run test:omp` runs `scripts/omp-journey.ts` in an isolated agent directory against the genuine pinned OMP 18.18.9 SDK and extension lifecycle. It uses the SDK's mock model transport, not a mock host: the journey exercises real session and tool behavior without a model call. Keep SDK-specific event normalization in the adapter rather than assuming Claude tool names are universal.
 
+The journey also pairs a separate packaged Go MCP process through the authenticated browser route, reads real native fixture state, and checks guarded replay, detach, stale generation and remount behavior. A genuine registered MCP opener is called through the scripted OMP model transport; after disconnecting that server, reload verifies adapter data stays out of Brain Trail capture while an unrelated connector remains visible. This proves the exercised local SDK and protocol paths, not Claude Desktop's App rendering or permission policy.
+
 ## Native contract and SDK
 
 `types/index.d.ts` is the native plugin-state contract. The validator requires it to be self-contained: do not import or re-export `model.ts` there. `types/contracts.ts` checks exact equality between its persisted data types and the application model, including optional and readonly fields. Update both sides together; a divergence fails typechecking.
 
 `.claude-plugin/sdk/` contains genuine declarations generated by Claude Code 2.1.322, with an intentionally empty MCP tool interface. These declarations are for development, not a replacement runtime. `bun run check:sdk` rejects a mismatch between the generated header and the CLI dependency.
 
-The browser owns map pointer interactions and rendering; there is no second native graph renderer. The host remains responsible for session state and for authorizing file operations. On an explicit action in the prompt band or command output, the host copies a short-lived, one-use link; the user pastes it into a live browser address bar. Starting a session or running the command must not change the clipboard. OMP retains its private-file browser launch flow.
+The web engine owns map pointer interactions and rendering in both browser and MCP App; there is no second native graph renderer. Native hosts retain state and file authority. Explicit **Open Brain Trail** discovers one genuine opener and calls it without submitting a model prompt; actual host rendering/process continuity must still be proved. **Pair with Chat** issues a short-lived envelope for pasting only inside an unpaired App. Optional **Copy link** retains the browser address-bar flow, and OMP retains its private-file launch flow. Starting a session or mounting controls must not change the clipboard or automatically send a model turn.
 
 For an SDK upgrade:
 
