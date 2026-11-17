@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,40 @@ func inspectACL(path string, user, system *windows.SID, socket bool) (aclEvidenc
 		}
 	}
 	return result, nil
+}
+
+func privateListener(socket string) (net.Listener, error) {
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	if err := secureSocketOwner(socket); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	return listener, nil
+}
+
+// secureSocketOwner sets the token user explicitly when the token's default
+// owner differs. The inherited DACL is validated independently before use.
+func secureSocketOwner(path string) error {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("socket owner token: %w", err)
+	}
+	wide, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(wide, windows.WRITE_OWNER, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return fmt.Errorf("open socket owner: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+		return fmt.Errorf("set socket owner: %w", err)
+	}
+	return nil
 }
 
 func privacyEvidence(dir, socket string) (string, error) {

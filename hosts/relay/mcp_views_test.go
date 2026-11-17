@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -76,7 +75,7 @@ func TestMCPUnpairedViewCanPairAfterIdle(t *testing.T) {
 			}
 			t.Cleanup(func() { os.RemoveAll(dir) })
 			socket := filepath.Join(dir, "relay.sock")
-			listener, err := net.Listen("unix", socket)
+			listener, err := privateListener(socket)
 			if err != nil {
 				t.Fatal(err)
 			}

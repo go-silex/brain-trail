@@ -820,7 +820,7 @@ func serve(assets string) error {
 	if len([]byte(sock)) > 100 {
 		return errors.New("socket path too long")
 	}
-	listener, e := net.Listen("unix", sock)
+	listener, e := privateListener(sock)
 	if e != nil {
 		return e
 	}
