@@ -192,6 +192,10 @@ test('a late duplicate reconciles a live Code grant without reapproval or revoca
     revocations = 0,
     completions = 0
   let now = 1_000_000
+  let outcome: unknown = {
+    isError: false,
+    structuredContent: { v: 1, ok: true, value: { status: 'attached' } },
+  }
   const client = {
     isClosed: () => false,
     checkApp: async () => ({
@@ -214,10 +218,7 @@ test('a late duplicate reconciles a live Code grant without reapproval or revoca
       call: async () => {
         completions++
         claimed = true
-        return {
-          isError: false,
-          structuredContent: { v: 1, ok: true, value: { status: 'attached' } },
-        }
+        return outcome
       },
     },
   } as unknown as EngineInterface
@@ -248,6 +249,91 @@ test('a late duplicate reconciles a live Code grant without reapproval or revoca
     ),
   ).toBe(true)
   expect([approvals, completions, revocations]).toEqual([1, 1, 0])
+  const validText = JSON.stringify({
+    v: 1,
+    ok: true,
+    value: { status: 'attached' },
+  })
+  const cases = [
+    {
+      letter: 'D',
+      response: {
+        isError: false,
+        content: [{ type: 'text', text: validText }],
+      },
+      expected: true,
+    },
+    {
+      letter: 'E',
+      response: {
+        isError: false,
+        structuredContent: null,
+        content: [{ type: 'text', text: validText }],
+      },
+      expected: false,
+    },
+    {
+      letter: 'F',
+      response: { isError: false, content: [{ type: 'text', text: '{' }] },
+      expected: false,
+    },
+    {
+      letter: 'G',
+      response: {
+        isError: false,
+        content: [{ type: 'text', text: 'attached' }],
+      },
+      expected: false,
+    },
+    {
+      letter: 'H',
+      response: {
+        isError: false,
+        content: [
+          { type: 'text', text: validText },
+          { type: 'text', text: validText },
+        ],
+      },
+      expected: false,
+    },
+    {
+      letter: 'I',
+      response: { isError: true, content: [{ type: 'text', text: validText }] },
+      expected: false,
+    },
+    {
+      letter: 'J',
+      response: {
+        isError: false,
+        content: [{ type: 'image', text: validText }],
+      },
+      expected: false,
+    },
+    {
+      letter: 'K',
+      response: { isError: false, content: [{ type: 'text', text: 'true' }] },
+      expected: false,
+    },
+  ]
+  for (const item of cases) {
+    outcome = item.response
+    claimed = false
+    const before = revocations
+    const nextMarker = `BRAIN_TRAIL_OPEN_V1:${item.letter.repeat(42)}A:${token}`
+    expect(
+      await bindCodeOpen(
+        engine,
+        client,
+        'server',
+        nextMarker,
+        owner,
+        1,
+        'label',
+        async () => true,
+      ),
+    ).toBe(item.expected)
+    expect(revocations - before).toBe(item.expected ? 0 : 1)
+  }
 })
 
 test('exact cancellation aborts a producer and retains its admission slot until settlement', async () => {

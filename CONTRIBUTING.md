@@ -107,6 +107,8 @@ The journey also pairs a separate packaged Go MCP process through the authentica
 
 The web engine owns map pointer interactions and rendering in both browser and MCP App; there is no second native graph renderer. Native hosts retain state and file authority. Explicit **Open Brain Trail** discovers one genuine opener and calls it without submitting a model prompt; actual host rendering/process continuity must still be proved. **Pair with Chat** issues a short-lived envelope for pasting only inside an unpaired App. Optional **Copy link** retains the browser address-bar flow, and OMP retains its private-file launch flow. Starting a session or mounting controls must not change the clipboard or automatically send a model turn.
 
+Native MCP completion must validate the versioned success envelope from `structuredContent`, or from exactly one JSON text block when structured content is absent. Claude Desktop can project the public envelope into that text block. Present malformed structured content must not fall back to text, and a plain success word is not a valid envelope. Decoding success does not grant authority: the current-session checks and the private relay's claimed-approval check remain required.
+
 For an SDK upgrade:
 
 1. Generate fresh declarations with the newly pinned CLI in a disposable plugin containing an empty hook module.

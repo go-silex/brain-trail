@@ -165,13 +165,30 @@ async function completeCodeOpen(
         { v: 1, openId: marker.openId, relay: approved.relay },
       )
       if (outcome.isError || signal?.aborted || !(await current())) return false
-      const result = outcome.structuredContent as
-        | { v?: unknown; ok?: unknown; value?: { status?: unknown } }
-        | undefined
+      let result: unknown = outcome.structuredContent
+      if (result === undefined) {
+        const content = outcome.content
+        if (
+          !Array.isArray(content) ||
+          content.length !== 1 ||
+          content[0]?.type !== 'text' ||
+          typeof content[0].text !== 'string'
+        )
+          return false
+        result = JSON.parse(content[0].text)
+      }
       if (
-        result?.v !== 1 ||
+        result === null ||
+        typeof result !== 'object' ||
+        !('v' in result) ||
+        result.v !== 1 ||
+        !('ok' in result) ||
         result.ok !== true ||
-        result.value?.status !== 'attached'
+        !('value' in result) ||
+        result.value === null ||
+        typeof result.value !== 'object' ||
+        !('status' in result.value) ||
+        result.value.status !== 'attached'
       )
         return false
       const checked = await client.checkApp({
