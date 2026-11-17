@@ -373,6 +373,9 @@ let layoutRevision = 0
 let lastLayout: Layout | undefined
 let currentFeed: ReturnType<DashboardFeed['current']> | undefined
 const feedListeners = new Set<(event: ServerEvent) => void>()
+// Model forks can outlive a cancelled App request and its visible reservation.
+let pendingCoachForks = 0
+const MAX_PENDING_COACH_FORKS = 16
 let mutations: Promise<unknown> = Promise.resolve()
 const serial = <T,>(work: () => Promise<T>): Promise<T> => {
   const result = mutations.then(work, work)
@@ -611,7 +614,12 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
         try {
           await guard()
           if (signal?.aborted) throw new Error('forbidden')
-          const work = $.model.fork({ prompt: coachPrompt(lang, file, 'Claude') }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
+          if (pendingCoachForks >= MAX_PENDING_COACH_FORKS) return { ok: false, error: 'busy' }
+          pendingCoachForks++
+          const work = (async () => {
+            try { return await $.model.fork({ prompt: coachPrompt(lang, file, 'Claude') }) }
+            finally { pendingCoachForks-- }
+          })().catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
           const cancelled = Symbol('cancelled')
           const stopped = signal && new Promise<typeof cancelled>(resolve => {
             onAbort = () => resolve(cancelled)

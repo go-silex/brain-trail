@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { Database } from 'bun:sqlite'
-import { mkdir, writeFile, symlink, unlink } from 'node:fs/promises'
+import { mkdir, rename, writeFile, symlink, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { chromium, type Browser } from 'playwright'
@@ -20,9 +20,11 @@ import {
   registerMockApi,
 } from '@oh-my-pi/pi-ai/providers/mock'
 import factory from '../hosts/omp/index.ts'
+import { registerCapture } from '../hosts/omp/capture'
+import { startDashboardServer, type DashboardServer } from '../hosts/omp/server'
 import { nameServer } from '../hooks/mcp.ts'
 import { brain } from '../hooks/scene3d.ts'
-import type { FactsWire, ServerEvent } from '../types/browser.ts'
+import type { DashboardFeed, FactsWire, ServerEvent } from '../types/browser.ts'
 import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
 import {
   startMcpJourney,
@@ -311,6 +313,26 @@ async function until<T>(
   let cancelReader: (() => Promise<void>) | undefined
   let browser: Browser | undefined
   let mcpJourney: McpJourney | undefined
+  const layoutGate = {
+    armed: false,
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+    returned: Promise.withResolvers<void>(),
+  }
+  const gatedFactory: ExtensionFactory = (pi) => {
+    const exec = pi.exec.bind(pi)
+    pi.exec = async (command, args, options) => {
+      const result = await exec(command, args, options)
+      if (layoutGate.armed && command === 'git' && args[0] === 'rev-parse') {
+        layoutGate.armed = false
+        layoutGate.entered.resolve()
+        await layoutGate.release.promise
+        layoutGate.returned.resolve()
+      }
+      return result
+    }
+    return factory(pi)
+  }
   const sessionResult = await createAgentSession({
     cwd,
     agentDir: process.env.PI_CODING_AGENT_DIR,
@@ -324,7 +346,7 @@ async function until<T>(
       'task.workerThreads': 0,
       'task.agentModelOverrides': { task: 'mock/mock-model' },
     }),
-    extensions: [factory, observe],
+    extensions: [gatedFactory, observe],
     disableExtensionDiscovery: true,
     enableMCP: true,
     mcpManager: manager,
@@ -1034,6 +1056,17 @@ async function until<T>(
       snapshot,
       startNativeCoach: () => succeeded(generation, { kind: 'coach-analyse' }),
       nativeBarrier: () => succeeded(generation, { kind: 'refresh-meter' }),
+      removeWorkspace: () => rename(cwd, join(scratch, 'workspace-held')),
+      restoreWorkspace: () => rename(join(scratch, 'workspace-held'), cwd),
+      retryWorkspace: () => succeeded(generation, { kind: 'retry-layout' }),
+      waitForWorkspace: async (kind) => {
+        await until(
+          () =>
+            snapshot()?.facts.workspace.kind === kind ? snapshot() : undefined,
+          changed,
+        )
+      },
+      layoutGate,
     })
     assert.ok(
       openerRegistered(),
@@ -1128,13 +1161,47 @@ async function until<T>(
       { kind: 'preview-read', ref: { p: canary, out: true } },
       'forbidden',
     )
-    await succeeded(generation, { kind: 'clear-trail' })
+    const clears = await Promise.all([
+      post(generation, { kind: 'clear-trail' }),
+      post(generation, { kind: 'clear-trail' }),
+    ])
+    assert.ok(clears.every((response) => response.status === 200))
+    const clearReplies = await Promise.all(
+      clears.map((response) => response.json()),
+    )
+    assert.equal(
+      clearReplies.filter(
+        (reply) =>
+          typeof reply === 'object' &&
+          reply !== null &&
+          'ok' in reply &&
+          reply.ok === true,
+      ).length,
+      1,
+    )
+    assert.equal(
+      clearReplies.filter(
+        (reply) =>
+          typeof reply === 'object' &&
+          reply !== null &&
+          'ok' in reply &&
+          reply.ok === false &&
+          'error' in reply &&
+          reply.error === 'stale-generation',
+      ).length,
+      1,
+    )
     const cleared = await until(() => {
       const s = snapshot()
       return s && s.generation > generation && s.facts.events.length === 0
         ? s
         : undefined
     }, changed)
+    assert.equal(
+      cleared.generation,
+      generation + 1,
+      'concurrent clears must advance once',
+    )
     await refused(generation, { kind: 'refresh-meter' }, 'stale-generation')
     generation = cleared.generation
     await session.sessionManager.flush()
@@ -1157,6 +1224,122 @@ async function until<T>(
     assert.equal(initial.generation, firstGeneration)
     assert.deepEqual(errors, [])
     assert.deepEqual(browserErrors, [])
+    phase = 'atomic native clear transition'
+    const clearEntered = Promise.withResolvers<void>()
+    const releaseClear = Promise.withResolvers<void>()
+    const proofReady = Promise.withResolvers<DashboardFeed>()
+    const proofErrors: unknown[] = []
+    const proofExtension: ExtensionFactory = (pi) => {
+      let relay: Promise<DashboardServer> | undefined
+      let held = false
+      const ensure = () => {
+        relay ??= startDashboardServer(
+          feed,
+          (error) => proofErrors.push(error.code),
+          () => {},
+          { current: () => feed.nativeCurrent() },
+        )
+        return relay
+      }
+      const feed = registerCapture(pi, {
+        authority: ensure,
+        async onRootStart(_context, current) {
+          await ensure()
+          proofReady.resolve(current)
+        },
+        async onRootStop() {
+          const current = await relay?.catch(() => undefined)
+          current?.close()
+        },
+        async revokeGeneration(owner, oldGeneration) {
+          if (!held) {
+            held = true
+            clearEntered.resolve()
+            await releaseClear.promise
+          }
+          await (await ensure()).revokeApp({
+            v: 1,
+            target: { kind: 'generation', owner, generation: oldGeneration },
+            reason: 'generation-ended',
+          })
+        },
+      })
+    }
+    const proofResult = await createAgentSession({
+      cwd,
+      agentDir,
+      authStorage: auth,
+      modelRegistry: registry,
+      model: mock,
+      sessionManager: SessionManager.create(
+        cwd,
+        join(scratch, 'clear-sessions'),
+      ),
+      settings: Settings.isolated({
+        'memory.backend': 'off',
+        'lsp.enabled': false,
+      }),
+      extensions: [proofExtension],
+      disableExtensionDiscovery: true,
+      enableMCP: false,
+      enableLsp: false,
+      enableIrc: false,
+      cacheWarming: false,
+      skills: [],
+      rules: [],
+      contextFiles: [],
+      noContextFiles: true,
+      slashCommands: [],
+      promptTemplates: [],
+    })
+    try {
+      assert.deepEqual(proofResult.extensionsResult.errors, [])
+      await initializeExtensions(proofResult.session, {
+        mode: 'print',
+        reportSendError: (action, error) => proofErrors.push({ action, error }),
+        reportRuntimeError: (error) => proofErrors.push(error),
+      })
+      const feed = await proofReady.promise
+      const oldGeneration = feed.current().generation
+      const first = feed.execute(oldGeneration, { kind: 'clear-trail' })
+      const second = feed.execute(oldGeneration, { kind: 'clear-trail' })
+      const timeout = Promise.withResolvers<never>()
+      const timer = setTimeout(
+        () => timeout.reject(new Error('clear transition timed out')),
+        5000,
+      )
+      try {
+        await Promise.race([clearEntered.promise, timeout.promise])
+        assert.deepEqual(await Promise.race([second, timeout.promise]), {
+          ok: false,
+          error: 'stale-generation',
+        })
+        assert.equal(feed.current().generation, oldGeneration + 1)
+        assert.deepEqual(
+          await Promise.race([
+            feed.execute(oldGeneration + 1, { kind: 'refresh-meter' }),
+            timeout.promise,
+          ]),
+          { ok: false, error: 'stale-generation' },
+        )
+        releaseClear.resolve()
+        assert.deepEqual(await Promise.race([first, timeout.promise]), {
+          ok: true,
+        })
+        assert.equal(feed.current().generation, oldGeneration + 1)
+        assert.deepEqual(
+          await feed.execute(oldGeneration + 1, { kind: 'refresh-meter' }),
+          { ok: true },
+        )
+        assert.deepEqual(proofErrors, [])
+      } finally {
+        clearTimeout(timer)
+        releaseClear.resolve()
+      }
+    } finally {
+      releaseClear.resolve()
+      await proofResult.session.dispose()
+    }
     await reader.cancel()
     await pump
   } catch {
@@ -1164,6 +1347,8 @@ async function until<T>(
     // trace, model context, or arbitrary errors into diagnostics.
     throw new Error(`OMP SDK journey failed: ${phase}`)
   } finally {
+    layoutGate.armed = false
+    layoutGate.release.resolve()
     session.runEphemeralTurn = runEphemeralTurn
     await cancelReader?.().catch(() => {})
     await mcpJourney?.close().catch(() => {})

@@ -133,3 +133,62 @@ test(
     }
   },
 )
+
+test(
+  'cancelled forks remain bounded across clear without blocking short controls',
+  { timeoutMs: 30_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.holdFork()
+    host.setForkResult('completed')
+    const busy = (want: boolean) =>
+      host.waitForState(
+        ({ key, value }) =>
+          key === 'coach' &&
+          typeof value === 'object' &&
+          value !== null &&
+          'value' in value &&
+          typeof value.value === 'object' &&
+          value.value !== null &&
+          'busy' in value.value &&
+          value.value.busy === want,
+      )
+    try {
+      await ui.press({ key: 'copy-browser-link' })
+      await host.browserReady
+      let generation = latestSnapshot(host.browserEvents)!.generation
+      for (let index = 0; index < 16; index++) {
+        const started = host.waitForForks(index + 1)
+        host.appCoach(generation, index)
+        await started
+        const retired = busy(false)
+        host.cancelAppCoach(generation, index)
+        await retired
+      }
+      expect(host.forkCount()).toBe(16)
+      expect(
+        await host.command(generation, { kind: 'lang', lang: 'fr' }),
+      ).toEqual({ ok: true })
+      expect(await host.command(generation, { kind: 'clear-trail' })).toEqual({
+        ok: true,
+      })
+      await host.clock.settle()
+      generation = latestSnapshot(host.browserEvents)!.generation
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: false, error: 'busy' },
+      )
+      expect(host.forkCount()).toBe(16)
+      host.releaseFork()
+      await host.waitForForksReleased(16)
+      await host.clock.settle()
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: true },
+      )
+      expect(host.forkCount()).toBe(17)
+    } finally {
+      host.releaseFork()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)

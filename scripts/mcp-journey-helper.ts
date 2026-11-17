@@ -32,6 +32,16 @@ export type CoachProof = {
   snapshot(): Extract<ServerEvent, { kind: 'snapshot' }> | undefined
   startNativeCoach(): Promise<void>
   nativeBarrier(): Promise<void>
+  removeWorkspace(): Promise<void>
+  restoreWorkspace(): Promise<void>
+  retryWorkspace(): Promise<void>
+  waitForWorkspace(kind: 'failed' | 'ready'): Promise<void>
+  layoutGate: {
+    armed: boolean
+    entered: Deferred<void>
+    release: Deferred<void>
+    returned: Deferred<void>
+  }
 }
 
 export type McpJourney = { stale(): Promise<void>; close(): Promise<void> }
@@ -192,6 +202,91 @@ export async function startMcpJourney(
         setTimeout(delay.resolve, 50)
         await delay.promise
       }
+    }
+    await coach.removeWorkspace()
+    try {
+      const retry = await bounded(
+        call<unknown>('brain_trail_command', {
+          ...auth,
+          request: { v: 1, generation, command: { kind: 'retry-layout' } },
+        }),
+        'scoped workspace retry did not finish',
+      )
+      assert.equal(retry.ok, false, 'failed scoped retry must refuse')
+      if (!retry.ok) assert.equal(retry.error, 'forbidden')
+      await bounded(
+        coach.waitForWorkspace('failed'),
+        'failed scoped retry stranded workspace loading',
+      )
+    } finally {
+      await coach.restoreWorkspace()
+    }
+    await bounded(coach.retryWorkspace(), 'workspace recovery did not finish')
+    await bounded(
+      coach.waitForWorkspace('ready'),
+      'workspace did not recover after retry',
+    )
+    coach.layoutGate.armed = true
+    try {
+      const oldLoad = call<unknown>('brain_trail_command', {
+        ...auth,
+        request: { v: 1, generation, command: { kind: 'retry-layout' } },
+      })
+      void oldLoad.catch(() => {})
+      await bounded(
+        coach.layoutGate.entered.promise,
+        'real inventory did not reach hold',
+      )
+      await bounded(
+        success('brain_trail_detach', auth),
+        'detach blocked by inventory',
+      )
+      const retired = await bounded(
+        oldLoad,
+        'cancelled inventory request did not settle',
+      )
+      assert.equal(retired.ok, false, 'cancelled inventory request must refuse')
+      await bounded(
+        coach.waitForWorkspace('failed'),
+        'cancelled inventory stranded workspace loading',
+      )
+      await bounded(
+        coach.retryWorkspace(),
+        'newer inventory retry did not finish',
+      )
+      await bounded(
+        coach.waitForWorkspace('ready'),
+        'newer inventory retry did not publish ready',
+      )
+      const newer = coach.snapshot()?.facts.workspace
+      assert.ok(newer?.kind === 'ready')
+      const newerRevision = newer.layoutRev
+      coach.layoutGate.release.resolve()
+      await bounded(
+        coach.layoutGate.returned.promise,
+        'held real inventory result did not return',
+      )
+      await bounded(
+        coach.nativeBarrier(),
+        'native inventory processing barrier failed',
+      )
+      await pair()
+      const current = await pull()
+      const currentSnapshot = current.events.find(
+        (event) => event.kind === 'snapshot',
+      )
+      assert.ok(
+        currentSnapshot?.kind === 'snapshot' &&
+          currentSnapshot.facts.workspace.kind === 'ready',
+      )
+      assert.equal(
+        currentSnapshot.facts.workspace.layoutRev,
+        newerRevision,
+        'retired inventory overwrote newer layout',
+      )
+    } finally {
+      coach.layoutGate.armed = false
+      coach.layoutGate.release.resolve()
     }
     try {
       const pending = call<unknown>('brain_trail_command', {

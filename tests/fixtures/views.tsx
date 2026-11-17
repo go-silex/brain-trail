@@ -192,8 +192,8 @@ export type Host = {
   fileRead: Promise<void>
   filePrepared: Promise<void>
   command: (generation: number, command: HostCommand) => Promise<unknown>
-  appCoach: (generation: number) => void
-  cancelAppCoach: (generation: number) => void
+  appCoach: (generation: number, index?: number) => void
+  cancelAppCoach: (generation: number, index?: number) => void
   setForkResult: (text: string | null) => void
   promptFills: string[]
   copyCalls: UiCopyArgs[]
@@ -209,6 +209,9 @@ export type Host = {
   disconnectRelay: () => void
   holdFork: () => void
   forkStarted: Promise<void>
+  forkCount: () => number
+  waitForForks: (count: number) => Promise<void>
+  waitForForksReleased: (count: number) => Promise<void>
   releaseFork: () => void
   holdPlayWrite: () => void
   playWriteBlocked: Promise<void>
@@ -376,6 +379,10 @@ export const installHost = (
   })
   const handles = new Map<string, string>()
   let forkHeld = false
+  let forkCount = 0,
+    forkReleased = 0
+  const forkWaiters: { count: number; resolve: () => void }[] = []
+  const releaseWaiters: { count: number; resolve: () => void }[] = []
   let resolveForkStarted = () => {}
   let releaseFork = () => {}
   const forkStarted = new Promise<void>((resolve) => {
@@ -836,8 +843,14 @@ export const installHost = (
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.attach', (_$, e) => ({ clientId: e.clientId }))
   on('model.fork', async () => {
+    forkCount++
+    for (const waiter of forkWaiters)
+      if (forkCount >= waiter.count) waiter.resolve()
     resolveForkStarted()
     if (forkHeld) await forkGate
+    forkReleased++
+    for (const waiter of releaseWaiters)
+      if (forkReleased >= waiter.count) waiter.resolve()
     return forkText === null
       ? {
           value: {
@@ -923,10 +936,10 @@ export const installHost = (
           `${JSON.stringify({ t: 'cmd', id, body: { v: 1, generation, command } })}\n`,
         )
       }),
-    appCoach: (generation) => {
+    appCoach: (generation, index = 0) => {
       const token = 'A'.repeat(43)
       const scope = {
-        requestId: token,
+        requestId: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[index]! + 'A'.repeat(42),
         relayId: token,
         grantId: token,
         owner: { host: 'code', sessionId: 'synthetic-session' },
@@ -937,10 +950,10 @@ export const installHost = (
         `${JSON.stringify({ v: 1, t: 'app-cmd', scope, request: { v: 1, generation, command: { kind: 'coach-analyse' } } })}\n`,
       )
     },
-    cancelAppCoach: (generation) => {
+    cancelAppCoach: (generation, index = 0) => {
       const token = 'A'.repeat(43)
       const scope = {
-        requestId: token,
+        requestId: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[index]! + 'A'.repeat(42),
         relayId: token,
         grantId: token,
         owner: { host: 'code', sessionId: 'synthetic-session' },
@@ -969,6 +982,19 @@ export const installHost = (
       forkHeld = true
     },
     forkStarted,
+    forkCount: () => forkCount,
+    waitForForks: (count) =>
+      forkCount >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            forkWaiters.push({ count, resolve })
+          }),
+    waitForForksReleased: (count) =>
+      forkReleased >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            releaseWaiters.push({ count, resolve })
+          }),
     releaseFork,
     holdPlayWrite: () => {
       playWriteHeld = true

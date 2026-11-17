@@ -101,6 +101,7 @@ export function registerCapture(
   let ctx: ExtensionContext | undefined
   let sessionId = ''
   let transitioning = false
+  let transitionOwner: object | undefined
   let activeCommands = 0
   let activeLongCommands = 0
   let coachRun = 0
@@ -259,6 +260,23 @@ export function registerCapture(
       if (!current(g) || ctx !== context || layoutLoad !== loadId)
         throw new RelayRefusal('stale-generation', 'Session changed')
     }
+    const retireLoad = () => {
+      if (
+        !current(g) ||
+        ctx !== context ||
+        layoutLoad !== loadId ||
+        facts.workspace.kind !== 'loading'
+      )
+        return
+      layoutLoad++
+      facts = {
+        ...facts,
+        workspace: { kind: 'failed', message: 'Workspace loading cancelled' },
+      }
+      publish()
+    }
+    scope?.signal.addEventListener('abort', retireLoad, { once: true })
+    if (scope?.signal.aborted) retireLoad()
     try {
       await assertLoad()
       let chosen = context.cwd
@@ -395,14 +413,27 @@ export function registerCapture(
       await cacheWrite
       return shallow
     } catch (error) {
-      if (scope) throw error
-      if (current(g) && layoutLoad === loadId) {
+      if (
+        current(g) &&
+        ctx === context &&
+        layoutLoad === loadId &&
+        facts.workspace.kind === 'loading'
+      ) {
         facts = {
           ...facts,
-          workspace: { kind: 'failed', message: String(error) },
+          workspace: {
+            kind: 'failed',
+            message:
+              error instanceof RelayRefusal
+                ? 'Workspace loading cancelled'
+                : String(error),
+          },
         }
         publish()
       }
+      if (scope) throw error
+    } finally {
+      scope?.signal.removeEventListener('abort', retireLoad)
     }
   }
   const capture = async (
@@ -775,6 +806,7 @@ export function registerCapture(
     coachRun++
     coachAbort?.abort()
     coachAbort = undefined
+    transitionOwner = undefined
     transitioning = true
     abort.abort()
     if (previous)
@@ -1080,12 +1112,16 @@ export function registerCapture(
         return { ok: true }
       case 'clear-trail': {
         await assertValid()
+        if (!valid() || ctx !== context) return refusal('stale-generation')
+        const transition = {}
+        transitionOwner = transition
+        transitioning = true
         coachRun++
         coachAbort?.abort()
         coachAbort = undefined
         if (facts.coach.busy)
           facts = { ...facts, coach: { ...facts.coach, busy: false } }
-        transitioning = true
+        // The reserved transition remains exclusive until revocation completes.
         replayEpoch++
         if (replayTimer !== undefined) context.clearTimer(replayTimer)
         replayTimer = undefined
@@ -1093,6 +1129,8 @@ export function registerCapture(
         generation++
         const nextGeneration = generation
         await lifecycle.revokeGeneration({ host: 'omp', sessionId }, g)
+        if (transitionOwner !== transition) return refusal('stale-generation')
+        transitionOwner = undefined
         transitioning = false
         if (!current(nextGeneration) || ctx !== context)
           return refusal('stale-generation')
@@ -1429,6 +1467,8 @@ export function registerCapture(
   })
   pi.on('session_shutdown', async (_event, context) => {
     if (context.agent.kind !== 'main' || !ctx) return
+    transitionOwner = undefined
+    transitioning = true
     coachRun++
     coachAbort?.abort()
     coachAbort = undefined
