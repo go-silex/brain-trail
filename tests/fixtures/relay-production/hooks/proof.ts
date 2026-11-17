@@ -78,7 +78,22 @@ export const register: Register = (on) => {
         binary,
         `${$.plugin.root}/hosts/browser/dist`,
         feed,
+        {
+          current: async () => ({
+            owner: { host: 'code', sessionId: 'relay-production-proof' },
+            generation: 2,
+            label: 'relay production proof',
+          }),
+        },
       )
+      const approved = await client.approveApp({
+        v: 1,
+        owner: { host: 'code', sessionId: 'relay-production-proof' },
+        generation: 2,
+        label: 'relay production proof',
+        approval: { kind: 'chat', pairId: port.randomToken() },
+      })
+      if (!approved.envelope) throw new Error('First approval failed')
       launch = await client.prepareBrowser()
       await $.fs.write(
         `${cwd}/relay-production.json`,

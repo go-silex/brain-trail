@@ -7,8 +7,9 @@ import type { AppAuth, Bootstrap, Reply, ViewState } from '../../types/apps'
 import { parseChatEnvelope, parseStrictJSON } from '../../types/apps'
 import { startPage } from '../browser/page'
 import '../browser/app.css'
-import { appTransport, type ToolCall } from './transport'
+import { appTransport } from './transport'
 import { resetMountedView } from './reset'
+import type { ToolCall } from './wire'
 import {
   attached,
   bootstrap as validBootstrap,

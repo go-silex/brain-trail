@@ -1,18 +1,18 @@
 {
   "baseline": "68b45cf54508e4cfde7a44572fa751a69fcda085",
-  "reason": "Independent review of the launcher-free cutover approved only these nine band tree changes: explicit Desktop Copy entry, removal of terminal pane buttons, and Desktop entry before meter availability. Retired native panes are not approved; gauge SVGs are unchanged.",
+  "reason": "Independent exact-proof review approves these nine band tree changes: Desktop Open/Pair/Copy controls, removal of terminal pane buttons, and Desktop controls before meter availability. The five Desktop fingerprints were reviewed from receipt input b356584de78a8035bae002368d5935f38aaa10c96a935426e61a814844fd7838; terminal approvals remain unchanged. No retired native pane, browser failure or gauge SVG difference is approved.",
   "cases": {
     "band-desktop-dark-en": {
-      "tree": "5fdc5eb3c66d931ba55f7a8b57543681bf3f6aaff269a5d3965129247f62c634"
+      "tree": "0848fcbd67812cca2bff07f560d3e797fd88e65f0fe75e21c1f4452d0cec2efc"
     },
     "band-desktop-light-en": {
-      "tree": "5fdc5eb3c66d931ba55f7a8b57543681bf3f6aaff269a5d3965129247f62c634"
+      "tree": "0848fcbd67812cca2bff07f560d3e797fd88e65f0fe75e21c1f4452d0cec2efc"
     },
     "band-desktop-dark-fr": {
-      "tree": "f9edb71a36e8ec64deff872402689f5efba6b765804f9f07fa6f5d7014d473d4"
+      "tree": "7491722b2d1e7beafb2921c390701661da4349a31055403c205e6446d109a567"
     },
     "band-desktop-light-fr": {
-      "tree": "f9edb71a36e8ec64deff872402689f5efba6b765804f9f07fa6f5d7014d473d4"
+      "tree": "7491722b2d1e7beafb2921c390701661da4349a31055403c205e6446d109a567"
     },
     "band-terminal-dark-en": {
       "tree": "430e369eb90fa7cddf29d769f5dca0389355678f9e7616952a8bc8b5a96cc783"
@@ -27,7 +27,7 @@
       "tree": "7b4b4bc5dcc8e11ffa39ea70dd9a38f76eed7254dd988c4384b3da83eddd6294"
     },
     "band-meter-unavailable-desktop-dark-en": {
-      "tree": "baa6d32024a57d94faa0c52c9ff544e915ddf08f4b0d9c9b9a53bbcb1def3902"
+      "tree": "39f2f77e66258b225aed8d651283ce8bb7983c96255bf08700367d55b7581f25"
     }
   }
 }

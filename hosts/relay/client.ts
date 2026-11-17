@@ -134,6 +134,10 @@ export async function startRelay(
   let published = 0
   let publishing: Promise<void> | undefined
   const launches = new Map<string, number>()
+  const appOperations = new Map<
+    string,
+    { guard: Guard; controller: AbortController }
+  >()
   let linkSequence = 0
   let linkQueue: Promise<unknown> = Promise.resolve()
   let stateQueue: Promise<unknown> = Promise.resolve()
@@ -181,6 +185,8 @@ export async function startRelay(
     if (stopped) return
     stopped = true
     launches.clear()
+    for (const operation of appOperations.values()) operation.controller.abort()
+    appOperations.clear()
     rejectClosed(terminalFailure ?? disconnected())
     unsubscribe()
     process?.close()
@@ -317,7 +323,18 @@ export async function startRelay(
     if ((await appResult('revoke', body)) !== null)
       throw new RelayRefusal('invalid', 'Invalid app revoke response')
   }
-  const approveApp = async (body: HostApprove): Promise<Approved> => {
+  const approveApp = (body: HostApprove): Promise<Approved> =>
+    serializeState(() => approveAppLocked(body))
+  const approveAppLocked = async (body: HostApprove): Promise<Approved> => {
+    await nativeCurrent(body.generation, body.owner)
+    const synced = await request('generation', {
+      generation: body.generation,
+      ended: false,
+    })
+    if (!isExactObject(synced, ['ok']) || synced.ok !== true)
+      throw new RelayRefusal('invalid', 'Invalid relay generation response')
+    sentGeneration = Math.max(sentGeneration, body.generation)
+    await nativeCurrent(body.generation, body.owner)
     const value = await appResult('approve', body)
     if (
       !isExactObject(value, ['relay', 'approval', 'expiresAt', 'envelope']) ||
@@ -350,6 +367,26 @@ export async function startRelay(
         envelope.expiresAt !== value.expiresAt)
     )
       throw new RelayRefusal('invalid', 'Invalid app approval response')
+    try {
+      await nativeCurrent(body.generation, body.owner)
+    } catch (error) {
+      try {
+        await revokeApp({
+          v: 1,
+          target: {
+            kind: 'approval',
+            approval:
+              body.approval.kind === 'code'
+                ? { kind: 'code', openId: body.approval.openId }
+                : { kind: 'chat', pairId: body.approval.pairId },
+          },
+          reason: 'generation-ended',
+        })
+      } catch {
+        close()
+      }
+      throw error
+    }
     return value as Approved
   }
   let sentGeneration = 0
@@ -491,19 +528,29 @@ export async function startRelay(
     frame:
       | { t: 'app-current'; scope: Guard; cursor: Cursor | null }
       | { t: 'app-cmd'; scope: Guard; request: unknown },
+    controller: AbortController,
   ) => {
     const guard = frame.scope
     const scope = {
       guard,
+      signal: controller.signal,
       assertCurrent: async () => {
+        if (controller.signal.aborted)
+          throw new RelayRefusal('forbidden', 'Operation no longer current')
         await nativeCurrent(guard.generation, guard.owner)
+        if (controller.signal.aborted)
+          throw new RelayRefusal('forbidden', 'Operation no longer current')
         const checked = await checkApp({
           v: 1,
           target: { kind: 'operation', scope: guard },
         })
+        if (controller.signal.aborted)
+          throw new RelayRefusal('forbidden', 'Operation no longer current')
         if (checked.kind !== 'operation')
           throw new RelayRefusal('forbidden', 'Operation no longer current')
         await nativeCurrent(guard.generation, guard.owner)
+        if (controller.signal.aborted)
+          throw new RelayRefusal('forbidden', 'Operation no longer current')
       },
     }
     let sending = false
@@ -605,7 +652,7 @@ export async function startRelay(
           throw new RelayRefusal('invalid', 'Invalid app reply response')
       }
     } catch (error) {
-      if (!sending) {
+      if (!sending && !controller.signal.aborted) {
         try {
           if (appHost) await scope.assertCurrent()
           else
@@ -613,6 +660,7 @@ export async function startRelay(
               v: 1,
               target: { kind: 'operation', scope: guard },
             })
+          if (controller.signal.aborted) return
           const code =
             error instanceof RelayRefusal &&
             error.code !== 'http' &&
@@ -629,6 +677,41 @@ export async function startRelay(
         }
       }
     }
+  }
+  const admitApp = (
+    frame:
+      | { t: 'app-current'; scope: Guard; cursor: Cursor | null }
+      | { t: 'app-cmd'; scope: Guard; request: unknown },
+  ) => {
+    const guard = frame.scope
+    if (appOperations.has(guard.requestId)) return
+    if (appOperations.size >= 16) {
+      void (async () => {
+        try {
+          await nativeCurrent(guard.generation, guard.owner)
+          const checked = await checkApp({
+            v: 1,
+            target: { kind: 'operation', scope: guard },
+          })
+          if (checked.kind !== 'operation') return
+          await nativeCurrent(guard.generation, guard.owner)
+          await appResult('reply', {
+            v: 1,
+            scope: guard,
+            result: { ok: false, error: 'busy' },
+          })
+        } catch {
+          /* Retired or unavailable operations cannot receive a reply. */
+        }
+      })()
+      return
+    }
+    const operation = { guard, controller: new AbortController() }
+    appOperations.set(guard.requestId, operation)
+    void appFrame(frame, operation.controller).finally(() => {
+      if (appOperations.get(guard.requestId) === operation)
+        appOperations.delete(guard.requestId)
+    })
   }
   const pairFrame = async (requestId: string, generation: number) => {
     let result: unknown
@@ -687,7 +770,7 @@ export async function startRelay(
         (value.cursor !== null && !isCursor(value.cursor))
       )
         throw new Error('Invalid app current frame')
-      void appFrame({
+      admitApp({
         t: 'app-current',
         scope: value.scope,
         cursor: value.cursor,
@@ -699,11 +782,31 @@ export async function startRelay(
         !isGuard(value.scope)
       )
         throw new Error('Invalid app command frame')
-      void appFrame({
+      admitApp({
         t: 'app-cmd',
         scope: value.scope,
         request: value.request,
       })
+    } else if (value.t === 'app-cancel') {
+      if (
+        !isExactObject(value, ['v', 't', 'scope']) ||
+        value.v !== 1 ||
+        !isGuard(value.scope)
+      )
+        throw new Error('Invalid app cancellation frame')
+      const guard = value.scope
+      const operation = appOperations.get(guard.requestId)
+      const active = operation?.guard
+      if (
+        active &&
+        active.relayId === guard.relayId &&
+        active.grantId === guard.grantId &&
+        active.generation === guard.generation &&
+        sameOwner(active.owner, guard.owner) &&
+        active.lease.epoch === guard.lease.epoch &&
+        active.lease.id === guard.lease.id
+      )
+        operation.controller.abort()
     } else if (value.t === 'app-pair') {
       if (
         !isExactObject(value, ['v', 't', 'requestId', 'generation']) ||

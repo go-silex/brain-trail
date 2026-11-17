@@ -12,7 +12,27 @@ import type {
   Attached,
   ChatEnvelope,
 } from '../types/apps'
-import type { HostCommand } from '../types/browser'
+import type { HostCommand, ServerEvent } from '../types/browser'
+
+type Deferred<T> = { promise: Promise<T>; resolve(value: T): void }
+
+export type CoachGate = {
+  entered: Deferred<void>
+  release: Deferred<void>
+  resumed: Deferred<void>
+  settled: Deferred<
+    { status: 'fulfilled'; text: string } | { status: 'rejected' }
+  >
+  text: string
+}
+
+export type CoachProof = {
+  old: CoachGate
+  next: CoachGate
+  snapshot(): Extract<ServerEvent, { kind: 'snapshot' }> | undefined
+  startNativeCoach(): Promise<void>
+  nativeBarrier(): Promise<void>
+}
 
 export type McpJourney = { stale(): Promise<void>; close(): Promise<void> }
 
@@ -22,6 +42,7 @@ export async function startMcpJourney(
   page: Page,
   generation: number,
   serverName: string,
+  coach: CoachProof,
 ): Promise<McpJourney> {
   const platform = process.platform === 'win32' ? 'windows' : process.platform
   const arch = process.arch === 'x64' ? 'amd64' : process.arch
@@ -151,7 +172,106 @@ export async function startMcpJourney(
       advanced,
       'native playback must advance after App command returns',
     )
-    await success('brain_trail_detach', auth)
+    const bounded = async <T>(
+      promise: Promise<T>,
+      label: string,
+    ): Promise<T> => {
+      const timeout = Promise.withResolvers<never>()
+      const timer = setTimeout(() => timeout.reject(new Error(label)), 5000)
+      try {
+        return await Promise.race([promise, timeout.promise])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    const waitFor = async (condition: () => boolean, label: string) => {
+      const deadline = Date.now() + 5000
+      while (!condition()) {
+        if (Date.now() >= deadline) throw new Error(label)
+        const delay = Promise.withResolvers<void>()
+        setTimeout(delay.resolve, 50)
+        await delay.promise
+      }
+    }
+    try {
+      const pending = call<unknown>('brain_trail_command', {
+        ...auth,
+        request: { v: 1, generation, command: { kind: 'coach-analyse' } },
+      })
+      void pending.catch(() => {})
+      await bounded(coach.old.entered.promise, 'old coach did not start')
+      await waitFor(
+        () => coach.snapshot()?.facts.coach.busy === true,
+        'coach did not become busy',
+      )
+      assert.deepEqual(
+        await bounded(
+          command({ kind: 'settings', patch: { hover: false } }),
+          'settings blocked by coach',
+        ),
+        { ok: true },
+      )
+      await waitFor(
+        () => coach.snapshot()?.facts.settings.hover === false,
+        'settings did not reach native state',
+      )
+      await bounded(
+        success('brain_trail_detach', auth),
+        'detach blocked by coach',
+      )
+      const retired = await bounded(pending, 'retired command did not finish')
+      assert.equal(retired.ok, false, 'detached coach command must be refused')
+      await waitFor(
+        () => coach.snapshot()?.facts.coach.busy === false,
+        'retired coach left native busy',
+      )
+      const newer = coach.startNativeCoach()
+      void newer.catch(() => {})
+      await bounded(coach.next.entered.promise, 'new coach did not start')
+      await waitFor(
+        () => coach.snapshot()?.facts.coach.busy === true,
+        'new coach did not become busy',
+      )
+      coach.old.release.resolve()
+      await bounded(coach.old.resumed.promise, 'old model did not resume')
+      const settled = await bounded(
+        coach.old.settled.promise,
+        'old SDK side turn did not settle',
+      )
+      assert.equal(
+        settled.status,
+        'fulfilled',
+        'old SDK side turn must deliver its late response',
+      )
+      if (settled.status === 'fulfilled')
+        assert.equal(
+          settled.text,
+          coach.old.text,
+          'old SDK side turn returned the gated response',
+        )
+      await bounded(coach.nativeBarrier(), 'native processing barrier failed')
+      assert.equal(
+        coach.snapshot()?.facts.coach.busy,
+        true,
+        'old completion cleared newer coach',
+      )
+      coach.next.release.resolve()
+      await bounded(newer, 'new coach did not finish')
+      await waitFor(
+        () =>
+          coach.snapshot()?.facts.coach.busy === false &&
+          coach.snapshot()?.facts.coach.text === coach.next.text,
+        'new coach result was not committed',
+      )
+      assert.notEqual(
+        coach.snapshot()?.facts.coach.text,
+        coach.old.text,
+        'retired coach overwrote new result',
+      )
+    } finally {
+      coach.old.release.resolve()
+      coach.next.release.resolve()
+    }
     const detached = await pull()
     assert.equal(detached.state.kind, 'detached')
     assert.equal(detached.events.length, 0)

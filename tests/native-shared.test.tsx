@@ -18,6 +18,27 @@ const scenario: ViewCase = {
 }
 
 test(
+  'native Chat pairing publishes installed apps without browser-link issuance',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.setAppCatalog(['Editor'])
+    try {
+      await ui.press({ key: 'pair-chat' })
+      await host.browserReady
+      await host.clock.settle()
+      expect(latestSnapshot(host.browserEvents)?.facts.apps).toEqual(['Editor'])
+      expect(host.copyCalls.length).toBe(1)
+      expect(JSON.parse(host.copyCalls[0]!.text).kind).toBe('chat')
+      expect(host.copyCalls[0]!.text.includes('/launch/')).toBe(false)
+    } finally {
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
   'known files can be previewed but unknown and stale references are refused',
   { timeoutMs: 20_000 },
   async ($, on: On) => {

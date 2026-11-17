@@ -24,7 +24,11 @@ import { nameServer } from '../hooks/mcp.ts'
 import { brain } from '../hooks/scene3d.ts'
 import type { FactsWire, ServerEvent } from '../types/browser.ts'
 import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
-import { startMcpJourney, type McpJourney } from './mcp-journey-helper'
+import {
+  startMcpJourney,
+  type CoachGate,
+  type McpJourney,
+} from './mcp-journey-helper'
 
 type BrowserDom = {
   DOMParser: new () => {
@@ -126,6 +130,7 @@ async function until<T>(
   let rootStep = 0
   let childStep = 0
   const childMarker = 'BRAIN_TRAIL_CHILD_FIXTURE_ASSIGNMENT'
+  const coachGates: CoachGate[] = []
   const mock = createMockModel({
     handler: (context) => {
       const users = context.messages.filter(
@@ -133,6 +138,14 @@ async function until<T>(
       )
       const lastUser = JSON.stringify(users.at(-1)?.content ?? '')
       if (lastUser.includes('(existing content):')) {
+        const gate = coachGates.shift()
+        if (gate) {
+          gate.entered.resolve()
+          return gate.release.promise.then(() => {
+            gate.resumed.resolve()
+            return { content: [gate.text] }
+          })
+        }
         return {
           content: [
             'Use a shorter instruction.\n```context\nKeep instructions concise.\n```',
@@ -329,6 +342,18 @@ async function until<T>(
     toolNames: ['task', 'read', 'write', connectorTool.name, openerTool.name],
   })
   const { session } = sessionResult
+  const runEphemeralTurn = session.runEphemeralTurn
+  session.runEphemeralTurn = async (args) => {
+    const gate = coachGates[0]
+    try {
+      const result = await runEphemeralTurn.call(session, args)
+      gate?.settled.resolve({ status: 'fulfilled', text: result.replyText })
+      return result
+    } catch (error) {
+      gate?.settled.resolve({ status: 'rejected' })
+      throw error
+    }
+  }
   let phase = 'session initialization'
   try {
     assert.deepEqual(sessionResult.extensionsResult.errors, [])
@@ -991,7 +1016,25 @@ async function until<T>(
     await unlink(outside)
     await symlink(canary, outside)
     phase = 'cross-process MCP pairing'
-    mcpJourney = await startMcpJourney(page, generation, serverName)
+    const makeCoachGate = (text: string): CoachGate => ({
+      entered: Promise.withResolvers<void>(),
+      release: Promise.withResolvers<void>(),
+      resumed: Promise.withResolvers<void>(),
+      settled: Promise.withResolvers<
+        { status: 'fulfilled'; text: string } | { status: 'rejected' }
+      >(),
+      text,
+    })
+    const oldCoach = makeCoachGate('Retired coach response')
+    const nextCoach = makeCoachGate('New coach response')
+    coachGates.push(oldCoach, nextCoach)
+    mcpJourney = await startMcpJourney(page, generation, serverName, {
+      old: oldCoach,
+      next: nextCoach,
+      snapshot,
+      startNativeCoach: () => succeeded(generation, { kind: 'coach-analyse' }),
+      nativeBarrier: () => succeeded(generation, { kind: 'refresh-meter' }),
+    })
     assert.ok(
       openerRegistered(),
       'opener descriptor must initially be registered',
@@ -1121,6 +1164,7 @@ async function until<T>(
     // trace, model context, or arbitrary errors into diagnostics.
     throw new Error(`OMP SDK journey failed: ${phase}`)
   } finally {
+    session.runEphemeralTurn = runEphemeralTurn
     await cancelReader?.().catch(() => {})
     await mcpJourney?.close().catch(() => {})
     await browser?.close()

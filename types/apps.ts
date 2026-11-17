@@ -153,6 +153,7 @@ export type AppCurrent = V & {
   scope: Guard
   cursor: Cursor | null
 }
+export type AppCancelled = V & { t: 'app-cancel'; scope: Guard }
 export type AppCommand = V & {
   t: 'app-cmd'
   scope: Guard

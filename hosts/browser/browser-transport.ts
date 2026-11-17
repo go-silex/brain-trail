@@ -113,6 +113,16 @@ export function browserTransport(
           invalidEvent()
           return
         }
+        if (
+          event === null ||
+          typeof event !== 'object' ||
+          (event.kind === 'snapshot' &&
+            event.facts?.ownerHost !== 'code' &&
+            event.facts?.ownerHost !== 'omp')
+        ) {
+          invalidEvent()
+          return
+        }
         sink.event(event)
         observe.event(event)
       }

@@ -19,6 +19,7 @@ import type {
 } from './view'
 
 export type FactsWire = {
+  ownerHost: 'code' | 'omp'
   assistant: string
   lang: Lang
   meter: Meter
@@ -96,7 +97,11 @@ export type CommandRefusal = {
     | 'disconnected'
 }
 export type CommandRequest = { v: 1; generation: number; command: HostCommand }
-export type CommandScope = { guard: Guard; assertCurrent(): Promise<void> }
+export type CommandScope = {
+  guard: Guard
+  signal: AbortSignal
+  assertCurrent(): Promise<void>
+}
 export type DashboardFeed = {
   current(): {
     generation: number

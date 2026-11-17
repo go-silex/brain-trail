@@ -9,6 +9,12 @@ import type {
 import { isCursor, isLabel, isOwner, isToken } from '../../types/apps'
 import type { CommandRefusal, ServerEvent } from '../../types/browser'
 
+export type ToolCall = <T>(
+  name: string,
+  args: Record<string, unknown>,
+  validate: (value: unknown) => value is T,
+) => Promise<Reply<T>>
+
 type Obj = Record<string, unknown>
 const obj = (v: unknown): v is Obj =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -69,6 +75,7 @@ export const resetView = (v: unknown): v is ResetView =>
 const event = (
   v: unknown,
   generation: number,
+  ownerHost: 'code' | 'omp',
 ): v is Exclude<ServerEvent, { kind: 'ended' }> => {
   if (!obj(v) || v.v !== 1 || v.generation !== generation) return false
   if (v.kind === 'layout')
@@ -82,6 +89,7 @@ const event = (
       keys(v, ['v', 'kind', 'generation', 'revision', 'facts', 'shared']) &&
       nonnegative(v.revision) &&
       obj(v.facts) &&
+      v.facts.ownerHost === ownerHost &&
       obj(v.shared)
     )
   return false
@@ -101,7 +109,9 @@ export const pulled = (v: unknown): v is Pulled => {
     !isCursor(currentCursor) ||
     currentCursor.generation !== currentState.generation ||
     v.events.length > 2 ||
-    !v.events.every((e) => event(e, currentState.generation))
+    !v.events.every((e) =>
+      event(e, currentState.generation, currentState.source.owner.host),
+    )
   )
     return false
   if (

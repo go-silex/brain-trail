@@ -25,17 +25,7 @@ const { bootstrap, invalid } = browserBootstrap()
 if (invalid) notify('Invalid file link')
 const pairing = document.createElement('section')
 pairing.setAttribute('aria-label', 'Chat pairing')
-Object.assign(pairing.style, {
-  position: 'fixed',
-  top: '8px',
-  right: '8px',
-  zIndex: '100',
-  background: 'var(--bg)',
-  color: 'var(--fg)',
-  padding: '8px',
-  border: '1px solid var(--dim)',
-  maxWidth: 'min(32rem, 90vw)',
-})
+pairing.className = 'bt-browser-pair'
 const pairButton = document.createElement('button')
 pairButton.className = 'bt-button'
 pairButton.textContent = 'Pair with Chat'
@@ -59,7 +49,8 @@ const pairingStatus = document.createElement('p')
 pairingStatus.setAttribute('role', 'status')
 panel.append(instruction, envelope, copy, dismiss)
 pairing.append(pairButton, panel, pairingStatus)
-document.body.append(pairing)
+document.body.classList.add('bt-app-shell')
+document.body.insertBefore(pairing, app)
 
 let generation = 0
 let attempt = 0

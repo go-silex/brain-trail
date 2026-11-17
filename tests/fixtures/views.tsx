@@ -192,6 +192,8 @@ export type Host = {
   fileRead: Promise<void>
   filePrepared: Promise<void>
   command: (generation: number, command: HostCommand) => Promise<unknown>
+  appCoach: (generation: number) => void
+  cancelAppCoach: (generation: number) => void
   setForkResult: (text: string | null) => void
   promptFills: string[]
   copyCalls: UiCopyArgs[]
@@ -606,6 +608,9 @@ export const installHost = (
         '/h/launch',
         '/h/generation',
         '/h/apps',
+        '/h/app/approve',
+        '/h/app/check',
+        '/h/app/reply',
         '/h/app/revoke',
         '/h/file/prepare',
         '/h/file/read',
@@ -626,6 +631,53 @@ export const installHost = (
       body?: unknown
     }
     let response: unknown = { ok: true }
+    if (e.url.endsWith('/h/app/check'))
+      response = { v: 1, ok: true, value: { kind: 'operation' } }
+    if (e.url.endsWith('/h/app/reply'))
+      response = { v: 1, ok: true, value: null }
+    if (e.url.endsWith('/h/app/approve')) {
+      const body = request as unknown as {
+        v: number
+        owner: { host: string; sessionId: string }
+        generation: number
+        label: string
+        approval: { kind: string; pairId: string }
+      }
+      if (
+        body.v !== 1 ||
+        body.owner?.host !== 'code' ||
+        body.owner.sessionId !== 'synthetic-session' ||
+        !Number.isSafeInteger(body.generation) ||
+        body.generation < 1 ||
+        typeof body.label !== 'string' ||
+        body.approval?.kind !== 'chat' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(body.approval.pairId)
+      )
+        throw new Error('Unexpected fixture app approval')
+      const relay = {
+        socket: '/tmp/brain-trail-fixture/relay.sock',
+        relayId: 'A'.repeat(43),
+      }
+      const approval = { kind: 'chat', pairId: body.approval.pairId }
+      const expiresAt = Date.now() + 60_000
+      response = {
+        v: 1,
+        ok: true,
+        value: {
+          relay,
+          approval,
+          expiresAt,
+          envelope: {
+            v: 1,
+            kind: 'chat',
+            relay,
+            pairId: approval.pairId,
+            secret: 'A'.repeat(43),
+            expiresAt,
+          },
+        },
+      }
+    }
     if (e.url.endsWith('/h/app/revoke')) {
       const body = request as unknown as {
         v?: unknown
@@ -871,6 +923,32 @@ export const installHost = (
           `${JSON.stringify({ t: 'cmd', id, body: { v: 1, generation, command } })}\n`,
         )
       }),
+    appCoach: (generation) => {
+      const token = 'A'.repeat(43)
+      const scope = {
+        requestId: token,
+        relayId: token,
+        grantId: token,
+        owner: { host: 'code', sessionId: 'synthetic-session' },
+        generation,
+        lease: { epoch: 1, id: token },
+      }
+      sendFrame(
+        `${JSON.stringify({ v: 1, t: 'app-cmd', scope, request: { v: 1, generation, command: { kind: 'coach-analyse' } } })}\n`,
+      )
+    },
+    cancelAppCoach: (generation) => {
+      const token = 'A'.repeat(43)
+      const scope = {
+        requestId: token,
+        relayId: token,
+        grantId: token,
+        owner: { host: 'code', sessionId: 'synthetic-session' },
+        generation,
+        lease: { epoch: 1, id: token },
+      }
+      sendFrame(`${JSON.stringify({ v: 1, t: 'app-cancel', scope })}\n`)
+    },
     setForkResult: (text) => {
       forkText = text
     },

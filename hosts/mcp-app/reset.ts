@@ -1,6 +1,5 @@
 import type { AppAuth, Reply, ResetView, UiIdentity } from '../../types/apps'
-import type { ToolCall } from './transport'
-import { detached, nil, resetView } from './wire'
+import { detached, nil, resetView, type ToolCall } from './wire'
 
 export async function resetMountedView(
   call: ToolCall,

@@ -23,7 +23,7 @@ const snapshot = {
   kind: 'snapshot',
   generation: 7,
   revision: 3,
-  facts: {},
+  facts: { ownerHost: 'code' },
   shared: {},
 }
 
@@ -38,6 +38,16 @@ test('accepts only exact bootstrap identity and canonical credentials', () => {
 test('requires one coherent ordered read for the attached generation', () => {
   expect(pulled({ state, cursor, events: [layout, snapshot] })).toBe(true)
   expect(pulled({ state, cursor, events: [snapshot, layout] })).toBe(false)
+  expect(pulled({ state, cursor, events: [{ ...snapshot, facts: {} }] })).toBe(
+    false,
+  )
+  expect(
+    pulled({
+      state,
+      cursor,
+      events: [{ ...snapshot, facts: { ownerHost: 'omp' } }],
+    }),
+  ).toBe(false)
   expect(
     pulled({ state, cursor, events: [{ ...snapshot, generation: 8 }] }),
   ).toBe(false)

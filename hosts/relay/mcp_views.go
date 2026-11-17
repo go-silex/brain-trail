@@ -48,7 +48,7 @@ type mcpView struct {
 	activeUntil   time.Time
 	grant         *mcpViewGrant
 	work          *mcpViewWork
-	pulling       bool
+	pulling       uint64
 	operations    map[uint64]context.CancelFunc
 	nextOperation uint64
 	io            sync.Mutex
@@ -173,6 +173,7 @@ func (s *mcpViews) cancelOperations(v *mcpView) {
 	for _, cancel := range v.operations {
 		cancel()
 	}
+	v.pulling = 0
 }
 func (s *mcpViews) allocate(withVerifier bool) (*mcpView, string) {
 	if s.closed || len(s.views) >= mcpViewLimit {
@@ -260,6 +261,12 @@ func (s *mcpViews) suspend(v *mcpView, g *mcpViewGrant, lease Lease) {
 	defer cancel()
 	_, _ = mcpRelayCall[*struct{}](ctx, g.client, "/a/lease", g.claim.GrantKey, LeaseRequest{V1: V1{V: 1}, RelayID: g.address.RelayID, Lease: lease, Active: false})
 }
+func mcpViewActivityLifetime(v *mcpView) time.Duration {
+	if v.grant != nil {
+		return mcpLeaseLifetime
+	}
+	return mcpViewRetention
+}
 func (s *mcpViews) authenticate(a AppAuth) (*mcpView, string) {
 	if a.V != 1 || a.ServerEpoch != s.epoch || !mcpTokenValid(a.ViewKey) || !mcpTokenValid(a.MountKey) {
 		return nil, "forbidden"
@@ -268,7 +275,7 @@ func (s *mcpViews) authenticate(a AppAuth) (*mcpView, string) {
 	if v == nil || v.mountKey != a.MountKey || !time.Now().Before(v.activeUntil) {
 		return nil, "forbidden"
 	}
-	v.activeUntil = time.Now().Add(mcpLeaseLifetime)
+	v.activeUntil = time.Now().Add(mcpViewActivityLifetime(v))
 	return v, ""
 }
 func (s *mcpViews) operation(v *mcpView, parent context.Context) (context.Context, func(), uint64) {
@@ -343,7 +350,7 @@ func (s *mcpViews) mount(ctx context.Context, a AppMount) (Mounted, string) {
 	v.mountEpoch++
 	epoch := v.mountEpoch
 	v.mountKey = key
-	v.activeUntil = time.Now().Add(mcpLeaseLifetime)
+	v.activeUntil = time.Now().Add(mcpViewActivityLifetime(v))
 	v.retainedUntil = time.Time{}
 	op, done, intent := s.operation(v, ctx)
 	s.mu.Unlock()
@@ -442,6 +449,8 @@ func (s *mcpViews) finishClaim(v *mcpView, w *mcpViewWork, intent uint64, g *mcp
 		w.attached = mcpAttached(g)
 		if v.mountKey == "" {
 			v.retainedUntil = time.Now().Add(mcpViewRetention)
+		} else if time.Now().Before(v.activeUntil) {
+			v.activeUntil = time.Now().Add(mcpLeaseLifetime)
 		}
 	} else {
 		if refusal == "" {
@@ -589,6 +598,7 @@ func (s *mcpViews) detach(ctx context.Context, a AppDetach) (Detached, string) {
 	v.verifier = ""
 	g := v.grant
 	v.grant = nil
+	v.activeUntil = time.Now().Add(mcpViewRetention)
 	s.mu.Unlock()
 	if g != nil {
 		go mcpReleaseGrant(g, "detached")
@@ -636,17 +646,24 @@ func (s *mcpViews) pull(ctx context.Context, a AppPull) (Pulled, string) {
 		s.mu.Unlock()
 		return p, ""
 	}
-	if v.pulling || s.full() {
+	if v.pulling != 0 || s.full() {
 		s.mu.Unlock()
 		return Pulled{}, "busy"
 	}
-	v.pulling = true
 	g := v.grant
 	op, done, intent := s.operation(v, ctx)
+	pullID := v.nextOperation
+	v.pulling = pullID
 	lease := g.lease
 	s.mu.Unlock()
 	defer done()
-	defer func() { s.mu.Lock(); v.pulling = false; s.mu.Unlock() }()
+	defer func() {
+		s.mu.Lock()
+		if v.pulling == pullID {
+			v.pulling = 0
+		}
+		s.mu.Unlock()
+	}()
 	first, err := mcpRelayCall[CurrentPart](op, g.client, "/a/pull", g.claim.GrantKey, RelayPull{V1: V1{V: 1}, RelayID: g.address.RelayID, Lease: lease, Cursor: a.Cursor})
 	if r = mcpErr(err, first.Refusal); r != "" {
 		return Pulled{}, r

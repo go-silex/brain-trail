@@ -257,6 +257,12 @@ type AppCurrent struct {
 	Scope  Guard   `json:"scope"`
 	Cursor *Cursor `json:"cursor"`
 }
+
+type AppCancelled struct {
+	V1
+	T     string `json:"t"`
+	Scope Guard  `json:"scope"`
+}
 type AppCommand struct {
 	V1
 	T       string          `json:"t"`

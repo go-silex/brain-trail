@@ -4,7 +4,13 @@ import { parseOpenMarker } from '../types/apps'
 
 const bindings = new Map<
   string,
-  { key: string; promise: Promise<boolean>; expires: number }
+  {
+    key: string
+    promise: Promise<boolean>
+    expires: number
+    settled: boolean
+    client: RelayClient
+  }
 >()
 
 // The public marker identifies an open; only the MCP process holds its verifier.
@@ -21,18 +27,47 @@ export async function bindCodeOpen(
 ): Promise<boolean> {
   const marker = parseOpenMarker(text)
   if (!marker || signal?.aborted || !(await current())) return false
+  const now = await $.clock.now()
   const key = JSON.stringify([
     server,
     marker.challenge,
     owner.sessionId,
     generation,
   ])
-  for (const [id, entry] of bindings)
-    if (entry.expires <= Date.now()) bindings.delete(id)
+  // A live grant can outlast the outcome TTL. Only evict expired, settled
+  // outcomes under admission pressure after the issuing relay confirms that
+  // no claimed grant survives; a failed check is not evidence of retirement.
+  if (!bindings.has(marker.openId) && bindings.size >= 16) {
+    for (const [id, entry] of bindings) {
+      if (!entry.settled || entry.expires > now) continue
+      if (entry.client.isClosed()) {
+        if (bindings.get(id) === entry) bindings.delete(id)
+        if (bindings.size < 16) break
+        continue
+      }
+      try {
+        const checked = await entry.client.checkApp({
+          v: 1,
+          target: { kind: 'approval', approval: { kind: 'code', openId: id } },
+        })
+        if (
+          checked.kind === 'approval' &&
+          checked.state !== 'claimed' &&
+          checked.state !== 'pending' &&
+          bindings.get(id) === entry
+        )
+          bindings.delete(id)
+      } catch {
+        /* retain unknown authority */
+      }
+      if (bindings.size < 16) break
+    }
+  }
   const existing = bindings.get(marker.openId)
   if (existing) {
     if (
       existing.key !== key ||
+      existing.client !== client ||
       !(await existing.promise) ||
       signal?.aborted ||
       !(await current())
@@ -68,7 +103,17 @@ export async function bindCodeOpen(
     current,
     signal,
   )
-  bindings.set(marker.openId, { key, promise, expires: Date.now() + 120000 })
+  const entry = {
+    key,
+    promise,
+    expires: now + 120000,
+    settled: false,
+    client,
+  }
+  bindings.set(marker.openId, entry)
+  void promise.then(() => {
+    entry.settled = true
+  })
   return promise
 }
 
@@ -85,9 +130,20 @@ async function completeCodeOpen(
 ): Promise<boolean> {
   const approval = { kind: 'code' as const, openId: marker.openId }
   let committed = false
+  let mayRevoke = false
   let cancelTimer: (() => void) | undefined
   let abort: (() => void) | undefined
   try {
+    const existing = await client.checkApp({
+      v: 1,
+      target: { kind: 'approval', approval },
+    })
+    // A claimed, pending or terminal approval may belong to an earlier
+    // invocation whose local outcome has aged out. It is never ours to revoke.
+    if (existing.kind !== 'approval' || existing.state !== 'missing')
+      return false
+    if (signal?.aborted || !(await current())) return false
+    mayRevoke = true
     const approved = await client.approveApp({
       v: 1,
       owner,
@@ -138,7 +194,7 @@ async function completeCodeOpen(
   } finally {
     cancelTimer?.()
     if (abort) signal?.removeEventListener('abort', abort)
-    if (!committed) {
+    if (!committed && mayRevoke) {
       try {
         await client.revokeApp({
           v: 1,

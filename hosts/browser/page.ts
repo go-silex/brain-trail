@@ -448,7 +448,7 @@ export function startPage(
       ),
       lang: f.lang,
       assistant: f.assistant,
-      costInfoCommand: '/session info',
+      costInfoCommand: f.ownerHost === 'code' ? '/cost' : '/session info',
       palette:
         document.documentElement.dataset.theme === 'light' ||
         (document.documentElement.dataset.theme !== 'dark' && theme.matches)
@@ -483,6 +483,14 @@ export function startPage(
   const onEvent = (event: ServerEvent) => {
     if (disposed || ended) return
     if (event.v !== 1 || event.generation < generation) return
+    if (
+      event.kind === 'snapshot' &&
+      event.facts?.ownerHost !== 'code' &&
+      event.facts?.ownerHost !== 'omp'
+    ) {
+      toast('Invalid dashboard event')
+      return
+    }
     if (
       pendingFile !== undefined &&
       (event.generation !== pendingFile.generation || event.kind === 'ended')

@@ -331,14 +331,26 @@ export async function captureBrowserScene(
     )
   )
     throw new Error('captured adapter layout geometry or language is invalid')
+  const dist = path.join(root, 'hosts/browser/dist')
   const assets = new Map(
     await Promise.all(
-      ['app.js', 'app.css', 'index.html'].map(async (name) => [
+      ['app.js', 'app.css'].map(async (name) => [
         name,
-        await readFile(path.join(root, 'hosts/browser/dist', name)),
+        await readFile(path.join(dist, name)),
       ]),
     ),
   )
+  let shell
+  if (candidate) {
+    shell = await readFile(path.join(dist, 'index.html'))
+  } else {
+    // The historical relay serves its Go raw-string page directly at the
+    // session root; use that revision's source, not a reconstructed shell.
+    const relay = await readFile(path.join(root, 'hosts/relay/main.go'), 'utf8')
+    const match = /^const page = `([^`]*)`$/m.exec(relay)
+    if (!match) throw new Error('historical relay production page not found')
+    shell = match[1]
+  }
   const clients = new Set()
   let deferWhole = false
   let wholeArrived = () => {}
@@ -377,9 +389,12 @@ export async function captureBrowserScene(
           wholeArrived()
         } else res.end('{"ok":false,"error":"unsupported"}')
       })
+    } else if (req.url === '/pair') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"v":1,"ok":false,"error":"unsupported"}')
     } else if (req.url === '/') {
       res.writeHead(200, { 'content-type': 'text/html' })
-      res.end(assets.get('index.html'))
+      res.end(shell)
     } else {
       res.writeHead(404)
       res.end()
@@ -1115,10 +1130,11 @@ export async function captureBrowserScene(
         const canvas = document.querySelector('.bt-scene3d canvas')
         const header = document.querySelector('[data-key="pane-header"]')
         const footer = document.querySelector('[data-key="pane-footer"]')
-        const wantsBrand = expected >= 408
+        const wantsBrand = app?.clientHeight >= 408
         if (
           !app ||
-          app.clientHeight !== expected ||
+          app.clientHeight <= 0 ||
+          app.getBoundingClientRect().bottom > expected + 1 ||
           brand !== wantsBrand ||
           !canvas ||
           !header ||
@@ -1199,6 +1215,35 @@ export async function captureBrowserScene(
           `invalid compact transition: ${JSON.stringify(compact)}`,
         )
       compactMeasurements.push(compact)
+    }
+    if (candidate) {
+      // The pairing shell consumes height outside #app. At a short, wide
+      // viewport both its control and the dashboard header must receive clicks.
+      await page.setViewportSize({ width: 800, height: 320 })
+      const pair = page.getByRole('button', {
+        name: 'Pair with Chat',
+        exact: true,
+      })
+      const pairRequest = page.waitForRequest(
+        (request) => new URL(request.url()).pathname === '/pair',
+      )
+      await pair.click()
+      const request = await pairRequest
+      if (
+        JSON.stringify(request.postDataJSON()) !==
+        JSON.stringify({
+          v: 1,
+          generation: snapshot.generation,
+        })
+      )
+        throw new Error('compact pairing click sent the wrong generation')
+      await page
+        .getByText('Pairing refused: unsupported.', { exact: false })
+        .waitFor({ state: 'visible' })
+      await page.locator('[data-key="t-goal"]').click()
+      await page.locator('[data-key="plan-0"]').waitFor({ state: 'visible' })
+      await page.locator('[data-key="t-map"]').click()
+      await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
     }
     await page.setViewportSize({ width: 1280, height: 720 })
     // Local browser navigation is real; commands are refused by this fixture,

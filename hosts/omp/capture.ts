@@ -83,6 +83,10 @@ const refusal = (error: CommandRefusal['error']): CommandRefusal => ({
   error,
 })
 
+const MAX_ACTIVE_COMMANDS = 16
+// Reserve four slots for short controls even if long native effects never settle.
+const MAX_ACTIVE_LONG_COMMANDS = 12
+
 export function registerCapture(
   pi: ExtensionAPI,
   lifecycle: Lifecycle,
@@ -97,11 +101,16 @@ export function registerCapture(
   let ctx: ExtensionContext | undefined
   let sessionId = ''
   let transitioning = false
-  let commandQueue: Promise<void> = Promise.resolve()
+  let activeCommands = 0
+  let activeLongCommands = 0
+  let coachRun = 0
+  let coachAbort: AbortController | undefined
   let store: TrailStore | undefined
   let generation = 0,
     revision = 0,
     layoutRev = 0
+  let layoutLoad = 0
+  let cacheWrites: Promise<void> = Promise.resolve()
   let abort = new AbortController()
   let timer: ReturnType<ExtensionContext['setInterval']> | undefined
   let unsubscribe: (() => void) | undefined
@@ -126,6 +135,7 @@ export function registerCapture(
   const listeners = new Set<(event: ServerEvent) => void>()
   let facts: FactsWire = {
     assistant: 'OMP',
+    ownerHost: 'omp',
     lang: 'en',
     meter: { window: 0 },
     events: [],
@@ -239,13 +249,14 @@ export function registerCapture(
   const load = async (g: number, publishReady = true, scope?: CommandScope) => {
     const context = ctx
     if (!context) return
+    const loadId = ++layoutLoad
     const signal = abort.signal,
       home = homedir()
     const assertLoad = async () => {
-      if (!current(g) || ctx !== context)
+      if (!current(g) || ctx !== context || layoutLoad !== loadId)
         throw new RelayRefusal('stale-generation', 'Session changed')
       await scope?.assertCurrent()
-      if (!current(g) || ctx !== context)
+      if (!current(g) || ctx !== context || layoutLoad !== loadId)
         throw new RelayRefusal('stale-generation', 'Session changed')
     }
     try {
@@ -371,14 +382,21 @@ export function registerCapture(
         }
       emit({ v: 1, kind: 'layout', generation, layout })
       if (publishReady) publish()
-      await assertLoad()
-      await mkdir(cacheDir, { recursive: true })
-      await assertLoad()
-      await writeFile(cache, JSON.stringify({ root, paths, layout: packed }))
+      const cacheWrite = cacheWrites.then(async () => {
+        await assertLoad()
+        await mkdir(cacheDir, { recursive: true })
+        await assertLoad()
+        await writeFile(
+          cache,
+          JSON.stringify({ root: canonical, paths, layout: packed }),
+        )
+      })
+      cacheWrites = cacheWrite.catch(() => {})
+      await cacheWrite
       return shallow
     } catch (error) {
       if (scope) throw error
-      if (current(g)) {
+      if (current(g) && layoutLoad === loadId) {
         facts = {
           ...facts,
           workspace: { kind: 'failed', message: String(error) },
@@ -754,6 +772,9 @@ export function registerCapture(
       ctx && sessionId
         ? { owner: { host: 'omp' as const, sessionId }, generation }
         : undefined
+    coachRun++
+    coachAbort?.abort()
+    coachAbort = undefined
     transitioning = true
     abort.abort()
     if (previous)
@@ -782,6 +803,7 @@ export function registerCapture(
     connected = connectedTools(pi.getAllTools(), pi.getActiveTools())
     facts = {
       assistant: 'OMP',
+      ownerHost: 'omp',
       lang: savedLang === 'fr' ? 'fr' : 'en',
       meter: { window: 0 },
       events: [],
@@ -932,7 +954,6 @@ export function registerCapture(
   ): Promise<CommandReplies[HostCommand['kind']] | CommandRefusal> => {
     if (!current(g) || !ctx || !store) return refusal('stale-generation')
     const context = ctx,
-      signal = abort.signal,
       epoch = captureEpoch
     const valid = () => current(g) && epoch === captureEpoch
     const assertValid = async () => {
@@ -1059,6 +1080,11 @@ export function registerCapture(
         return { ok: true }
       case 'clear-trail': {
         await assertValid()
+        coachRun++
+        coachAbort?.abort()
+        coachAbort = undefined
+        if (facts.coach.busy)
+          facts = { ...facts, coach: { ...facts.coach, busy: false } }
         transitioning = true
         replayEpoch++
         if (replayTimer !== undefined) context.clearTimer(replayTimer)
@@ -1117,6 +1143,7 @@ export function registerCapture(
         await assertValid()
         return { ok: true }
       case 'coach-analyse': {
+        if (facts.coach.busy) return refusal('busy')
         if (!context.runEphemeralTurn) {
           facts = {
             ...facts,
@@ -1132,6 +1159,22 @@ export function registerCapture(
           file = facts.instructionFile,
           session = context.sessionManager.getSessionId(),
           runTurn = context.runEphemeralTurn
+        const runId = ++coachRun
+        const controller = new AbortController()
+        coachAbort = controller
+        const retire = () => {
+          controller.abort()
+          if (coachRun !== runId || !valid() || ctx !== context) return
+          coachRun++
+          coachAbort = undefined
+          facts = { ...facts, coach: { ...facts.coach, busy: false } }
+          publish()
+        }
+        scope?.signal.addEventListener('abort', retire, { once: true })
+        if (scope?.signal.aborted) {
+          retire()
+          return refusal('forbidden')
+        }
         facts = { ...facts, coach: coachBusy(facts.coach) }
         publish()
         await (async () => {
@@ -1161,13 +1204,13 @@ export function registerCapture(
             const reply = await runTurn({
               promptText: `${coachPrompt(lang, file, 'OMP')}\n\n${file} (existing content):\n${source.slice(0, 40000)}`,
               tools: false,
-              signal,
+              signal: controller.signal,
               onUsage: (message) => {
                 sideCost += message.usage.cost.total
               },
             })
             await assertValid()
-            if (valid()) {
+            if (valid() && coachRun === runId) {
               if (sideCost)
                 store?.addSide(
                   session,
@@ -1182,6 +1225,8 @@ export function registerCapture(
               publish()
             }
           } catch (error) {
+            if (coachRun !== runId)
+              throw new RelayRefusal('stale-generation', 'Coach run retired')
             await assertValid()
             if (valid()) {
               facts = {
@@ -1194,6 +1239,10 @@ export function registerCapture(
               usage()
               publish()
             }
+          } finally {
+            scope?.signal.removeEventListener('abort', retire)
+            if (coachRun === runId && facts.coach.busy) retire()
+            else if (coachRun === runId) coachAbort = undefined
           }
         })()
         return { ok: true }
@@ -1253,27 +1302,60 @@ export function registerCapture(
       command: C,
       scope?: CommandScope,
     ) => {
-      let result: CommandReplies[C['kind']] | CommandRefusal =
-        refusal('disconnected')
-      const work = commandQueue.then(async () => {
-        try {
-          result = (await run(g, command, scope)) as
-            | CommandReplies[C['kind']]
-            | CommandRefusal
-        } catch (error) {
-          result =
-            error instanceof RelayRefusal
-              ? refusal(
-                  error.code === 'http' || error.code === 'missing'
-                    ? 'disconnected'
-                    : error.code,
-                )
-              : refusal('forbidden')
-        }
-      })
-      commandQueue = work.catch(() => {})
-      await work
-      return result
+      const long = [
+        'open',
+        'preview-read',
+        'compact',
+        'retry-layout',
+        'coach-analyse',
+      ].includes(command.kind)
+      if (
+        activeCommands >= MAX_ACTIVE_COMMANDS ||
+        (long && activeLongCommands >= MAX_ACTIVE_LONG_COMMANDS)
+      )
+        return refusal('busy')
+      activeCommands++
+      if (long) activeLongCommands++
+      if (scope?.signal.aborted) {
+        activeCommands--
+        if (long) activeLongCommands--
+        return refusal('forbidden')
+      }
+      const work = run(g, command, scope)
+      void work.then(
+        () => {
+          activeCommands--
+          if (long) activeLongCommands--
+        },
+        () => {
+          activeCommands--
+          if (long) activeLongCommands--
+        },
+      )
+      let onAbort: (() => void) | undefined
+      try {
+        const result = scope
+          ? await Promise.race([
+              work,
+              new Promise<CommandRefusal>((resolve) => {
+                onAbort = () => resolve(refusal('forbidden'))
+                scope.signal.addEventListener('abort', onAbort, { once: true })
+                if (scope.signal.aborted) onAbort()
+              }),
+            ])
+          : await work
+        return result as CommandReplies[C['kind']] | CommandRefusal
+      } catch (error) {
+        return error instanceof RelayRefusal
+          ? refusal(
+              error.code === 'http' || error.code === 'missing'
+                ? 'disconnected'
+                : error.code,
+            )
+          : refusal('forbidden')
+      } finally {
+        if (scope && onAbort) scope.signal.removeEventListener('abort', onAbort)
+      }
     },
   }
   pi.on('session_start', async (_event, context) => {
@@ -1347,6 +1429,9 @@ export function registerCapture(
   })
   pi.on('session_shutdown', async (_event, context) => {
     if (context.agent.kind !== 'main' || !ctx) return
+    coachRun++
+    coachAbort?.abort()
+    coachAbort = undefined
     abort.abort()
     if (timer) context.clearTimer(timer)
     replayEpoch++

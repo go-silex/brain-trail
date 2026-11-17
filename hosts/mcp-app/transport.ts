@@ -11,13 +11,7 @@ import type {
   HostCommand,
 } from '../../types/browser'
 import type { DashboardTransport } from '../browser/transport'
-import { pulled, refusal } from './wire'
-
-export type ToolCall = <T>(
-  name: string,
-  args: Record<string, unknown>,
-  validate: (value: unknown) => value is T,
-) => Promise<Reply<T>>
+import { pulled, refusal, type ToolCall } from './wire'
 
 function commandReply<C extends HostCommand>(
   command: C,

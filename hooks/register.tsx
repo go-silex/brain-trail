@@ -457,7 +457,7 @@ const publishCurrent = async ($: EngineInterface) => {
   const instructionFile = (await $.fs.exists(`${root}/AGENTS.md`).catch(() => false)) ? 'AGENTS.md' : 'CLAUDE.md'
   const contextBreakdown = await getBreakdown($, await $.clock.now())
   const facts: FactsWire = {
-    assistant: 'Claude', lang: await read($, langA), meter: await read($, meter),
+    ownerHost: 'code', assistant: 'Claude', lang: await read($, langA), meter: await read($, meter),
     events: await read($, events), settings: await read($, settingsA), coach: await read($, coachA),
     workspace: layoutWire ? { kind: 'ready', layoutRev: layoutWire.layoutRev, shallow } :
       failure ? { kind: 'failed', message: failure } : { kind: 'loading', since: packingSince },
@@ -604,14 +604,38 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
           return accepted
         })
         if (operation === undefined) return { ok: false, error: 'busy' }
-        await guard()
-        const result = await $.model.fork({ prompt: coachPrompt(lang, file, 'Claude') }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
-        await serial(async () => {
+        const owner = sessionId, reservationGeneration = expected
+        let committed = false
+        const signal = scope?.signal
+        let onAbort: (() => void) | undefined
+        try {
           await guard()
-          if (operation !== coachOperation) throw new Error('stale-generation')
-          if (result.isAnswered) await update($, coachA, () => coachDone(result.text, Date.now()))
-          else await update($, coachA, coachFailed('reason' in result ? String(result.reason) : 'unknown', strings(lang, 'Claude')))
-        })
+          if (signal?.aborted) throw new Error('forbidden')
+          const work = $.model.fork({ prompt: coachPrompt(lang, file, 'Claude') }).catch((err: unknown) => ({ isAnswered: false as const, reason: String(err) }))
+          const cancelled = Symbol('cancelled')
+          const stopped = signal && new Promise<typeof cancelled>(resolve => {
+            onAbort = () => resolve(cancelled)
+            signal.addEventListener('abort', onAbort, { once: true })
+            if (signal.aborted) onAbort()
+          })
+          const result = stopped ? await Promise.race([work, stopped]) : await work
+          if (result === cancelled) throw new Error('forbidden')
+          await serial(async () => {
+            await guard()
+            if (operation !== coachOperation) throw new Error('stale-generation')
+            if (result.isAnswered) await update($, coachA, () => coachDone(result.text, Date.now()))
+            else await update($, coachA, coachFailed('reason' in result ? String(result.reason) : 'unknown', strings(lang, 'Claude')))
+            committed = true
+          })
+        } finally {
+          if (onAbort) signal?.removeEventListener('abort', onAbort)
+          if (!committed) await serial(async () => {
+            await checkSession($)
+            if (sessionId !== owner || generation !== reservationGeneration || operation !== coachOperation) return
+            await update($, coachA, coach => ({ ...coach, busy: false }))
+            queuePublish($)
+          })
+        }
         break
       }
       case 'coach-apply': {
@@ -749,6 +773,8 @@ const bindResult = async ($: EngineInterface, server: string, text: string, id: 
   const current = async () => { await checkSession($); return !signal?.aborted && sessionId === id && generation === expected }
   if (!(await current())) return false
   const client = await ensureRelay($)
+  await installedApps($)
+  await publish($)
   if (!(await current()) || relay !== client) return false
   const label = await sourceLabel($)
   return bindCodeOpen($, client, server, text, { host: 'code', sessionId: id }, expected, label, current, signal)
@@ -780,6 +806,8 @@ const pairChat = async ($: EngineInterface, press: UiPressArgument) => {
     const id = sessionId, expected = generation
     if (!id) throw new Error('session unavailable')
     client = await ensureRelay($)
+    await installedApps($)
+    await publish($)
     await checkSession($)
     if (id !== sessionId || expected !== generation || client !== relay) throw new Error('stale-generation')
     pairId = relayIO($, () => true).randomToken()
@@ -1000,7 +1028,7 @@ export const register: Register = (on, options) => {
         {e.surface === 'desktop' && !launchBusy && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
         {e.surface === 'desktop' && launchBusy && <Text size="caption">{fr ? 'Copie…' : 'Copying…'}</Text>}
         {active && launchError && <Text size="caption">{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
-        {copied && <Text key="browser-copy-success" size="caption">{fr ? 'Copié : collez dans la barre d’adresse.' : 'Copied: paste into the address bar.'}</Text>}
+        {copied && <Box key="browser-copy-success"><Text size="caption">{fr ? 'Copié : collez dans la barre d’adresse.' : 'Copied: paste into the address bar.'}</Text></Box>}
       </Box>
     )
   }).catch(($, e, next) => next(e))
@@ -1020,7 +1048,7 @@ export const register: Register = (on, options) => {
         {!launchBusy && <Button key="copy-browser-link" label={fr ? 'Copier le lien' : 'Copy link'} onPress={press => copyLink($, press)} />}
         {launchBusy && <Text>{fr ? 'Copie…' : 'Copying…'}</Text>}
         {active && launchError && <Text>{fr ? 'Échec de la copie, réessayez.' : 'Copy failed; try again.'}</Text>}
-        {copied && <Text key="browser-copy-success">{fr ? 'Copié.' : 'Copied.'}</Text>}
+        {copied && <Box key="browser-copy-success"><Text>{fr ? 'Copié.' : 'Copied.'}</Text></Box>}
       </Box>
     )
   }).catch(($, e, next) => next(e))

@@ -1,6 +1,6 @@
 {
   "name": "brain-trail",
-  "description": "Brain Trail: a browser dashboard and native prompt band for the context of a Claude Code session.",
+  "description": "Brain Trail: native Claude Code session capture with Open and Pair controls for the shared web dashboard and MCP App.",
   "owner": {
     "name": "Unkillable Companies"
   },

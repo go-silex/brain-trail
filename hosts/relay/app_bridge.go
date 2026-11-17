@@ -49,6 +49,10 @@ type appOperation struct {
 	cursor       *Cursor
 	continuation bool
 	context      context.Context
+	done         chan struct{}
+	timer        *time.Timer
+	admitted     bool
+	retiredError string
 }
 type appPairPending struct {
 	generation int64
@@ -159,6 +163,33 @@ func (a *appBridge) current(generation int64) bool {
 	defer a.relay.mu.Unlock()
 	return !a.relay.generationEnded && a.relay.generation == generation
 }
+
+// retireOperation is called with a.mu held and is the sole operation removal path.
+func (a *appBridge) retireOperation(o *appOperation, reason string) {
+	if a.operations[o.scope.RequestID] != o {
+		return
+	}
+	delete(a.operations, o.scope.RequestID)
+	o.retiredError = reason
+	if o.timer != nil {
+		o.timer.Stop()
+	}
+	close(o.done)
+	if o.admitted && !a.relay.frame(AppCancelled{V1: V1{V: 1}, T: "app-cancel", Scope: o.scope}) {
+		select {
+		case a.relay.outputFailure <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (a *appBridge) retireGrantOperations(id Token) {
+	for _, o := range a.operations {
+		if o.scope.GrantID == id {
+			a.retireOperation(o, "forbidden")
+		}
+	}
+}
 func (a *appBridge) retireGrant(g *appGrant, now time.Time) {
 	if g == nil {
 		return
@@ -167,22 +198,14 @@ func (a *appBridge) retireGrant(g *appGrant, now time.Time) {
 	g.approval.state = "revoked"
 	g.approval.terminal = now
 	delete(a.grants, g.id)
-	for id, o := range a.operations {
-		if o.scope.GrantID == g.id {
-			delete(a.operations, id)
-		}
-	}
+	a.retireGrantOperations(g.id)
 }
 func (a *appBridge) clean(now time.Time) {
 	for _, g := range a.grants {
 		if g.active && !now.Before(g.leaseUntil) {
 			g.active = false
 			g.retainUntil = now.Add(appTTL)
-			for id, o := range a.operations {
-				if o.scope.GrantID == g.id {
-					delete(a.operations, id)
-				}
-			}
+			a.retireGrantOperations(g.id)
 		}
 		if !g.active && !now.Before(g.retainUntil) {
 			a.retireGrant(g, now)
@@ -202,9 +225,9 @@ func (a *appBridge) clean(now time.Time) {
 			delete(a.approvals, k)
 		}
 	}
-	for id, o := range a.operations {
+	for _, o := range a.operations {
 		if !now.Before(o.deadline) {
-			delete(a.operations, id)
+			a.retireOperation(o, "timeout")
 		}
 	}
 	for id, p := range a.pairs {
@@ -240,7 +263,9 @@ func (a *appBridge) close() {
 		p.terminal = now
 		a.retireGrant(p.grant, now)
 	}
-	clear(a.operations)
+	for _, o := range a.operations {
+		a.retireOperation(o, "disconnected")
+	}
 	clear(a.pairs)
 }
 func (a *appBridge) guardLocked(scope Guard, now time.Time) bool {
@@ -755,11 +780,7 @@ func (a *appBridge) app(w http.ResponseWriter, r *http.Request) {
 					appErr(w, "forbidden")
 					return
 				}
-				for id, o := range a.operations {
-					if o.scope.GrantID == g.id {
-						delete(a.operations, id)
-					}
-				}
+				a.retireGrantOperations(g.id)
 				g.lease = q.Lease
 			}
 			g.active = true
@@ -772,11 +793,7 @@ func (a *appBridge) app(w http.ResponseWriter, r *http.Request) {
 			}
 			g.active = false
 			g.retainUntil = now.Add(appTTL)
-			for id, o := range a.operations {
-				if o.scope.GrantID == g.id {
-					delete(a.operations, id)
-				}
-			}
+			a.retireGrantOperations(g.id)
 		}
 		a.mu.Unlock()
 		appOK(w, nil)
@@ -848,18 +865,24 @@ func (a *appBridge) app(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		scope := Guard{RequestID: id, RelayID: a.address.RelayID, GrantID: g.id, Owner: g.approval.owner, Generation: g.approval.generation, Lease: g.lease}
-		o := &appOperation{scope: scope, kind: kind, deadline: now.Add(appBudget), replies: make(chan json.RawMessage, 2), context: r.Context()}
+		o := &appOperation{scope: scope, kind: kind, deadline: now.Add(appBudget), replies: make(chan json.RawMessage, 2), context: r.Context(), done: make(chan struct{})}
 		a.operations[id] = o
 		var frame any = AppCurrent{V1: V1{V: 1}, T: "app-current", Scope: scope, Cursor: cursor}
 		if kind == "command" {
 			frame = AppCommand{V1: V1{V: 1}, T: "app-cmd", Scope: scope, Request: request}
 		}
 		if !a.relay.frame(frame) {
-			delete(a.operations, id)
+			a.retireOperation(o, "busy")
 			a.mu.Unlock()
 			appErr(w, "busy")
 			return
 		}
+		o.admitted = true
+		o.timer = time.AfterFunc(time.Until(o.deadline), func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.retireOperation(o, "timeout")
+		})
 		a.mu.Unlock()
 		a.awaitOperation(w, r, o, false)
 		return
@@ -878,7 +901,7 @@ func (a *appBridge) awaitOperation(w http.ResponseWriter, r *http.Request, o *ap
 		live := a.guardLocked(o.scope, time.Now())
 		keep := live && !next && o.kind == "current" && o.parts == 2 && o.nextPart > 0
 		if !keep {
-			delete(a.operations, o.scope.RequestID)
+			a.retireOperation(o, "forbidden")
 		} else {
 			o.context = nil
 		}
@@ -891,12 +914,17 @@ func (a *appBridge) awaitOperation(w http.ResponseWriter, r *http.Request, o *ap
 		_, _ = w.Write(v)
 	case <-timer.C:
 		a.mu.Lock()
-		delete(a.operations, o.scope.RequestID)
+		a.retireOperation(o, "timeout")
 		a.mu.Unlock()
 		appErr(w, "timeout")
 	case <-r.Context().Done():
 		a.mu.Lock()
-		delete(a.operations, o.scope.RequestID)
+		a.retireOperation(o, "disconnected")
 		a.mu.Unlock()
+	case <-o.done:
+		a.mu.Lock()
+		reason := o.retiredError
+		a.mu.Unlock()
+		appErr(w, reason)
 	}
 }

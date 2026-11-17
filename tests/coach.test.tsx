@@ -87,3 +87,49 @@ test(
     }
   },
 )
+
+test(
+  'cancelled App coaching retires only its reservation while model work remains pending',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.holdFork()
+    host.setForkResult('new analysis')
+    const busy = (want: boolean) =>
+      host.waitForState(
+        ({ key, value }) =>
+          key === 'coach' &&
+          typeof value === 'object' &&
+          value !== null &&
+          'value' in value &&
+          typeof value.value === 'object' &&
+          value.value !== null &&
+          'busy' in value.value &&
+          value.value.busy === want,
+      )
+    try {
+      await ui.press({ key: 'copy-browser-link' })
+      await host.browserReady
+      const generation = latestSnapshot(host.browserEvents)!.generation
+      host.appCoach(generation)
+      await host.forkStarted
+      const retired = busy(false)
+      host.cancelAppCoach(generation)
+      await retired
+      const reserved = busy(true)
+      const second = host.command(generation, { kind: 'coach-analyse' })
+      await reserved
+      host.releaseFork()
+      expect(await second).toEqual({ ok: true })
+      await host.clock.settle()
+      expect(latestSnapshot(host.browserEvents)?.facts.coach.busy).toBe(false)
+      expect(latestSnapshot(host.browserEvents)?.facts.coach.text).toBe(
+        'new analysis',
+      )
+    } finally {
+      host.releaseFork()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)

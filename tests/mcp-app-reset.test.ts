@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import type { Reply } from '../types/apps'
-import type { ToolCall } from '../hosts/mcp-app/transport'
+import type { ToolCall } from '../hosts/mcp-app/wire'
 import { resetMountedView } from '../hosts/mcp-app/reset'
 
 const token = 'A'.repeat(43)
