@@ -80,6 +80,12 @@ func TestMCPUnpairedViewCanPairAfterIdle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if _, err := privacyEvidence(dir, socket); err != nil {
+				t.Fatalf("relay privacy evidence: %v", err)
+			}
+			if err := mcpRelaySocketValid(socket); err != nil {
+				t.Fatalf("MCP relay socket validation: %v", err)
+			}
 			relayID, pairID, secret := lifecycleToken(t), lifecycleToken(t), lifecycleToken(t)
 			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -101,6 +107,13 @@ func TestMCPUnpairedViewCanPairAfterIdle(t *testing.T) {
 			s.views[auth.ViewKey].activeUntil = s.views[auth.ViewKey].activeUntil.Add(-20 * time.Second)
 			s.mu.Unlock()
 			s.sweep()
+			s.mu.Lock()
+			view := s.views[auth.ViewKey]
+			live := view != nil && view.mountKey == auth.MountKey && time.Now().Before(view.activeUntil)
+			s.mu.Unlock()
+			if !live {
+				t.Fatal("unpaired mount expired before pair")
+			}
 			envelope := ChatEnvelope{V1: V1{V: 1}, Kind: "chat", Relay: RelayAddress{Socket: socket, RelayID: relayID}, PairID: pairID, Secret: secret, ExpiresAt: time.Now().Add(time.Minute).UnixMilli()}
 			attached, refusal := s.pair(context.Background(), AppPair{AppAuth: auth, Envelope: envelope})
 			if refusal != "" || attached.Kind != "attached" {

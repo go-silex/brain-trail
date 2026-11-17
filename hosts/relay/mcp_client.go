@@ -47,7 +47,10 @@ func mcpRelaySocketValid(socket string) error {
 		return errors.New("invalid relay directory")
 	}
 	canonical, err := filepath.EvalSymlinks(socket)
-	if err != nil || canonical != socket {
+	if err != nil {
+		return fmt.Errorf("resolve relay socket: %w", err)
+	}
+	if canonical != socket {
 		return errors.New("noncanonical relay socket")
 	}
 	_, err = privacyEvidence(dir, socket)
