@@ -58,7 +58,7 @@ func mcpPrivateResult(value any, refusal string) *mcp.CallToolResult {
 	if refusal != "" {
 		reply = WireFailure{V1: V1{V: 1}, Failure: Failure{OK: false, Error: refusal}}
 	}
-	return &mcp.CallToolResult{Meta: mcp.Meta{"brainTrail": reply}, Content: []mcp.Content{&mcp.TextContent{Text: "Brain Trail request processed."}}, IsError: refusal != ""}
+	return &mcp.CallToolResult{Meta: mcp.Meta{"brainTrail": reply}, Content: []mcp.Content{&mcp.TextContent{Text: "Brain Trail request processed."}}}
 }
 
 func mcpPublicResult(value any, refusal string) *mcp.CallToolResult {

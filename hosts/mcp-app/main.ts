@@ -16,7 +16,7 @@ import {
   detached,
   mounted,
   nil,
-  reply,
+  privateReply,
 } from './wire'
 
 declare const __BRAIN_TRAIL_UI_BUILD_ID__: string
@@ -92,11 +92,10 @@ const call: ToolCall = async <T>(
   args: Record<string, unknown>,
   validate: (value: unknown) => value is T,
 ): Promise<Reply<T>> => {
-  const result = await app.callServerTool({ name, arguments: args })
-  const value = reply(result._meta?.brainTrail, validate)
-  if (value === undefined || Boolean(result.isError) === value.ok)
-    throw new Error('Invalid app response')
-  return value
+  return privateReply(
+    await app.callServerTool({ name, arguments: args }),
+    validate,
+  )
 }
 function reportFailure(error: string) {
   status.textContent = `Brain Trail: ${error}`

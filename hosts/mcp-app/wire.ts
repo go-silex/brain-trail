@@ -152,6 +152,20 @@ export function reply<T>(
     return v as Reply<T>
   return undefined
 }
+export function privateReply<T>(
+  envelope: unknown,
+  valid: (value: unknown) => value is T,
+): Reply<T> {
+  if (
+    !obj(envelope) ||
+    (envelope.isError !== undefined && envelope.isError !== false) ||
+    !obj(envelope._meta)
+  )
+    throw new Error('Invalid app response')
+  const value = reply(envelope._meta.brainTrail, valid)
+  if (value === undefined) throw new Error('Invalid app response')
+  return value
+}
 export const refusal = (error: CommandRefusal['error']): CommandRefusal => ({
   ok: false,
   error,
