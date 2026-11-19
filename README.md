@@ -80,6 +80,8 @@ The App is a viewer/controller for a deliberately paired native Code or OMP sess
 
 To view a native session in Chat, choose **Pair with Chat** in that session's native controls or browser dashboard. Paste the one-use envelope into the Brain Trail App's pairing field, not into the chat prompt. Detach before choosing another session. A restored view with missing private state remains detached; **Reset view** creates a fresh unpaired view, never automatic reconnection.
 
+Inline, a paired App asks the host for a height derived from its width, about 900 px in a 736 px Claude Chat column, and stays within any maximum height the host announces. In 3D, **Full screen** uses the host's full-screen display mode when the host offers one, and the browser's full-screen mode otherwise.
+
 ### Oh My Pi
 
 With Oh My Pi 18.18.9, install a local checkout and start a new session:

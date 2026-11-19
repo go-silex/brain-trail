@@ -5,7 +5,7 @@ import {
 } from '@modelcontextprotocol/ext-apps'
 import type { AppAuth, Bootstrap, Reply, ViewState } from '../../types/apps'
 import { parseChatEnvelope, parseStrictJSON } from '../../types/apps'
-import { startPage } from '../browser/page'
+import { startPage, toggleDocumentFullscreen } from '../browser/page'
 import '../browser/app.css'
 import { appTransport } from './transport'
 import { resetMountedView } from './reset'
@@ -49,6 +49,7 @@ for (const button of [pair, detach, reset]) button.className = 'bt-button'
 controls.append(description, input, pair, detach, reset)
 document.body.insertBefore(controls, root)
 document.body.classList.add('bt-app-shell')
+document.documentElement.dataset.btSizing = 'intrinsic'
 
 const identity = {
   v: 1 as const,
@@ -128,7 +129,7 @@ function showPage(initial: ViewState) {
     input.value = ''
     renderControls()
   })
-  disposePage = startPage(root, status, toast, transport)
+  disposePage = startPage(root, status, toast, transport, {}, toggleFullscreen)
   renderControls()
 }
 async function mount(value: Bootstrap, mine: number) {
@@ -204,11 +205,33 @@ app.ontoolresult = (result) => {
   if (connected) void begin(value)
   else pendingBootstrap = value
 }
-app.onhostcontextchanged = (context) => {
-  if (context.theme) applyDocumentTheme(context.theme)
-  if (context.styles?.variables)
+// A host that fixes the frame height (fullscreen, a sized panel) gets a filled
+// viewport; otherwise the document reports its own height through auto-resize.
+function applyHostContext() {
+  const context = app.getHostContext()
+  if (context?.theme) applyDocumentTheme(context.theme)
+  if (context?.styles?.variables)
     applyHostStyleVariables(context.styles.variables)
+  const box = context?.containerDimensions
+  const html = document.documentElement
+  html.dataset.btSizing =
+    box !== undefined && 'height' in box ? 'fill' : 'intrinsic'
+  const maxHeight =
+    box !== undefined && 'maxHeight' in box ? box.maxHeight : undefined
+  if (maxHeight === undefined) html.style.removeProperty('--bt-host-max-height')
+  else html.style.setProperty('--bt-host-max-height', `${maxHeight}px`)
 }
+async function toggleFullscreen() {
+  const context = app.getHostContext()
+  const next = context?.displayMode === 'fullscreen' ? 'inline' : 'fullscreen'
+  if (!context?.availableDisplayModes?.includes(next)) {
+    await toggleDocumentFullscreen()
+    return
+  }
+  const { mode } = await app.requestDisplayMode({ mode: next })
+  if (mode !== next) throw new Error(`Display mode ${next} refused`)
+}
+app.onhostcontextchanged = applyHostContext
 async function unmount() {
   const previous = auth
   auth = undefined
@@ -339,10 +362,7 @@ void app
   .then(() => {
     if (closed) return
     connected = true
-    const context = app.getHostContext()
-    if (context?.theme) applyDocumentTheme(context.theme)
-    if (context?.styles?.variables)
-      applyHostStyleVariables(context.styles.variables)
+    applyHostContext()
     renderControls()
     if (pendingBootstrap !== undefined) {
       const value = pendingBootstrap

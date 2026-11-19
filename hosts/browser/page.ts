@@ -32,12 +32,18 @@ import type {
 import { DomRenderer, runtime } from './dom'
 import type { DashboardTransport, PageBootstrap } from './transport'
 
+export async function toggleDocumentFullscreen() {
+  if (document.fullscreenElement) await document.exitFullscreen()
+  else await document.documentElement.requestFullscreen()
+}
+
 export function startPage(
   container: HTMLElement,
   status: HTMLElement,
   toastElement: HTMLElement,
   transport: DashboardTransport,
   bootstrap: PageBootstrap = {},
+  toggleFullscreen: () => Promise<void> = toggleDocumentFullscreen,
 ) {
   let pendingFile = bootstrap.handoff
   container.inert = false
@@ -273,8 +279,7 @@ export function startPage(
     open3d: async () => {
       if (ended) return false
       try {
-        if (document.fullscreenElement) await document.exitFullscreen()
-        else await document.documentElement.requestFullscreen()
+        await toggleFullscreen()
         return true
       } catch {
         toast('Fullscreen unavailable')

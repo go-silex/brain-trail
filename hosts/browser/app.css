@@ -40,6 +40,25 @@
   flex: 1;
   height: auto;
 }
+/* Inline MCP App hosts size the frame from the document height, so the dashboard
+   needs a width-derived height instead of filling a viewport the host sized from us. */
+html[data-bt-sizing="intrinsic"],
+html[data-bt-sizing="intrinsic"] body {
+  height: auto;
+}
+html[data-bt-sizing="intrinsic"] body {
+  max-height: var(--bt-host-max-height, none);
+}
+html[data-bt-sizing="intrinsic"] #app[data-tab] {
+  flex: 0 1 auto;
+  height: clamp(560px, calc(400px + 62vw), 1100px);
+}
+/* A fixed overlay would cover the pairing controls in a content-sized frame. */
+html[data-bt-sizing="intrinsic"] #status:not(:empty) {
+  position: static;
+  align-self: flex-start;
+  margin: 0 12px 12px;
+}
 .bt-app-controls {
   display: flex;
   flex-wrap: wrap;
