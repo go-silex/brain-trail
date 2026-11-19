@@ -216,6 +216,8 @@ type Box = NonNullable<McpUiHostContext['containerDimensions']>
 let displayMode: McpUiHostContext['displayMode'] = 'inline'
 let box: Box | undefined
 let inlineBox: Box | undefined
+let modeRequests = 0
+let modeNotices = 0
 function applyHostContext(delta: McpUiHostContext) {
   const context = app.getHostContext()
   if (context?.theme) applyDocumentTheme(context.theme)
@@ -227,13 +229,12 @@ function applyHostContext(delta: McpUiHostContext) {
   if (delta.containerDimensions !== undefined) box = delta.containerDimensions
   else if (modeChanged) box = displayMode === 'inline' ? inlineBox : undefined
   if (displayMode === 'inline') inlineBox = box
-  // A host that fixes the frame height (fullscreen, a sized panel) gets a filled
-  // viewport; otherwise the document reports its own height through auto-resize.
+  // A host that fixes the frame height (a fullscreen or a sized panel) gets a
+  // filled viewport; otherwise, in any display mode, the document reports its
+  // own height through auto-resize.
   const html = document.documentElement
   html.dataset.btSizing =
-    displayMode === 'fullscreen' || (box !== undefined && 'height' in box)
-      ? 'fill'
-      : 'intrinsic'
+    box !== undefined && 'height' in box ? 'fill' : 'intrinsic'
   const maxHeight =
     box !== undefined && 'maxHeight' in box ? box.maxHeight : undefined
   if (maxHeight === undefined) html.style.removeProperty('--bt-host-max-height')
@@ -245,11 +246,19 @@ async function toggleFullscreen() {
     await toggleDocumentFullscreen()
     return
   }
+  const request = ++modeRequests
+  const notices = modeNotices
   const { mode } = await app.requestDisplayMode({ mode: next })
-  applyHostContext({ displayMode: mode })
+  // Replies resolve independently; a newer press or a host mode notification
+  // already describes the current mode better than this reply.
+  if (request === modeRequests && notices === modeNotices)
+    applyHostContext({ displayMode: mode })
   if (mode !== next) throw new Error(`Display mode ${next} refused`)
 }
-app.onhostcontextchanged = applyHostContext
+app.onhostcontextchanged = (delta) => {
+  if (delta.displayMode !== undefined) modeNotices++
+  applyHostContext(delta)
+}
 async function unmount() {
   const previous = auth
   auth = undefined
