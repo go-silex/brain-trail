@@ -226,8 +226,10 @@ function applyHostContext(delta: McpUiHostContext) {
   const modeChanged =
     delta.displayMode !== undefined && delta.displayMode !== displayMode
   if (delta.displayMode !== undefined) displayMode = delta.displayMode
+  // An absent field means unchanged, except that a return to inline restores
+  // the inline constraints instead of keeping the fullscreen ones.
   if (delta.containerDimensions !== undefined) box = delta.containerDimensions
-  else if (modeChanged) box = displayMode === 'inline' ? inlineBox : undefined
+  else if (modeChanged && displayMode === 'inline') box = inlineBox
   if (displayMode === 'inline') inlineBox = box
   // A host that fixes the frame height (a fullscreen or a sized panel) gets a
   // filled viewport; otherwise, in any display mode, the document reports its
@@ -249,14 +251,15 @@ async function toggleFullscreen() {
   const request = ++modeRequests
   const notices = modeNotices
   const { mode } = await app.requestDisplayMode({ mode: next })
-  // Replies resolve independently; a newer press or a host mode notification
-  // already describes the current mode better than this reply.
+  // Replies resolve independently; a newer press or a host notification that
+  // changed the mode already describes the current mode better than this reply.
   if (request === modeRequests && notices === modeNotices)
     applyHostContext({ displayMode: mode })
   if (mode !== next) throw new Error(`Display mode ${next} refused`)
 }
 app.onhostcontextchanged = (delta) => {
-  if (delta.displayMode !== undefined) modeNotices++
+  if (delta.displayMode !== undefined && delta.displayMode !== displayMode)
+    modeNotices++
   applyHostContext(delta)
 }
 async function unmount() {
