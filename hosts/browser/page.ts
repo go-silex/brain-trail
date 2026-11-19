@@ -276,13 +276,13 @@ export function startPage(
     retryLayout: () => {
       void command({ kind: 'retry-layout' })
     },
+    // The map view reports a failure with the localized open3dFailed message.
     open3d: async () => {
       if (ended) return false
       try {
         await toggleFullscreen()
         return true
       } catch {
-        toast('Fullscreen unavailable')
         return false
       }
     },

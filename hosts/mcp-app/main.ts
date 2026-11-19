@@ -2,6 +2,7 @@ import {
   App,
   applyDocumentTheme,
   applyHostStyleVariables,
+  type McpUiHostContext,
 } from '@modelcontextprotocol/ext-apps'
 import type { AppAuth, Bootstrap, Reply, ViewState } from '../../types/apps'
 import { parseChatEnvelope, parseStrictJSON } from '../../types/apps'
@@ -31,7 +32,10 @@ const root = requiredElement('app')
 const status = requiredElement('status')
 const toast = requiredElement('toast')
 
-const app = new App({ name: 'Brain Trail', version: '1.0.0' }, {})
+const app = new App(
+  { name: 'Brain Trail', version: '1.0.0' },
+  { availableDisplayModes: ['inline', 'fullscreen'] },
+)
 const controls = document.createElement('section')
 controls.className = 'bt-app-controls'
 const description = document.createElement('span')
@@ -205,30 +209,44 @@ app.ontoolresult = (result) => {
   if (connected) void begin(value)
   else pendingBootstrap = value
 }
-// A host that fixes the frame height (fullscreen, a sized panel) gets a filled
-// viewport; otherwise the document reports its own height through auto-resize.
-function applyHostContext() {
+// Host context arrives as deltas that the SDK shallow-merges, and a display-mode
+// reply does not update it, so the sizing inputs are tracked here: a return to
+// inline without new dimensions must not keep the fullscreen height.
+type Box = NonNullable<McpUiHostContext['containerDimensions']>
+let displayMode: McpUiHostContext['displayMode'] = 'inline'
+let box: Box | undefined
+let inlineBox: Box | undefined
+function applyHostContext(delta: McpUiHostContext) {
   const context = app.getHostContext()
   if (context?.theme) applyDocumentTheme(context.theme)
   if (context?.styles?.variables)
     applyHostStyleVariables(context.styles.variables)
-  const box = context?.containerDimensions
+  const modeChanged =
+    delta.displayMode !== undefined && delta.displayMode !== displayMode
+  if (delta.displayMode !== undefined) displayMode = delta.displayMode
+  if (delta.containerDimensions !== undefined) box = delta.containerDimensions
+  else if (modeChanged) box = displayMode === 'inline' ? inlineBox : undefined
+  if (displayMode === 'inline') inlineBox = box
+  // A host that fixes the frame height (fullscreen, a sized panel) gets a filled
+  // viewport; otherwise the document reports its own height through auto-resize.
   const html = document.documentElement
   html.dataset.btSizing =
-    box !== undefined && 'height' in box ? 'fill' : 'intrinsic'
+    displayMode === 'fullscreen' || (box !== undefined && 'height' in box)
+      ? 'fill'
+      : 'intrinsic'
   const maxHeight =
     box !== undefined && 'maxHeight' in box ? box.maxHeight : undefined
   if (maxHeight === undefined) html.style.removeProperty('--bt-host-max-height')
   else html.style.setProperty('--bt-host-max-height', `${maxHeight}px`)
 }
 async function toggleFullscreen() {
-  const context = app.getHostContext()
-  const next = context?.displayMode === 'fullscreen' ? 'inline' : 'fullscreen'
-  if (!context?.availableDisplayModes?.includes(next)) {
+  const next = displayMode === 'fullscreen' ? 'inline' : 'fullscreen'
+  if (!app.getHostContext()?.availableDisplayModes?.includes(next)) {
     await toggleDocumentFullscreen()
     return
   }
   const { mode } = await app.requestDisplayMode({ mode: next })
+  applyHostContext({ displayMode: mode })
   if (mode !== next) throw new Error(`Display mode ${next} refused`)
 }
 app.onhostcontextchanged = applyHostContext
@@ -362,7 +380,7 @@ void app
   .then(() => {
     if (closed) return
     connected = true
-    applyHostContext()
+    applyHostContext(app.getHostContext() ?? {})
     renderControls()
     if (pendingBootstrap !== undefined) {
       const value = pendingBootstrap
