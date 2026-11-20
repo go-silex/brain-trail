@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { Database } from 'bun:sqlite'
-import { mkdir, rename, writeFile, symlink, unlink } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  rename,
+  writeFile,
+  symlink,
+  unlink,
+} from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { chromium, type Browser } from 'playwright'
@@ -393,6 +400,16 @@ async function until<T>(
       args: ['--enable-unsafe-swiftshader'],
     })
     const page = await browser.newPage()
+    let launchUrl: string | undefined
+    page.on('request', (request) => {
+      const target = new URL(request.url())
+      if (
+        target.protocol === 'http:' &&
+        target.hostname === '127.0.0.1' &&
+        target.pathname.startsWith('/launch/')
+      )
+        launchUrl = request.url()
+    })
     const browserErrors: string[] = []
     page.on('pageerror', (error) => browserErrors.push(error.message))
     page.on('console', (message) => {
@@ -415,17 +432,15 @@ async function until<T>(
       browserErrors.push('browser requested an external resource')
       return route.abort()
     })
+    phase = 'one-use browser launch'
     await page.goto(pathToFileURL(launchFile).href)
     await page.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/s\/[^/]+\/$/)
     const url = page.url()
     const origin = new URL(url).origin
-    const reuse = await browser.newPage()
-    const refusedLaunch = reuse.waitForResponse((response) =>
-      new URL(response.url()).pathname.startsWith('/launch/'),
-    )
-    await reuse.goto(pathToFileURL(launchFile).href)
-    assert.equal((await refusedLaunch).status(), 404)
-    await reuse.close()
+    await assert.rejects(access(launchFile), { code: 'ENOENT' })
+    assert.ok(launchUrl, 'initial navigation must request the launch URL')
+    assert.equal((await fetch(launchUrl, { redirect: 'manual' })).status, 404)
+    phase = 'OMP browser journey'
     const response = await fetch(new URL('events', url))
     assert.equal(response.status, 200)
     assert.ok(response.body)
