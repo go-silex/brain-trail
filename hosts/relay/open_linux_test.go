@@ -103,6 +103,35 @@ func TestBrowserCommandRejectsInvalidAssociation(t *testing.T) {
 	}
 }
 
+func TestBrowserCommandWithoutGtkLaunch(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"xdg-settings": "#!/bin/sh\nprintf '%s\\n' 'browser.desktop'\n",
+		"xdg-mime": "#!/bin/sh\n[ \"$1 $2 $3\" = 'query default text/html' ] || exit 1\nprintf '%s\\n' \"$HTML_HANDLER\"\n",
+		"xdg-open": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	path := filepath.Join(dir, "handoff with spaces.html")
+	t.Setenv("HTML_HANDLER", "browser.desktop")
+	cmd, err := browserCommand(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != filepath.Join(dir, "xdg-open") || len(cmd.Args) != 2 || cmd.Args[1] != path {
+		t.Fatalf("unexpected fallback: %q %q", cmd.Path, cmd.Args)
+	}
+	for _, handler := range []string{"editor.desktop", "", "../browser.desktop"} {
+		t.Setenv("HTML_HANDLER", handler)
+		if _, err := browserCommand(path); err == nil {
+			t.Fatalf("accepted HTML association %q", handler)
+		}
+	}
+}
+
 func TestExplicitBrowserBootstrapGenerationLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	for name, script := range map[string]string{

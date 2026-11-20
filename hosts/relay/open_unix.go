@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -90,8 +91,22 @@ func browserCommand(path string) (*exec.Cmd, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("browser handoff path must be absolute")
 	}
-	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
-	return exec.Command("gtk-launch", id, fileURL), nil
+	if _, err := exec.LookPath("gtk-launch"); err == nil {
+		fileURL := (&url.URL{Scheme: "file", Path: path}).String()
+		return exec.Command("gtk-launch", id, fileURL), nil
+	} else if !errors.Is(err, exec.ErrNotFound) {
+		return nil, err
+	}
+	// Fall back only when the current HTML association reports the same
+	// desktop ID as the browser. xdg-open resolves it again when launched.
+	html, err := exec.Command("xdg-mime", "query", "default", "text/html").Output()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(html)) != id {
+		return nil, fmt.Errorf("HTML handler differs from default browser and gtk-launch is unavailable")
+	}
+	return exec.Command("xdg-open", path), nil
 }
 
 func (s *relay) openBrowser(path, id string, generation int64, launchCode string) (string, error) {

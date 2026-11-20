@@ -33,7 +33,7 @@ const nearness = (phi: number) => (1 - Math.sin(phi)) / 2
 export type SpinView = {
   vx: number; vy: number; vw: number; vh: number; px: number; yaw: number; ce: number; se: number; t: number; spinning: boolean
   zoom: number; pan: { x: number; y: number }; focus: { x: number; y: number }; follow: boolean
-  widthPx: number; aspect?: number; serviceLabelWidth: number; highlights?: Set<number>
+  widthPx: number; aspect?: number; serviceLabelWidth: number; highlights?: Set<number>; painted?: Set<number>
 }
 
 // How a drawing of L frames a camera (`cur`: the note Claude is on): the turn, the tilt and the box
@@ -200,12 +200,24 @@ export const drawSpin = (
   // the notes; the higher a note sits on its lobe, the brighter, the nearer, the more solid
   const lit = B.yMax * 0.5
   const N = L.files.length
-  const thin = N > 9000 ? Math.ceil(N / 9000) : 1
+  // Reserve the bounded point budget for activity first, then distribute the
+  // remaining neutral points across the folder rather than dropping odd IDs.
+  const painted = new Set<number>()
+  for (const n of T.state.keys()) if (n >= 0 && n < N && painted.size < 9000) painted.add(n)
+  const slots = Math.min(9000 - painted.size, N - painted.size)
+  const neutralCount = N - painted.size
+  let accumulated = 0
+  for (let i = 0; i < N && slots > 0; i++) {
+    if (T.state.has(i)) continue
+    accumulated += slots
+    if (accumulated >= neutralCount) { painted.add(i); accumulated -= neutralCount }
+  }
+  view.painted = painted
   if (spinning) {
     // slice by slice: each slice is a flat plane the keyframes turn
     const slices: string[][] = Array.from({ length: NB }, () => [])
     const buf = Array.from({ length: NB }, () => ({ d0: [] as string[], d1: [] as string[], hit: [] as string[], link: [] as string[], read: [] as string[], write: [] as string[], tr: [] as string[], tg: [] as string[] }))
-    for (let i = 0; i < N; i += thin) buf[B.b[i]!]![T.state.get(i)?.k ?? (B.v[i]! > lit ? 'd1' : 'd0')].push(`M${Math.round(B.u[i]!)} ${Math.round(B.v[i]!)}h0`)
+    for (const i of painted) buf[B.b[i]!]![T.state.get(i)?.k ?? (B.v[i]! > lit ? 'd1' : 'd0')].push(`M${Math.round(B.u[i]!)} ${Math.round(B.v[i]!)}h0`)
     for (const e of beads) buf[e.b]![e.gap ? 'tg' : 'tr'].push(`M${Math.round(e.u)} ${Math.round(e.v)}h0`)
     for (let s = 0; s < NB; s++) {
       const p = buf[s]!
@@ -221,7 +233,7 @@ export const drawSpin = (
     // still: every note at its exact place, in four depth levels
     const lv = Array.from({ length: 4 }, () => ({ d1: [] as string[], hit: [] as string[], link: [] as string[], read: [] as string[], write: [] as string[] })), tr: string[] = [], tg: string[] = []
     const dot = (x: number, y: number) => `M${f(x)} ${f(y)}h0`
-    for (let i = 0; i < N; i += thin) {
+    for (const i of painted) {
       const phi = B.a[i]! + yaw
       const [x, y] = at(B.u[i]!, B.v[i]!, phi, ce, se)
       const k = Math.min(3, Math.floor(nearness(phi) ** 1.5 * 3.4 + (B.v[i]! > lit ? 0.45 : 0)))
@@ -370,10 +382,9 @@ export const pickSpin = (L: Layout, view: SpinView, now: number, fx: number, fy:
     const d = Math.hypot(x - X, y - Y) / view.px
     if (d < reach && d < bd) { bd = d; best = n }
   }
-  const thin = L.files.length > 9000 ? Math.ceil(L.files.length / 9000) : 1
-  for (const n of touched) if (n >= 0 && n < L.files.length && (n % thin === 0 || view.highlights?.has(n))) scan(n, 14)
+  for (const n of touched) if (n >= 0 && n < L.files.length && (view.painted?.has(n) || view.highlights?.has(n))) scan(n, 14)
   if (best !== undefined) return best
-  for (let n = 0; n < L.files.length; n += thin) scan(n, 6)
+  for (const n of view.painted ?? []) scan(n, 6)
   return best
 }
 

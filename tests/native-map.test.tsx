@@ -260,11 +260,11 @@ test('native 3D preserves category colors and depth in still and spinning SVG', 
   }
 })
 
-test('3D picking excludes unsampled files without a visible highlight', async () => {
+test('3D picking follows bounded activity-first sampling', async () => {
   const files: Layout['files'] = Array.from({ length: 9001 }, (_, i) => [
     `${i}.md`,
-    i === 1 ? 1700 : 900,
-    i === 1 ? 1700 : 900,
+    i === 0 ? 100 : i === 1 ? 1700 : 900,
+    i === 0 ? 100 : i === 1 ? 1700 : 900,
   ])
   const layout: Layout = {
     size: 1800,
@@ -273,33 +273,40 @@ test('3D picking excludes unsampled files without a visible highlight', async ()
     groups: [],
     title: 'sample',
   }
-  const trail: Trail = {
-    state: new Map(),
-    moves: [],
-    calls: [],
-    perSvc: new Map(),
-  }
-  const { view } = drawSpin(layout, trail, DARK, {
-    widthPx: 800,
-    now: 0,
-    cam: { ...CAM0, spin: false },
-    follow: false,
-    filesWord: 'files',
-    outside: 0,
-    dark: true,
-  })
   const b = brain(layout)
-  const phi = b.a[1]! + view.yaw
-  const x = b.u[1]! * Math.cos(phi)
-  const y = -b.v[1]! * view.ce - b.u[1]! * Math.sin(phi) * view.se
-  expect(
-    pickSpin(
-      layout,
-      view,
-      0,
-      (x - view.vx) / view.vw,
-      (y - view.vy) / view.vh,
-      new Set([1]),
-    ),
-  ).toBeUndefined()
+  for (const kind of ['hit', 'link'] as const) {
+    const trail: Trail = {
+      state: new Map([[1, { k: kind, count: 1 }]]),
+      moves: [],
+      calls: [],
+      perSvc: new Map(),
+    }
+    const { svg, view } = drawSpin(layout, trail, DARK, {
+      widthPx: 800,
+      now: 0,
+      cam: { ...CAM0, spin: false },
+      follow: false,
+      filesWord: 'files',
+      outside: 0,
+      dark: true,
+    })
+    const pick = (n: number) => {
+      const phi = b.a[n]! + view.yaw
+      const x = b.u[n]! * Math.cos(phi)
+      const y = -b.v[n]! * view.ce - b.u[n]! * Math.sin(phi) * view.se
+      return pickSpin(
+        layout,
+        view,
+        0,
+        (x - view.vx) / view.vw,
+        (y - view.vy) / view.vh,
+        new Set(),
+      )
+    }
+    expect(svg).toContain(`<path class="${kind}"`)
+    expect(svg.length).toBeLessThanOrEqual(131_072)
+    expect(view.painted?.size).toBe(9000)
+    expect(pick(1)).toBe(1)
+    expect(pick(0)).toBeUndefined()
+  }
 })

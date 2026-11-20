@@ -305,7 +305,10 @@ export const createMapRenderer = () => {
   if (linkD.length > 0) xs.push(`<path d="${linkD.join('')}" fill="none" stroke="${P.fg}" stroke-opacity="${dark ? '.35' : '.35'}" stroke-width="1" vector-effect="non-scaling-stroke"/>`)
   if (oldD.length > 0) xs.push(`<path d="${oldD.join('')}" fill="none" stroke="${P.fg}" stroke-opacity="${dark ? '.05' : '.07'}" stroke-width="1" vector-effect="non-scaling-stroke"/>`)
   // every file of the folder: one dot each, merged where several fall on the same spot of the screen
-  const dotW = Math.min(Math.max(L.dot * 2, px * 1.6), (L.leaf ?? Infinity) * 2 * TILT * 0.62)
+  // Use the fitted viewport scale: sparse folders should show actual dots, not subpixel specks.
+  // Keep their diameter below the packed spacing when thousands of files share the view.
+  const filePx = vw / widthPx
+  const dotW = Math.min(Math.max(L.dot * 2, filePx * 5), (L.leaf ?? Infinity) * 2 * TILT * 0.62)
   const visible: [number, number][] = []
   for (let n = 0; n < L.files.length; n++) { const p = xy(n); if (inView(p[0], p[1]) && !T.state.has(n)) visible.push(p) }
   let cell = Math.max(1, px * 0.9), dots = dotPath(visible, cell)
@@ -333,15 +336,17 @@ export const createMapRenderer = () => {
     const p = xy(n)
     if (!inView(p[0], p[1])) continue
     // a name seen in a result counts more than one a link brought along
-    const r = s.k === 'hit' ? Math.round((2.3 + Math.min(1.5, Math.log2(s.count + 1) * 0.6)) * 2) / 2 : 1.8
+    const r = s.k === 'hit' ? 3.5 + Math.min(1.5, Math.log2(s.count + 1) * 0.6) : 3
     const key = `${s.k}:${r}`
-    seenBy.set(key, [...(seenBy.get(key) ?? []), p])
+    const points = seenBy.get(key)
+    if (points === undefined) seenBy.set(key, [p])
+    else points.push(p)
   }
   for (const k of ['link', 'hit'] as const) {
     for (const [key, pts] of seenBy) {
       if (!key.startsWith(`${k}:`)) continue
       const r = Number(key.split(':')[1])
-      out.push(`<path d="${dotPath(pts, 0.5)}" fill="none" stroke="${K[k]}" stroke-opacity="${k === 'hit' ? '.9' : '.6'}" stroke-linecap="round" stroke-width="${f(2 * r * px)}"/>`)
+      out.push(`<path d="${dotPath(pts, 0.5)}" fill="none" stroke="${K[k]}" stroke-opacity="${k === 'hit' ? '.95' : '.85'}" stroke-linecap="round" stroke-width="${f(2 * r * filePx)}"/>`)
     }
   }
   out.push(...folderLabels)
