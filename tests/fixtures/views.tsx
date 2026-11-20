@@ -1,7 +1,7 @@
 // One scenario, one fresh plugin module (parent copies this file and runs one
 // wrapper per case). Capture waits on the listing operation, then redraws.
 // Loading is the tree drawn while that operation is still held, not a discarded mount.
-import type { On, RenderElement } from 'claude-code'
+import type { On, RenderElement, UiCopyArgs } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { mock } from 'claude-code/testing'
 import type { HostCommand } from '../../types/browser'
@@ -36,24 +36,6 @@ export type ViewCase = {
   transition: 'none' | 'follow' | 'replay'
 }
 
-const pane = (
-  tab: ViewCase['tab'],
-  surface: ViewCase['surface'],
-  theme: ViewCase['theme'],
-  lang: ViewCase['lang'],
-): ViewCase => ({
-  id: `pane-${tab}-${surface}-${theme}-${lang}`,
-  component: 'Pane',
-  surface,
-  theme,
-  lang,
-  tab,
-  phase: 'ready',
-  view3d: false,
-  browser3d: false,
-  transition: 'none',
-})
-
 const band = (
   surface: ViewCase['surface'],
   theme: ViewCase['theme'],
@@ -67,22 +49,6 @@ const band = (
   tab: 'map',
   phase: 'ready',
   view3d: false,
-  browser3d: false,
-  transition: 'none',
-})
-
-const inline3d = (
-  theme: ViewCase['theme'],
-  lang: ViewCase['lang'],
-): ViewCase => ({
-  id: `inline3d-desktop-${theme}-${lang}`,
-  component: 'Pane',
-  surface: 'desktop',
-  theme,
-  lang,
-  tab: 'map',
-  phase: 'ready',
-  view3d: true,
   browser3d: false,
   transition: 'none',
 })
@@ -104,140 +70,20 @@ const browser3d = (
 })
 
 const targeted: ViewCase[] = [
-  {
-    id: 'pane-map-loading-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'loading',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'pane-map-loading-terminal-dark-en',
-    component: 'Pane',
-    surface: 'terminal',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'loading',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'pane-map-error-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'error',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'pane-map-empty-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'empty',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'pane-meter-unavailable-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'context',
-    phase: 'meter-unavailable',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'band-meter-unavailable-desktop-dark-en',
-    component: 'AbovePrompt',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'meter-unavailable',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'band-meter-unavailable-terminal-dark-en',
-    component: 'AbovePrompt',
-    surface: 'terminal',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'meter-unavailable',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'pane-coach-error-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'coach',
-    phase: 'coach-error',
-    view3d: false,
-    browser3d: false,
-    transition: 'none',
-  },
-  {
-    id: 'pane-map-follow-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'ready',
-    view3d: false,
-    browser3d: false,
-    transition: 'follow',
-  },
-  {
-    id: 'pane-map-replay-desktop-dark-en',
-    component: 'Pane',
-    surface: 'desktop',
-    theme: 'dark',
-    lang: 'en',
-    tab: 'map',
-    phase: 'ready',
-    view3d: false,
-    browser3d: false,
-    transition: 'replay',
-  },
+  ...SURFACES.map((surface) => ({
+    ...band(surface, 'dark', 'en'),
+    id: `band-meter-unavailable-${surface}-dark-en`,
+    phase: 'meter-unavailable' as const,
+  })),
 ]
 
 export const viewCases: ViewCase[] = [
-  ...TABS.flatMap((tab) =>
-    SURFACES.flatMap((surface) =>
-      THEMES.flatMap((theme) =>
-        LANGS.map((lang) => pane(tab, surface, theme, lang)),
-      ),
-    ),
-  ),
+  // Native dashboard cases were retired; web cases still exercise the historical
+  // browser capture against the new band entry without comparing unrelated trees.
   ...SURFACES.flatMap((surface) =>
     THEMES.flatMap((theme) => LANGS.map((lang) => band(surface, theme, lang))),
   ),
-  ...THEMES.flatMap((theme) => LANGS.map((lang) => inline3d(theme, lang))),
+  // Four browser cases retain the complete theme/language matrix.
   ...THEMES.flatMap((theme) => LANGS.map((lang) => browser3d(theme, lang))),
   ...targeted,
 ]
@@ -262,6 +108,8 @@ const EVENTS = [
   { k: 'seen', ps: ['notes/b.md'], via: 'search', at: 4_000 },
   { k: 'mcp', server: 'linear', tool: 'list_issues', label: 'bugs', at: 5_000 },
   { k: 'done', at: 6_000 },
+  { k: 'prompt', text: 'Check the final summary', at: 7_000 },
+  { k: 'act', tool: 'Read', what: 'notes/b.md', at: 8_000 },
 ]
 
 const SHAPES: Record<string, string> = {
@@ -269,7 +117,7 @@ const SHAPES: Record<string, string> = {
   totals: 'totals-1',
   meter: 'meter-1',
   camera: 'camera-1',
-  cam3d: 'cam3d-1',
+  cam3d: 'cam3d-2',
   play: 'play-1',
   preview: 'preview-1',
   coach: 'coach-1',
@@ -329,18 +177,41 @@ export type Host = {
   fixtureInput: unknown
   opened: string[][]
   logs: { text: string; to: 'transcript' | 'debug' }[]
+  notices: string[]
+  uiOpened: string[]
+  waitForState: (
+    predicate: (event: { key: string; value: unknown }) => boolean,
+  ) => Promise<void>
   browserEvents: unknown[]
   browserReady: Promise<void>
   relayStarted: () => boolean
   preparedFiles: string[]
   attemptedFiles: string[]
+  allowPreparedFile: (path: string) => void
   readFiles: string[]
   fileRead: Promise<void>
   filePrepared: Promise<void>
   command: (generation: number, command: HostCommand) => Promise<unknown>
+  appCoach: (generation: number, index?: number) => void
+  cancelAppCoach: (generation: number, index?: number) => void
+  setForkResult: (text: string | null) => void
+  promptFills: string[]
+  copyCalls: UiCopyArgs[]
+  setCopySuccess: (success: boolean) => void
+  holdCopy: () => void
+  copyStarted: Promise<void>
+  releaseCopy: () => void
+  setInvalidIndexCache: (enabled: boolean) => void
+  setLinkResponse: (response: unknown) => void
+  holdLink: () => void
+  linkStarted: Promise<void>
+  releaseLink: () => void
   disconnectRelay: () => void
   holdFork: () => void
   forkStarted: Promise<void>
+  forkCount: () => number
+  waitForForks: (count: number) => Promise<void>
+  waitForForksReleased: (count: number) => Promise<void>
   releaseFork: () => void
   holdPlayWrite: () => void
   playWriteBlocked: Promise<void>
@@ -444,8 +315,28 @@ export const installHost = (
   const state = new Map<string, Held>()
   const store = new Map<string, unknown>()
   const writes: { path: string; text: string }[] = []
+  const promptFills: string[] = []
+  const copyCalls: UiCopyArgs[] = []
+  let copySuccess = true
+  let invalidIndexCache = false
+  let copyHeld = false
+  let resolveCopyStarted = () => {}
+  let releaseCopy = () => {}
+  const copyStarted = new Promise<void>((resolve) => {
+    resolveCopyStarted = resolve
+  })
+  const copyGate = new Promise<void>((resolve) => {
+    releaseCopy = resolve
+  })
+  let forkText: string | null = null
   const opened: string[][] = []
   const logs: { text: string; to: 'transcript' | 'debug' }[] = []
+  const notices: string[] = []
+  const uiOpened: string[] = []
+  const stateWaiters: {
+    predicate: (event: { key: string; value: unknown }) => boolean
+    resolve: () => void
+  }[] = []
   const browserEvents: unknown[] = []
   let appCatalog: string[] | null = []
   let appRequests = 0
@@ -460,12 +351,23 @@ export const installHost = (
   let relayEnded = false
   let commandId = 0
   const replies = new Map<string, (reply: unknown) => void>()
+  let linkResponse: unknown
+  let linkHeld = false
+  let resolveLinkStarted = () => {}
+  let releaseLink = () => {}
+  const linkStarted = new Promise<void>((resolve) => {
+    resolveLinkStarted = resolve
+  })
+  const linkGate = new Promise<void>((resolve) => {
+    releaseLink = resolve
+  })
   const sendFrame = (frame: string) => {
     frames.push(frame)
     wakeRelay()
   }
   const preparedFiles: string[] = []
   const attemptedFiles: string[] = []
+  const allowedFiles = new Set<string>()
   let resolveFilePrepared = () => {}
   const filePrepared = new Promise<void>((resolve) => {
     resolveFilePrepared = resolve
@@ -477,6 +379,10 @@ export const installHost = (
   })
   const handles = new Map<string, string>()
   let forkHeld = false
+  let forkCount = 0,
+    forkReleased = 0
+  const forkWaiters: { count: number; resolve: () => void }[] = []
+  const releaseWaiters: { count: number; resolve: () => void }[] = []
   let resolveForkStarted = () => {}
   let releaseFork = () => {}
   const forkStarted = new Promise<void>((resolve) => {
@@ -582,6 +488,13 @@ export const installHost = (
     const forwarded = { ...e }
     delete forwarded.ifVersion
     await next(forwarded)
+    for (let index = stateWaiters.length - 1; index >= 0; index--) {
+      const waiter = stateWaiters[index]!
+      if (waiter.predicate({ key: e.key, value: e.value })) {
+        stateWaiters.splice(index, 1)
+        waiter.resolve()
+      }
+    }
     return { value: { isSet: true as const, version: nextVersion } }
   })
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
@@ -692,7 +605,7 @@ export const installHost = (
     }
     return { value: { code: 0, signal: null } }
   })
-  on('http.fetch', (_$, e, next) => {
+  on('http.fetch', async (_$, e, next) => {
     if (!e.url.startsWith('http://localhost/h/')) return next(e)
     if (
       ![
@@ -700,9 +613,15 @@ export const installHost = (
         '/h/ready',
         '/h/reply',
         '/h/launch',
+        '/h/generation',
         '/h/apps',
+        '/h/app/approve',
+        '/h/app/check',
+        '/h/app/reply',
+        '/h/app/revoke',
         '/h/file/prepare',
         '/h/file/read',
+        '/h/file/open',
         '/h/file/verify',
         '/h/file/release',
       ].some((route) => e.url.endsWith(route))
@@ -715,11 +634,99 @@ export const installHost = (
       kind?: string
       seq?: number
       open?: boolean
+      link?: boolean
       body?: unknown
     }
     let response: unknown = { ok: true }
+    if (e.url.endsWith('/h/app/check'))
+      response = { v: 1, ok: true, value: { kind: 'operation' } }
+    if (e.url.endsWith('/h/app/reply'))
+      response = { v: 1, ok: true, value: null }
+    if (e.url.endsWith('/h/app/approve')) {
+      const body = request as unknown as {
+        v: number
+        owner: { host: string; sessionId: string }
+        generation: number
+        label: string
+        approval: { kind: string; pairId: string }
+      }
+      if (
+        body.v !== 1 ||
+        body.owner?.host !== 'code' ||
+        body.owner.sessionId !== 'synthetic-session' ||
+        !Number.isSafeInteger(body.generation) ||
+        body.generation < 1 ||
+        typeof body.label !== 'string' ||
+        body.approval?.kind !== 'chat' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(body.approval.pairId)
+      )
+        throw new Error('Unexpected fixture app approval')
+      const relay = {
+        socket: '/tmp/brain-trail-fixture/relay.sock',
+        relayId: 'A'.repeat(43),
+      }
+      const approval = { kind: 'chat', pairId: body.approval.pairId }
+      const expiresAt = Date.now() + 60_000
+      response = {
+        v: 1,
+        ok: true,
+        value: {
+          relay,
+          approval,
+          expiresAt,
+          envelope: {
+            v: 1,
+            kind: 'chat',
+            relay,
+            pairId: approval.pairId,
+            secret: 'A'.repeat(43),
+            expiresAt,
+          },
+        },
+      }
+    }
+    if (e.url.endsWith('/h/app/revoke')) {
+      const body = request as unknown as {
+        v?: unknown
+        target?: {
+          kind?: unknown
+          owner?: { host?: unknown; sessionId?: unknown }
+          generation?: unknown
+        }
+        reason?: unknown
+      }
+      const target = body.target
+      if (
+        JSON.stringify(Object.keys(body).sort()) !==
+          JSON.stringify(['reason', 'target', 'v']) ||
+        body.v !== 1 ||
+        body.reason !== 'generation-ended' ||
+        !target ||
+        JSON.stringify(Object.keys(target).sort()) !==
+          JSON.stringify(['generation', 'kind', 'owner']) ||
+        target.kind !== 'generation' ||
+        !target.owner ||
+        JSON.stringify(Object.keys(target.owner).sort()) !==
+          JSON.stringify(['host', 'sessionId']) ||
+        target.owner.host !== 'code' ||
+        target.owner.sessionId !== 'synthetic-session' ||
+        !Number.isSafeInteger(target.generation) ||
+        (target.generation as number) < 1
+      )
+        throw new Error('Unexpected fixture app revoke request')
+      response = { v: 1, ok: true, value: null }
+    }
     if (e.url.endsWith('/launch') && request.open === true)
       response = { ok: true, status: 'dispatched' }
+    if (e.url.endsWith('/launch') && request.link === true) {
+      resolveLinkStarted()
+      if (linkHeld) await linkGate
+      response = linkResponse ?? {
+        ok: true,
+        url: `http://127.0.0.1:4321/launch/${'a'.repeat(43)}`,
+        expiresAt: Date.now() + 60_000,
+      }
+    }
     if (e.url.endsWith('/apps')) {
       appRequests++
       for (const waiter of appWaiters)
@@ -756,7 +763,8 @@ export const installHost = (
         (!files.some((file) => path === `${CWD}/${file}`) &&
           !usage.value.context.breakdown.memoryFiles.some(
             (file) => file.path === path,
-          ))
+          ) &&
+          !allowedFiles.has(path))
       )
         response = { ok: false, error: 'forbidden' }
       else {
@@ -764,7 +772,7 @@ export const installHost = (
         handles.set(id, path)
         preparedFiles.push(path)
         resolveFilePrepared()
-        response = { id, path, inside: true }
+        response = { id, path, inside: path.startsWith(`${CWD}/`) }
       }
     }
     if (e.url.endsWith('/file/read')) {
@@ -776,6 +784,10 @@ export const installHost = (
         response = { text: path.endsWith('/notes/a.md') ? NOTE_BODY : '' }
       }
     }
+    if (e.url.endsWith('/file/open'))
+      response = handles.has(request.id ?? '')
+        ? { ok: true, status: 'dispatched' }
+        : { ok: false, error: 'forbidden' }
     if (e.url.endsWith('/file/verify') && !handles.has(request.id ?? ''))
       response = { ok: false, error: 'forbidden' }
     if (e.url.endsWith('/file/release')) handles.delete(request.id ?? '')
@@ -789,7 +801,12 @@ export const installHost = (
     }
   })
   on('fs.read', (_$, e) => ({
-    value: e.path.endsWith('notes/a.md') ? NOTE_BODY : '',
+    value:
+      invalidIndexCache && /\/layout-[^/]+\.json$/.test(e.path)
+        ? JSON.stringify({ root: CWD, files: [null] })
+        : e.path.endsWith('notes/a.md')
+          ? NOTE_BODY
+          : '',
   }))
   on('fs.exists', () => ({ value: false }))
   on('fs.write', (_$, e) => {
@@ -804,19 +821,60 @@ export const installHost = (
     logs.push({ text: e.text, to: e.to })
     return { value: undefined }
   })
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.copy', () => ({ value: { isCopied: true } }))
-  on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('model.fork', async () => {
-    resolveForkStarted()
-    if (forkHeld) await forkGate
+  on('ui.toast', (_$, e) => {
+    notices.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.open', (_$, e) => {
+    uiOpened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.copy', async (_$, e) => {
+    copyCalls.push({ text: e.text, surface: e.surface })
+    resolveCopyStarted()
+    if (copyHeld) await copyGate
     return {
-      value: { isAnswered: false as const, reason: 'nothing-to-fork' as const },
+      value: copySuccess
+        ? { isCopied: true as const }
+        : { isCopied: false as const, reason: 'refused' as const },
     }
   })
-  on('prompt.fill', () => ({ isFilled: true }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.attach', (_$, e) => ({ clientId: e.clientId }))
+  on('model.fork', async () => {
+    forkCount++
+    for (const waiter of forkWaiters)
+      if (forkCount >= waiter.count) waiter.resolve()
+    resolveForkStarted()
+    if (forkHeld) await forkGate
+    forkReleased++
+    for (const waiter of releaseWaiters)
+      if (forkReleased >= waiter.count) waiter.resolve()
+    return forkText === null
+      ? {
+          value: {
+            isAnswered: false as const,
+            reason: 'nothing-to-fork' as const,
+          },
+        }
+      : {
+          value: {
+            isAnswered: true as const,
+            text: forkText,
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        }
+  })
+  on('prompt.fill', (_$, e) => {
+    promptFills.push(e.text)
+    return { isFilled: true }
+  })
 
   const fixtureInput: unknown = JSON.parse(
     JSON.stringify({
@@ -841,11 +899,32 @@ export const installHost = (
     writes,
     opened,
     logs,
+    notices,
+    uiOpened,
+    waitForState: (predicate) =>
+      new Promise<void>((resolve) => {
+        stateWaiters.push({ predicate, resolve })
+      }),
     browserEvents,
+    copyCalls,
+    setCopySuccess: (success) => {
+      copySuccess = success
+    },
+    holdCopy: () => {
+      copyHeld = true
+    },
+    copyStarted,
+    releaseCopy,
+    setInvalidIndexCache: (enabled) => {
+      invalidIndexCache = enabled
+    },
     browserReady,
     relayStarted: () => relayStarted,
     preparedFiles,
     attemptedFiles,
+    allowPreparedFile: (path) => {
+      allowedFiles.add(path)
+    },
     readFiles,
     fileRead,
     filePrepared,
@@ -857,6 +936,44 @@ export const installHost = (
           `${JSON.stringify({ t: 'cmd', id, body: { v: 1, generation, command } })}\n`,
         )
       }),
+    appCoach: (generation, index = 0) => {
+      const token = 'A'.repeat(43)
+      const scope = {
+        requestId: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[index]! + 'A'.repeat(42),
+        relayId: token,
+        grantId: token,
+        owner: { host: 'code', sessionId: 'synthetic-session' },
+        generation,
+        lease: { epoch: 1, id: token },
+      }
+      sendFrame(
+        `${JSON.stringify({ v: 1, t: 'app-cmd', scope, request: { v: 1, generation, command: { kind: 'coach-analyse' } } })}\n`,
+      )
+    },
+    cancelAppCoach: (generation, index = 0) => {
+      const token = 'A'.repeat(43)
+      const scope = {
+        requestId: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[index]! + 'A'.repeat(42),
+        relayId: token,
+        grantId: token,
+        owner: { host: 'code', sessionId: 'synthetic-session' },
+        generation,
+        lease: { epoch: 1, id: token },
+      }
+      sendFrame(`${JSON.stringify({ v: 1, t: 'app-cancel', scope })}\n`)
+    },
+    setForkResult: (text) => {
+      forkText = text
+    },
+    promptFills,
+    setLinkResponse: (response) => {
+      linkResponse = response
+    },
+    holdLink: () => {
+      linkHeld = true
+    },
+    linkStarted,
+    releaseLink,
     disconnectRelay: () => {
       relayEnded = true
       wakeRelay()
@@ -865,6 +982,19 @@ export const installHost = (
       forkHeld = true
     },
     forkStarted,
+    forkCount: () => forkCount,
+    waitForForks: (count) =>
+      forkCount >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            forkWaiters.push({ count, resolve })
+          }),
+    waitForForksReleased: (count) =>
+      forkReleased >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            releaseWaiters.push({ count, resolve })
+          }),
     releaseFork,
     holdPlayWrite: () => {
       playWriteHeld = true
@@ -1033,6 +1163,10 @@ const settleReady = async (
   host: Host,
   ui: { redraw: () => Promise<void>; drawn: () => Promise<RenderElement> },
 ) => {
+  // Historical roots still render the native dashboard; the cutover root
+  // renders a launcher and starts listing only when a link is requested.
+  if (scenario.component === 'Pane' && hasKey(await ui.drawn(), 'launcher'))
+    return
   if (scenario.phase === 'loading') return
   // AbovePrompt never lists the folder. Only a Pane's render starts load, and load invalidates when packing ends.
   if (scenario.component === 'Pane') await host.settled()
@@ -1095,11 +1229,45 @@ export const captureView = async (
   on: On,
   scenario: (typeof viewCases)[number],
   semantic = false,
+  candidate = false,
 ) => {
   const host = installHost(on, scenario, semantic)
   const actions: string[] = []
-  const ui = await $.ui.mount(mountTarget(scenario))
-  await layoutChrome(scenario, ui)
+  const mounted =
+    candidate && scenario.browser3d
+      ? { ...scenario, component: 'AbovePrompt' as const }
+      : scenario
+  const ui = await $.ui.mount(mountTarget(mounted))
+  await layoutChrome(mounted, ui)
+  const launcher = candidate && scenario.component === 'Pane'
+  if (host.copyCalls.length !== 0)
+    throw new Error(
+      `${scenario.id}: mounting copied without an explicit action`,
+    )
+  if (launcher) {
+    if (scenario.browser3d) {
+      await ui.press({ key: 'copy-browser-link' })
+      actions.push('copy-browser-link')
+      await host.browserReady
+      const copied = host.copyCalls.slice()
+      if (copied.length !== 1 || copied[0]?.surface !== scenario.surface)
+        throw new Error(
+          `${scenario.id}: explicit copy did not target the pressed surface`,
+        )
+      await ui.redraw()
+    }
+    const tree = await ui.drawn()
+    if (JSON.stringify(tree).includes('/launch/'))
+      throw new Error(`${scenario.id}: launcher rendered a capability URL`)
+    return {
+      id: scenario.id,
+      fixture: { input: host.fixtureInput, actions },
+      tree,
+      svgs: svgsOf(tree),
+      browserEvents: host.browserEvents,
+      artifacts: artifactsOf(host.writes),
+    }
+  }
   if (scenario.phase === 'loading') {
     const tree = await ui.drawn()
     if (!isPacking(tree))
@@ -1145,8 +1313,9 @@ export const captureView = async (
 
 export const mountReady = async ($: Engine, on: On, scenario: ViewCase) => {
   const host = installHost(on, scenario)
-  const ui = await $.ui.mount(mountTarget(scenario))
-  await layoutChrome(scenario, ui)
-  await settleReady(scenario, host, ui)
+  const ui = await $.ui.mount(
+    mountTarget({ ...scenario, component: 'AbovePrompt' }),
+  )
+  await ui.redraw()
   return { ui, host }
 }

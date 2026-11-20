@@ -17,6 +17,30 @@ export const projectSemantics = (trail: Trail): SceneSemantics => ({
 })
 
 const TAU = Math.PI * 2
+export const SPIN_MS = 80_000
+export type Cam = {
+  yaw: number
+  pitch: number
+  zoom: number
+  pan: { x: number; y: number }
+  spin: boolean
+  at: number
+}
+export const CAM0: Cam = {
+  yaw: -0.6,
+  pitch: 0.5,
+  zoom: 1,
+  pan: { x: 0, y: 0 },
+  spin: true,
+  at: 0,
+}
+export const PITCH_MIN = 0.08,
+  PITCH_MAX = 1.05
+export const ZOOM_MIN = 0.6,
+  ZOOM_MAX = 12
+export const yawAt = (c: Cam, now: number) =>
+  c.yaw + (c.spin ? (TAU * (now - c.at)) / SPIN_MS : 0)
+
 const NB = 72
 const rnd = (i: number) => {
   let t = Math.imul(i + 1, 2654435761) >>> 0

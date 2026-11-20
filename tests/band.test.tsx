@@ -16,7 +16,12 @@ const BAND = {
   },
 } as const
 
-const engine = (on: On, percent: number, opened: string[] = []) => {
+const engine = (
+  on: On,
+  percent: number,
+  opened: string[] = [],
+  surfaces: ('desktop' | 'terminal')[] = ['desktop'],
+) => {
   // the meter and the language are set; every other value goes to the kit's own state
   on('state.get', (_, e, next) => {
     if (e.key === 'meter')
@@ -58,7 +63,7 @@ const engine = (on: On, percent: number, opened: string[] = []) => {
       },
     ],
   }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('session.surfaces', () => ({ value: surfaces }))
   on('ui.open', (_, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true } }
@@ -79,13 +84,14 @@ for (const surface of ['desktop', 'terminal'] as const) {
   })
 }
 
-test('past three quarters, the band shows a storm and offers to change session', async ($, on) => {
+test('the high-context band retains its meter and offers explicit Copy without opening a pane', async ($, on) => {
   const opened: string[] = []
   engine(on, 82, opened)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Button', key: 'band-handoff' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /⛈️ Contexte 82 %/ })).toBeDefined()
-  await ui.press({ key: 'band-handoff' })
-  expect(opened).toContain('brain-trail-v2')
+  expect(
+    await ui.find({ type: 'Button', key: 'copy-browser-link' }),
+  ).toBeDefined()
+  expect(opened).toEqual([])
   await ui.unmount()
 })

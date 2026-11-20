@@ -1,7 +1,7 @@
 {
   "name": "brain-trail-v2",
-  "version": "2.3.1",
-  "description": "A pane beside the chat that shows what this Claude Code session puts in its context: a map of the files it moves through, the list of every file and why it is there, and a gauge that tells you when to compact or start a new session",
+  "version": "2.4.0",
+  "description": "Native capture of your Claude Code session, with Open and Pair controls for the shared web dashboard and MCP App",
   "author": {
     "name": "Unkillable Companies"
   },
@@ -10,16 +10,10 @@
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "autoOpen": {
-      "type": "boolean",
-      "title": "Open by itself",
-      "description": "Open the pane when a session starts. Off: type /brain-trail to open it.",
-      "default": true
-    },
     "language": {
       "type": "string",
       "title": "Language",
-      "description": "Language of the pane at first open (en or fr). It can be switched in the pane.",
+      "description": "Initial interface language (en or fr). It can be switched in the dashboard.",
       "options": ["en", "fr"],
       "default": "en"
     }

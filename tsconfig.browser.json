@@ -10,5 +10,9 @@
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["hosts/browser/*.ts"]
+  "include": [
+    "hosts/browser/*.ts",
+    "hosts/mcp-app/*.ts",
+    "scripts/fixtures/renderer-failure.ts"
+  ]
 }

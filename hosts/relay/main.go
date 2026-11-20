@@ -24,7 +24,6 @@ import (
 
 const hostLimit = 4194304
 const frameLimit = 256 * 1024
-const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Brain Trail</title><link rel="stylesheet" href="app.css"></head><body><main id="app"></main><div id="status" role="status" aria-live="polite"></div><div id="toast" role="status" aria-live="polite"></div><script type="module" src="app.js"></script></body></html>`
 const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
 
 type relay struct {
@@ -33,6 +32,8 @@ type relay struct {
 	hostToken, token, host, assets, dir string
 	launch                              string
 	launchExpiry                        time.Time
+	launchGeneration                    int64
+	launchBound, generationEnded        bool
 	generation, revision                int64
 	layout, snapshot                    []byte
 	ready, initializing                 bool
@@ -42,6 +43,7 @@ type relay struct {
 	out                                 chan []byte
 	outputFailure                       chan struct{}
 	files                               *FileAuthority
+	app                                 *appBridge
 	observers                           int
 }
 type limitedListener struct {
@@ -73,6 +75,7 @@ func (l *limitedListener) Accept() (net.Conn, error) {
 		}
 	}
 }
+
 func boundedServer(handler http.Handler) *http.Server {
 	return &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024}
 }
@@ -127,8 +130,24 @@ func (s *relay) frame(v any) bool {
 	}
 }
 
+// lockLaunchScope serializes the final OS launch with authority revocation.
+func (s *relay) lockLaunchScope(scopes ...*Guard) (func(), error) {
+	if len(scopes) == 0 || scopes[0] == nil {
+		return func() {}, nil
+	}
+	if s.app == nil {
+		return nil, os.ErrPermission
+	}
+	s.app.mu.Lock()
+	if !s.app.guardLocked(*scopes[0], time.Now()) {
+		s.app.mu.Unlock()
+		return nil, os.ErrPermission
+	}
+	return s.app.mu.Unlock, nil
+}
+
 // startLaunchForCode owns the only Wait call for each successfully started child.
-func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int64, launchCode string) (string, error) {
+func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int64, launchCode string, scopes ...*Guard) (string, error) {
 	s.mu.Lock()
 	if s.observers >= 32 {
 		s.mu.Unlock()
@@ -136,7 +155,12 @@ func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int6
 	}
 	s.observers++
 	s.mu.Unlock()
-	if err := command.Start(); err != nil {
+	unlock, err := s.lockLaunchScope(scopes...)
+	if err == nil {
+		err = command.Start()
+		unlock()
+	}
+	if err != nil {
 		s.mu.Lock()
 		s.observers--
 		s.mu.Unlock()
@@ -215,6 +239,15 @@ func fail(w http.ResponseWriter, e error) {
 	jsonOut(w, map[string]any{"ok": false, "error": kind})
 }
 func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.HasPrefix(r.URL.Path, "/a/") {
+		if s.app == nil {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		s.app.app(w, r)
+		return
+	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.hostToken)) != 1 {
 		w.WriteHeader(401)
 		return
@@ -235,7 +268,56 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/h/app/") {
+		if s.app == nil {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		s.app.host(w, r, b)
+		return
+	}
 	switch r.URL.Path {
+	case "/h/generation":
+		var q struct {
+			Generation *int64 `json:"generation"`
+			Ended      bool   `json:"ended"`
+		}
+		if json.Unmarshal(b, &q) != nil || q.Generation == nil || *q.Generation < 0 || *q.Generation > 9007199254740991 {
+			w.WriteHeader(400)
+			return
+		}
+		if s.app != nil {
+			s.app.mu.Lock()
+		}
+		s.mu.Lock()
+		if *q.Generation > s.generation {
+			s.generation = *q.Generation
+			s.revision = 0
+			s.layout = nil
+			s.snapshot = nil
+			s.ready = false
+			s.generationEnded = false
+			if s.launchBound {
+				s.launch = ""
+				s.launchBound = false
+			}
+		}
+		if *q.Generation == s.generation && q.Ended {
+			s.generationEnded = true
+			s.layout = nil
+			s.snapshot = nil
+			s.ready = false
+			s.launch = ""
+			s.launchBound = false
+		}
+		s.mu.Unlock()
+		if s.app != nil {
+			s.app.mu.Unlock()
+		}
+		if s.app != nil {
+			s.app.generationChanged()
+		}
+		jsonOut(w, map[string]bool{"ok": true})
 	case "/h/event":
 		var ev struct {
 			V          int    `json:"v"`
@@ -247,13 +329,24 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
+		if s.app != nil {
+			s.app.mu.Lock()
+		}
 		s.mu.Lock()
-		if ev.Generation < s.generation || (ev.Generation == s.generation && ev.Kind == "snapshot" && ev.Revision < s.revision) {
+		if ev.Generation < s.generation || (ev.Generation == s.generation && ((s.generationEnded && ev.Kind != "ended") || (ev.Kind == "snapshot" && ev.Revision < s.revision))) {
 			s.mu.Unlock()
+			if s.app != nil {
+				s.app.mu.Unlock()
+			}
 			w.WriteHeader(409)
 			return
 		}
 		if ev.Generation > s.generation {
+			if s.launchBound {
+				s.launch = ""
+				s.launchBound = false
+			}
+			s.generationEnded = false
 			s.generation = ev.Generation
 			s.revision = 0
 			s.layout = nil
@@ -268,16 +361,26 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			s.snapshot = append([]byte(nil), b...)
 			s.ready = !s.initializing
 		case "ended":
+			s.launch = ""
+			s.launchBound = false
+			s.generationEnded = true
 			s.layout = nil
 			s.snapshot = nil
 			s.ready = false
 		default:
 			s.mu.Unlock()
+			if s.app != nil {
+				s.app.mu.Unlock()
+			}
 			w.WriteHeader(400)
 			return
 		}
 		s.broadcast(b)
 		s.mu.Unlock()
+		if s.app != nil {
+			s.app.mu.Unlock()
+			s.app.generationChanged()
+		}
 		jsonOut(w, map[string]bool{"ok": true})
 	case "/h/ready":
 		var q struct {
@@ -320,17 +423,23 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 	case "/h/launch":
 		var q struct {
 			Open       bool   `json:"open"`
+			Link       bool   `json:"link"`
 			ID         string `json:"id"`
 			Generation *int64 `json:"generation"`
 		}
-		if json.Unmarshal(b, &q) != nil || (q.Open && !validLaunchIdentity(q.ID, q.Generation)) {
+		if json.Unmarshal(b, &q) != nil || (q.Open && q.Link) || (q.Open && !validLaunchIdentity(q.ID, q.Generation)) || (q.Link && (q.Generation == nil || *q.Generation < 0 || *q.Generation > 9007199254740991)) {
 			w.WriteHeader(400)
 			return
 		}
 		s.launchMu.Lock()
 		defer s.launchMu.Unlock()
 		s.mu.Lock()
-		busy := s.launch != "" && time.Now().Before(s.launchExpiry)
+		if q.Link && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+			s.mu.Unlock()
+			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
+			return
+		}
+		busy := !q.Link && s.launch != "" && time.Now().Before(s.launchExpiry)
 		s.mu.Unlock()
 		if busy {
 			jsonOut(w, map[string]any{"ok": false, "error": "busy"})
@@ -342,10 +451,32 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
+		if q.Link && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+			s.mu.Unlock()
+			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
+			return
+		}
+		if q.Link && *q.Generation > s.generation {
+			s.generation = *q.Generation
+			s.generationEnded = false
+			s.revision = 0
+			s.layout = nil
+			s.snapshot = nil
+			s.ready = false
+		}
 		s.launch = code
 		s.launchExpiry = time.Now().Add(120 * time.Second)
+		s.launchBound = q.Link
+		if q.Link {
+			s.launchGeneration = *q.Generation
+		}
+		expiry := s.launchExpiry
 		s.mu.Unlock()
 		u := "http://" + s.host + "/launch/" + code
+		if q.Link {
+			jsonOut(w, map[string]any{"ok": true, "url": u, "expiresAt": expiry.UnixMilli()})
+			return
+		}
 		data := []byte(`<!doctype html><meta http-equiv="refresh" content="0;url=` + u + `"><title>Opening Brain Trail</title>`)
 		p := filepath.Join(s.dir, "open.html")
 		if err = os.WriteFile(p, data, 0600); err != nil {
@@ -374,14 +505,28 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, map[string]bool{"ok": true})
 	case "/h/file/prepare":
 		var q struct {
-			Root string `json:"root"`
-			Path string `json:"path"`
+			Root     string          `json:"root"`
+			Path     string          `json:"path"`
+			AppScope json.RawMessage `json:"appScope"`
 		}
 		if json.Unmarshal(b, &q) != nil {
 			w.WriteHeader(400)
 			return
 		}
-		v, err := s.files.Prepare(q.Root, q.Path)
+		var scope *Guard
+		if len(q.AppScope) != 0 {
+			var guard Guard
+			if decodeAppJSON(q.AppScope, &guard) != nil {
+				w.WriteHeader(400)
+				return
+			}
+			scope = &guard
+			if s.app == nil || !s.app.checkGuard(guard) {
+				fail(w, errors.New("forbidden"))
+				return
+			}
+		}
+		v, err := s.files.Prepare(q.Root, q.Path, scope)
 		if err != nil {
 			fail(w, err)
 			return
@@ -432,7 +577,12 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			fail(w, err)
 			return
 		}
-		status, err := s.openPath(p, q.App, q.LaunchID, *q.Generation, "")
+		scope, err := s.files.Scope(q.ID)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		status, err := s.openPath(p, q.App, q.LaunchID, *q.Generation, "", scope)
 		if err != nil {
 			jsonOut(w, map[string]any{"ok": false, "error": "launch-failed"})
 			return
@@ -448,10 +598,14 @@ func (s *relay) browserHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 		return
 	}
+	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+s.host {
+		w.WriteHeader(403)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/launch/") && r.Method == "GET" {
 		code := strings.TrimPrefix(r.URL.Path, "/launch/")
 		s.mu.Lock()
-		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
+		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && (!s.launchBound || (s.launchGeneration == s.generation && !s.generationEnded)) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
 		if ok {
 			s.launch = ""
 		}
@@ -478,7 +632,7 @@ func (s *relay) browserHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(403)
 			return
 		}
-		if p != "command" {
+		if p != "command" && p != "pair" {
 			w.WriteHeader(404)
 			return
 		}
@@ -496,6 +650,14 @@ func (s *relay) browserHandler(w http.ResponseWriter, r *http.Request) {
 			} else {
 				refusal(w, 400, "invalid")
 			}
+			return
+		}
+		if p == "pair" {
+			if s.app == nil {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			s.app.browserPair(w, r, b)
 			return
 		}
 		id, err := secret()
@@ -542,7 +704,7 @@ func (s *relay) browserHandler(w http.ResponseWriter, r *http.Request) {
 	switch p {
 	case "":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, page)
+		http.ServeFile(w, r, filepath.Join(s.assets, "index.html"))
 	case "app.js", "app.css":
 		ct := "text/javascript; charset=utf-8"
 		if p == "app.css" {
@@ -619,7 +781,7 @@ func serve(assets string) error {
 	if !filepath.IsAbs(assets) {
 		return errors.New("assets must be absolute")
 	}
-	for _, n := range []string{"app.js", "app.css"} {
+	for _, n := range []string{"index.html", "app.js", "app.css"} {
 		if st, e := os.Stat(filepath.Join(assets, n)); e != nil || !st.Mode().IsRegular() {
 			return errors.New("missing browser assets")
 		}
@@ -658,7 +820,7 @@ func serve(assets string) error {
 	if len([]byte(sock)) > 100 {
 		return errors.New("socket path too long")
 	}
-	listener, e := net.Listen("unix", sock)
+	listener, e := privateListener(sock)
 	if e != nil {
 		return e
 	}
@@ -666,7 +828,7 @@ func serve(assets string) error {
 	if _, e = privacyEvidence(dir, sock); e != nil {
 		return e
 	}
-	tcp, e := net.Listen("tcp", "127.0.0.1:0")
+	tcp, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {
 		return e
 	}
@@ -676,6 +838,11 @@ func serve(assets string) error {
 		return e
 	}
 	s := &relay{hostToken: cfg.HostToken, token: token, host: tcp.Addr().String(), assets: assets, dir: dir, clients: make(map[chan []byte]struct{}), pending: make(map[string]chan json.RawMessage), out: make(chan []byte, 64), outputFailure: make(chan struct{}, 1), files: NewFileAuthority()}
+	s.app, e = newAppBridge(s, sock)
+	if e != nil {
+		return e
+	}
+	defer s.app.close()
 	defer s.files.Close()
 	done := make(chan error, 3)
 	go func() {
@@ -721,8 +888,10 @@ func main() {
 	var e error
 	if len(os.Args) == 3 && os.Args[1] == "serve" {
 		e = serve(os.Args[2])
+	} else if len(os.Args) == 3 && os.Args[1] == "mcp" {
+		e = serveMCP(os.Args[2])
 	} else {
-		e = errors.New("usage: brain-trail-relay serve ASSETS")
+		e = errors.New("usage: brain-trail-relay serve|mcp ASSETS")
 	}
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)

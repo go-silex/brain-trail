@@ -170,6 +170,19 @@ export const tilt = (L: Layout): Tilted => {
   return t
 }
 
+// The frame a map shows for its natural box: the band above it (the services Claude called and,
+// over the whole disc, its title) in map units at this width, then fitted to the host's box.
+const framed = (
+  box: { vx: number; vy: number; vw: number; vh: number },
+  band: number,
+  widthPx: number,
+  fit: number | undefined,
+) => {
+  const px = box.vw / widthPx
+  const banded = { vx: box.vx, vy: box.vy - band * px, vw: box.vw, vh: box.vh + band * px }
+  return fit === undefined ? banded : fitFrame(banded, fit)
+}
+
 // `aspect`: the height over the width of the box the host gives the map; absent, the map takes its own height.
 export type DrawOptions = { zoomed: boolean; widthPx: number; now: number; outside: number; filesWord: string; services: string[]; box?: { x: number; y: number; side: number }; aspect?: number }
 export type MapRenderer = { draw: (L: Layout, T: Trail, P: Palette, opts: DrawOptions) => { svg: string; heightPx: number; view: MapFrame } }
@@ -186,6 +199,7 @@ export const createMapRenderer = () => {
   // view box: the whole disc and its title, the part the trail covers, or the frame the person zoomed to
   const top = TL.top - 30, bottom = TL.cy + TL.R * TILT + 20
   let [vx, vy, vw, vh] = [-10, top, L.size + 20, bottom - top]
+  const wholeBox = { vx, vy, vw, vh }
   const shown = [...T.state.keys()].filter(n => T.state.get(n)!.k !== 'hit' || T.moves.length === 0)
   if (opts.box !== undefined) {
     ;[vx, vy, vw, vh] = [opts.box.x, opts.box.y, opts.box.side, opts.box.side]
@@ -214,11 +228,7 @@ export const createMapRenderer = () => {
   // Glyphs belong to the natural camera, not the expanded letterbox.
   const naturalX = vx, naturalWidth = vw, px = vw / widthPx
   const bandTop = mapTop - band * px
-  vy = bandTop
-  vh += band * px
-  if (fit !== undefined) {
-    ;({ vx, vy, vw, vh } = fitFrame({ vx, vy, vw, vh }, fit))
-  }
+  ;({ vx, vy, vw, vh } = framed({ vx, vy, vw, vh }, band, widthPx, fit))
   const SR = 17 * px, gapX = Math.min(naturalWidth / Math.max(cols, 1), 120 * px)
   const station = new Map(svcs.map((s, i) => {
     const c = i % cols, r = Math.floor(i / cols), inRow = Math.min(cols, svcs.length - r * cols)
@@ -444,7 +454,8 @@ export const createMapRenderer = () => {
   out.splice(linksAt, 0, ...under)
   out.push(stationSvg(withLogo))
   out.push('</svg>')
-  const view: MapFrame = { vx, vy, vw, vh, px: vw / widthPx }
+  // what this map shows with no camera, so a gesture can reach it before it is drawn
+  const view: MapFrame = { vx, vy, vw, vh, px: vw / widthPx, whole: framed(wholeBox, 40 + rows * 78, widthPx, fit) }
   if (fit !== undefined) {
     const cameraBand = rows * 78 / widthPx
     view.cameraFrame = fitFrame({ vx: 0, vy: -cameraBand, vw: 1, vh: 1 + cameraBand }, fit)

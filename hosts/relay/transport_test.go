@@ -48,7 +48,7 @@ func newRelayHarness(t *testing.T) *relayHarness {
 		return (&net.Dialer{}).DialContext(ctx, "unix", unix.Addr().String())
 	}}
 	t.Cleanup(transport.CloseIdleConnections)
-	return &relayHarness{s, &http.Client{Transport: transport, Timeout: 5 * time.Second}, public.Client(), public.URL, unix.Addr().String()}
+	return &relayHarness{s, &http.Client{Transport: transport, Timeout: 5 * time.Second}, public.Client(), "http://" + s.host, unix.Addr().String()}
 }
 func request(t *testing.T, c *http.Client, method, url, token, origin, host string, data []byte) *http.Response {
 	t.Helper()

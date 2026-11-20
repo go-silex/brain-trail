@@ -2,7 +2,15 @@
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import { marked } from 'marked'
-import { WebGLScene } from './scene3d'
+import { WebGLScene, WebGLUnavailableError } from './scene3d'
+import { strings } from '../../hooks/i18n'
+import {
+  heldBesides,
+  heldIn,
+  pointerButton,
+  wheelRows,
+  type PointerButton,
+} from '../../hooks/pointer'
 import type {
   MapGesture,
   Scene3dProps,
@@ -45,6 +53,8 @@ type Slot = {
   children: Slot[]
   scene?: WebGLScene
   observer?: ResizeObserver
+  unavailable?: boolean
+  disposed?: boolean
 }
 export type MapHandlers = {
   gesture: (g: MapGesture) => MapTip | null
@@ -148,9 +158,16 @@ export class DomRenderer {
     private readonly map: MapHandlers,
   ) {}
   render(value: VNode) {
-    this.root = this.patch(this.container, this.root, value)
-    if (this.container.firstChild !== this.root.node)
-      this.container.appendChild(this.root.node)
+    try {
+      this.root = this.patch(this.container, this.root, value)
+      if (this.container.firstChild !== this.root.node)
+        this.container.appendChild(this.root.node)
+    } catch (error) {
+      const root = this.root
+      this.root = undefined
+      if (root !== undefined) this.disposeSlot(root)
+      throw error
+    }
   }
   resetScene() {
     const visit = (slot: Slot) => {
@@ -160,14 +177,24 @@ export class DomRenderer {
     if (this.root !== undefined) visit(this.root)
   }
   dispose() {
-    if (this.root !== undefined) this.disposeSlot(this.root)
+    const root = this.root
     this.root = undefined
+    if (root !== undefined) this.disposeSlot(root)
     this.container.replaceChildren()
   }
   private disposeSlot(slot: Slot) {
-    slot.scene?.dispose()
-    slot.observer?.disconnect()
-    for (const child of slot.children) this.disposeSlot(child)
+    if (slot.disposed) return
+    slot.disposed = true
+    const attempt = (action: () => void) => {
+      try {
+        action()
+      } catch {}
+    }
+    attempt(() => slot.scene?.dispose())
+    attempt(() => slot.observer?.disconnect())
+    for (const child of slot.children) attempt(() => this.disposeSlot(child))
+    slot.children = []
+    attempt(() => slot.node.parentNode?.removeChild(slot.node))
   }
   private patch(
     parent: Node,
@@ -187,23 +214,34 @@ export class DomRenderer {
           ? document.createTextNode(value)
           : this.create(value.kind)
       const slot: Slot = { value, node, children: [] }
-      if (old !== undefined) {
-        this.disposeSlot(old)
-        parent.replaceChild(node, old.node)
-      } else parent.appendChild(node)
-      if (typeof value !== 'string') this.update(slot, value, undefined)
-      return slot
+      try {
+        if (old !== undefined) {
+          parent.replaceChild(node, old.node)
+          this.disposeSlot(old)
+        } else parent.appendChild(node)
+        if (typeof value !== 'string') this.update(slot, value, undefined)
+        return slot
+      } catch (error) {
+        this.disposeSlot(slot)
+        if (old !== undefined) this.disposeSlot(old)
+        throw error
+      }
     }
     if (old === undefined) throw new Error('Missing DOM slot')
-    if (typeof value === 'string') {
-      if (old.value !== value) old.node.textContent = value
+    try {
+      if (typeof value === 'string') {
+        if (old.value !== value) old.node.textContent = value
+        old.value = value
+        return old
+      }
+      const previous = typeof old.value === 'string' ? undefined : old.value
+      this.update(old, value, previous)
       old.value = value
       return old
+    } catch (error) {
+      this.disposeSlot(old)
+      throw error
     }
-    const previous = typeof old.value === 'string' ? undefined : old.value
-    this.update(old, value, previous)
-    old.value = value
-    return old
   }
   private create(kind: Kind): HTMLElement {
     const element = document.createElement(
@@ -225,11 +263,23 @@ export class DomRenderer {
   private update(slot: Slot, value: VNode, previous: VNode | undefined) {
     const el = slot.node as HTMLElement
     if (value.kind === 'scene3d') {
-      el.className = 'bt-scene3d'
+      el.className = slot.unavailable
+        ? 'bt-scene3d bt-scene3d-unavailable'
+        : 'bt-scene3d'
       const props = value.props as Scene3dProps
-      if (slot.scene === undefined) slot.scene = new WebGLScene(el, props)
-      else slot.scene.update(props)
-      slot.scene.setHover(this.hoverNames)
+      if (slot.scene === undefined && !slot.unavailable) {
+        try {
+          slot.scene = new WebGLScene(el, props)
+        } catch (error) {
+          if (!(error instanceof WebGLUnavailableError)) throw error
+          slot.unavailable = true
+          el.classList.add('bt-scene3d-unavailable')
+          el.setAttribute('role', 'status')
+        }
+      } else slot.scene?.update(props)
+      if (slot.unavailable)
+        el.textContent = strings(props.lang).webglUnavailable
+      else slot.scene?.setHover(this.hoverNames)
       return
     }
     if (value.key !== undefined) el.dataset.key = value.key
@@ -386,31 +436,35 @@ export class DomRenderer {
       if (typeof child.value !== 'string' && child.value.key !== undefined)
         keys.set(child.value.key, child)
     const result: Slot[] = []
-    next.forEach((value, index) => {
-      const key = typeof value === 'string' ? undefined : value.key
-      const positional = old[index]
-      const candidate =
-        key === undefined
-          ? positional !== undefined &&
-            (typeof positional.value === 'string' ||
-              positional.value.key === undefined)
-            ? positional
+    try {
+      next.forEach((value, index) => {
+        const key = typeof value === 'string' ? undefined : value.key
+        const positional = old[index]
+        const candidate =
+          key === undefined
+            ? positional !== undefined &&
+              (typeof positional.value === 'string' ||
+                positional.value.key === undefined)
+              ? positional
+              : undefined
+            : keys.get(key)
+        const selected =
+          candidate !== undefined && !used.has(candidate)
+            ? candidate
             : undefined
-          : keys.get(key)
-      const selected =
-        candidate !== undefined && !used.has(candidate) ? candidate : undefined
-      if (selected !== undefined) used.add(selected)
-      const child = this.patch(parent, selected, value)
-      const at = parent.childNodes[index]
-      if (at !== child.node) parent.insertBefore(child.node, at ?? null)
-      result.push(child)
-    })
-    for (const child of old)
-      if (!used.has(child) && child.node.parentNode === parent) {
-        this.disposeSlot(child)
-        parent.removeChild(child.node)
-      }
-    slot.children = result
+        if (selected !== undefined) used.add(selected)
+        const child = this.patch(parent, selected, value)
+        result.push(child)
+        const at = parent.childNodes[index]
+        if (at !== child.node) parent.insertBefore(child.node, at ?? null)
+      })
+      for (const child of old) if (!used.has(child)) this.disposeSlot(child)
+      slot.children = result
+    } catch (error) {
+      slot.children = []
+      for (const child of new Set([...old, ...result])) this.disposeSlot(child)
+      throw error
+    }
   }
   private installMap(el: HTMLElement) {
     const tip = document.createElement('div')
@@ -423,8 +477,10 @@ export class DomRenderer {
             y: number
             fx: number
             fy: number
-            right: boolean
+            button: PointerButton
             press: number
+            // another button joined the press: it is then never a click
+            mixed: boolean
           }
         | undefined,
       dragging = false
@@ -445,19 +501,39 @@ export class DomRenderer {
         tip.style.top = `${Math.max(0, t.y - 16)}px`
       }
     }
+    // A press ends once: on its button's release, a cancel or a lost capture, or, when that
+    // release was lost, at the next press, the first move or another button's release that no
+    // longer holds its button. Only its own release, never dragged nor chorded, is a click.
+    const release = () => {
+      if (dragging) show(this.map.gesture({ kind: 'dragend' }))
+      down = undefined
+      dragging = false
+    }
     el.oncontextmenu = (event) => event.preventDefault()
+    // The middle button zooms the map: no autoscroll, no paste, no middle click.
+    el.onmousedown = (event) => {
+      if (event.button === 1) event.preventDefault()
+    }
+    el.onauxclick = (event) => event.preventDefault()
     el.onpointerdown = (event) => {
+      const button = pointerButton(event.button)
+      if (button === undefined) return
+      release()
+      if (button === 'middle') event.preventDefault()
       const p = point(event)
       this.mapPressSequence =
         this.mapPressSequence >= Number.MAX_SAFE_INTEGER
           ? 1
           : this.mapPressSequence + 1
-      down = { ...p, right: event.button === 2, press: this.mapPressSequence }
+      down = { ...p, button, press: this.mapPressSequence, mixed: false }
       dragging = false
       el.setPointerCapture(event.pointerId)
     }
     el.onpointermove = (event) => {
       const p = point(event)
+      if (down !== undefined && !heldIn(down.button, event.buttons)) release()
+      if (down !== undefined && heldBesides(down.button, event.buttons))
+        down.mixed = true
       if (down !== undefined) {
         if (
           dragging ||
@@ -469,6 +545,7 @@ export class DomRenderer {
             this.map.gesture({
               kind: 'drag',
               press: down.press,
+              button: down.button,
               fx: p.fx,
               fy: p.fy,
               sfx: down.fx,
@@ -479,23 +556,23 @@ export class DomRenderer {
       } else show(this.map.gesture({ kind: 'hover', ...p }))
     }
     el.onpointerup = (event) => {
-      const p = point(event)
-      if (down !== undefined)
-        show(
-          this.map.gesture(
-            dragging
-              ? { kind: 'dragend' }
-              : { kind: 'click', fx: p.fx, fy: p.fy, right: down.right },
-          ),
-        )
+      if (down === undefined) return
+      if (pointerButton(event.button) !== down.button) {
+        if (heldIn(down.button, event.buttons)) down.mixed = true
+        else release()
+        return
+      }
+      if (dragging || down.mixed) {
+        release()
+        return
+      }
+      const p = point(event),
+        button = down.button
       down = undefined
-      dragging = false
+      show(this.map.gesture({ kind: 'click', fx: p.fx, fy: p.fy, button }))
     }
-    el.onpointercancel = () => {
-      if (dragging) show(this.map.gesture({ kind: 'dragend' }))
-      down = undefined
-      dragging = false
-    }
+    el.onpointercancel = () => release()
+    el.onlostpointercapture = () => release()
     el.onpointerleave = () => {
       if (down === undefined) show(this.map.gesture({ kind: 'leave' }))
     }
@@ -503,12 +580,7 @@ export class DomRenderer {
       'wheel',
       (event) => {
         const p = point(event),
-          by =
-            event.deltaMode === 1
-              ? event.deltaY
-              : event.deltaMode === 2
-                ? event.deltaY * 16
-                : event.deltaY / 16
+          by = wheelRows(event.deltaY, event.deltaMode)
         if (by !== 0 && this.map.wheel(by, p.fx, p.fy)) event.preventDefault()
       },
       { passive: false },

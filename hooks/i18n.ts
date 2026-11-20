@@ -5,9 +5,8 @@ const q = (s: string | undefined) => `« ${s ?? ''} »`
 const few = (x: string[]) => (x.length <= 3 ? x.map(q).join(', ') : `${x.slice(0, 3).map(q).join(', ')} +${x.length - 3}`)
 
 const en = {
+  webglUnavailable: '3D is unavailable in this browser because WebGL could not initialize. Use 2D here, or open the dashboard in a browser where WebGL is available.',
   brand: 'Unkillable Companies',
-  enlargePane: 'Enlarge the pane to show Brain Trail.',
-  bodyPages: { first: 'First page', previous: 'Previous page', next: 'Next page', last: 'Last page' },
   tagline: 'AI works better with the right context.', site: 'unkillablecompanies.com', madeBy: 'Made by',
   zoneLabel: { ok: 'Room to spare', warn: 'Compact soon', bad: 'Change session' },
   tabs: { map: 'Map', goal: 'Goal', coach: 'Coach', files: 'Files', context: 'Context', handoff: 'Hand-off' },
@@ -33,7 +32,7 @@ const en = {
   },
 
   bandContext: (p: number) => `Context ${p} %`, bandCost: (u: string) => `session ${u}`,
-  bandSetting: 'Band above the prompt', bandWhy: 'The context and the cost of the session, always in sight, even with the pane closed.',
+  bandSetting: 'Band above the prompt', bandWhy: 'The context and the cost of the session, always in sight, even with the browser closed.',
   notes: 'notes', current: 'Current file', lastCall: 'Last call',
   replay: 'Replay', resume: 'Resume', pause: 'Pause', live: 'Live',
   stepsLive: (n: number) => `${n} steps`, stepOf: (i: number, n: number) => `Step ${i} of ${n}`,
@@ -73,8 +72,8 @@ const en = {
   planHint: 'Enter your plan price in Settings to see what you save.',
   costHow: 'The figure is the one /cost gives: tokens counted by the engine, at API prices. Your usual session is the median of the past sessions Brain Trail saw.',
   planTitle: 'Your Claude plan', planWhy: 'Its monthly price, in dollars, to compare with the API value of your sessions.', planPlaceholder: 'e.g. 100', save: 'Save',
-  open3d: '3D', open3dFailed: 'The 3D view could not open in the browser.', open3dBig: '⤢ Full screen',
-  follow: 'Follow Claude', openLine: 'Open:', mapHelp: 'Click a note to open it. Click elsewhere to zoom in, right-click to zoom out, drag to move.', subfolder: 'Sub-folder…',
+  open3d: '3D', open3dFailed: 'Full screen is unavailable here.', open3dBig: '⤢ Full screen',
+  follow: 'Follow Claude', openLine: 'Open:', mapHelp: 'Left-click a note to open it. Left-drag moves in 2D or turns in 3D; right-drag moves. Middle-drag zooms; the wheel zooms when the host supplies it.', subfolder: 'Sub-folder…',
   settings: 'Settings', openWith: 'Open files with', openWithWhy: 'The app a click on a file name opens it in.',
   openMd: 'Markdown notes (.md)', openOther: 'Other files', defaultApp: 'System default',
   display: 'Display', language: 'Language', hoverNames: 'File names on hover', hoverWhy: 'On the map, hovering a dot shows the name of its file.',
@@ -155,7 +154,6 @@ const en = {
   hoEmpty: 'Nothing to hand off yet: the session has no exchange.',
   // footer
   clear: 'Clear trail', lang: 'Français',
-  opened: 'Brain Trail opened.', later: 'Brain Trail opens once the app is attached to the session.',
   toastWarn: 'Context past 50%. Brain Trail: think about compacting.',
   toastBad: 'Context past 75%. Brain Trail: hand off to a new session.',
 }
@@ -163,9 +161,8 @@ const en = {
 type Strings = typeof en
 
 const fr: Strings = {
+  webglUnavailable: "La 3D est indisponible dans ce navigateur car WebGL n'a pas pu démarrer. Utilise la 2D ici ou ouvre le tableau de bord dans un navigateur où WebGL est disponible.",
   brand: 'Unkillable Companies',
-  enlargePane: 'Agrandissez le panneau pour afficher Brain Trail.',
-  bodyPages: { first: 'Première page', previous: 'Page précédente', next: 'Page suivante', last: 'Dernière page' },
   tagline: 'AI works better with the right context.', site: 'unkillablecompanies.com', madeBy: 'Une création',
   zoneLabel: { ok: 'De la marge', warn: 'Compacter bientôt', bad: 'Changer de session' },
   tabs: { map: 'Carte', goal: 'Objectif', coach: 'Coach', files: 'Fichiers', context: 'Contexte', handoff: 'Passation' },
@@ -191,7 +188,7 @@ const fr: Strings = {
   },
 
   bandContext: (p: number) => `Contexte ${p} %`, bandCost: (u: string) => `session ${u}`,
-  bandSetting: 'Bandeau au-dessus de la saisie', bandWhy: 'Le contexte et le coût de la session, toujours visibles, même pane fermé.',
+  bandSetting: 'Bandeau au-dessus de la saisie', bandWhy: 'Le contexte et le coût de la session, toujours visibles, même navigateur fermé.',
   notes: 'notes', current: 'Fichier en cours', lastCall: 'Dernier appel',
   replay: 'Rejouer', resume: 'Reprendre', pause: 'Pause', live: 'Direct',
   stepsLive: (n: number) => `${n} étapes`, stepOf: (i: number, n: number) => `Étape ${i} sur ${n}`,
@@ -231,8 +228,8 @@ const fr: Strings = {
   planHint: "Renseigne le prix de ton abonnement dans les Réglages pour voir ce que tu économises.",
   costHow: "Le chiffre est celui de /cost : les tokens comptés par le moteur, au prix de l'API. Ta session habituelle est la médiane des sessions passées vues par Brain Trail.",
   planTitle: 'Ton abonnement Claude', planWhy: "Son prix mensuel, en dollars, pour le comparer à la valeur API de tes sessions.", planPlaceholder: 'ex. 100', save: 'Enregistrer',
-  open3d: '3D', open3dFailed: 'La vue 3D n\'a pas pu s\'ouvrir dans le navigateur.', open3dBig: '⤢ Plein écran',
-  follow: 'Suivre Claude', openLine: 'Ouvrir :', mapHelp: 'Clique sur une note pour l\'ouvrir. Clique ailleurs pour zoomer, clic droit pour dézoomer, glisse pour te déplacer.', subfolder: 'Sous-dossier…',
+  open3d: '3D', open3dFailed: 'Le plein écran n\'est pas disponible ici.', open3dBig: '⤢ Plein écran',
+  follow: 'Suivre Claude', openLine: 'Ouvrir :', mapHelp: 'Clic gauche sur une note pour l\'ouvrir. Glisser avec le bouton gauche déplace en 2D ou fait pivoter en 3D ; avec le bouton droit, déplace. Glisser avec le bouton central zoome ; la molette aussi si l\'hôte la transmet.', subfolder: 'Sous-dossier…',
   settings: 'Réglages', openWith: 'Ouvrir les fichiers avec', openWithWhy: "L'app dans laquelle s'ouvre un fichier quand tu cliques sur son nom.",
   openMd: 'Notes Markdown (.md)', openOther: 'Autres fichiers', defaultApp: 'App par défaut du système',
   display: 'Affichage', language: 'Langue', hoverNames: 'Noms au survol', hoverWhy: 'Sur la carte, survoler un point affiche le nom de son fichier.',
@@ -308,7 +305,6 @@ const fr: Strings = {
   hoFailed: "La passation n'a pas pu être écrite :",
   hoEmpty: "Rien à transmettre : la session n'a pas encore d'échange.",
   clear: 'Effacer le parcours', lang: 'English',
-  opened: 'Brain Trail ouvert.', later: "Brain Trail s'ouvrira quand l'app sera attachée à la session.",
   toastWarn: 'Contexte au-delà de 50 %. Brain Trail : pense à compacter.',
   toastBad: 'Contexte au-delà de 75 %. Brain Trail : passe à une nouvelle session.',
 }

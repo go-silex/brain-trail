@@ -2,6 +2,7 @@ import * as Bun from 'bun'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import type { DashboardFeed } from '../../types/browser'
+import type { AppNativeHost } from '../relay/client'
 import {
   startRelay,
   type RelayClient,
@@ -16,6 +17,7 @@ export async function startDashboardServer(
   feed: DashboardFeed,
   onFailure: (error: RelayRefusal) => void,
   onLaunchOutcome: (outcome: LaunchOutcome) => void,
+  appHost: AppNativeHost,
 ): Promise<DashboardServer> {
   const arch = process.arch === 'x64' ? 'amd64' : process.arch
   const platform = process.platform === 'win32' ? 'windows' : process.platform
@@ -81,5 +83,5 @@ export async function startDashboardServer(
       process.stderr.write(`Brain Trail: ${message}\n`)
     },
   }
-  return startRelay(io, binary, assets, feed)
+  return startRelay(io, binary, assets, feed, appHost)
 }

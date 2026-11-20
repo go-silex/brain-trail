@@ -66,7 +66,7 @@ func obsidianHandler() bool {
 	return err == nil && len(args) > 0 && strings.EqualFold(filepath.Base(args[0]), "Obsidian.exe")
 }
 
-func (s *relay) openPath(path, app, id string, generation int64, launchCode string) (string, error) {
+func (s *relay) openPath(path, app, id string, generation int64, launchCode string, scopes ...*Guard) (string, error) {
 	if app != "" {
 		selected, executable, err := selectedApp(app)
 		if err != nil {
@@ -75,15 +75,27 @@ func (s *relay) openPath(path, app, id string, generation int64, launchCode stri
 		if selected.name == "Obsidian" {
 			path = obsidianURL(path)
 			if executable == "obsidian-handler" {
-				if err := shellOpen(path); err != nil {
+				unlock, err := s.lockLaunchScope(scopes...)
+				if err != nil {
+					return "", err
+				}
+				err = shellOpen(path)
+				unlock()
+				if err != nil {
 					return "", err
 				}
 				return "dispatched", nil
 			}
 		}
-		return s.startLaunchForCode(exec.Command(executable, path), id, generation, launchCode)
+		return s.startLaunchForCode(exec.Command(executable, path), id, generation, launchCode, scopes...)
 	}
-	if err := shellOpen(path); err != nil {
+	unlock, err := s.lockLaunchScope(scopes...)
+	if err != nil {
+		return "", err
+	}
+	err = shellOpen(path)
+	unlock()
+	if err != nil {
 		return "", err
 	}
 	return "dispatched", nil

@@ -197,6 +197,10 @@ test('release CLI decides the shipped source against an explicit baseline', () =
       join(scriptsDir, 'check-release.mjs'),
       join(dir, 'scripts', 'check-release.mjs'),
     )
+    cpSync(
+      join(scriptsDir, 'build-mcpb.mjs'),
+      join(dir, 'scripts', 'build-mcpb.mjs'),
+    )
     writeFileSync(join(dir, '.gitignore'), 'node_modules\n')
     writeFileSync(hookConfig, maintained)
     writeFileSync(map, mapV1)
@@ -214,6 +218,7 @@ test('release CLI decides the shipped source against an explicit baseline', () =
         '.claude-plugin/plugin.json',
         '.claude-plugin/marketplace.json',
         'scripts/check-release.mjs',
+        'scripts/build-mcpb.mjs',
       ],
       env,
     )
@@ -251,6 +256,32 @@ test('release CLI decides the shipped source against an explicit baseline', () =
       `Source distribution runtime unchanged vs ${published}; plugin 2.1.1-rc.10.`,
     )
     writeFileSync(hookConfig, maintained)
+
+    mkdirSync(join(dir, 'hosts', 'mcp-app'), { recursive: true })
+    const appEntry = join(dir, 'hosts', 'mcp-app', 'main.ts')
+    writeFileSync(appEntry, 'export const entry = true\n')
+    assertFailed(run([published]), 'hosts/mcp-app/main.ts')
+    rmSync(appEntry)
+
+    const packager = join(dir, 'scripts', 'build-mcpb.mjs')
+    const originalPackager = readFileSync(packager, 'utf8')
+    const changedPackager = originalPackager.replace(
+      'View a paired native Brain Trail session.',
+      'View an attached native Brain Trail session.',
+    )
+    assert.notEqual(changedPackager, originalPackager)
+    writeFileSync(packager, changedPackager)
+    assertFailed(
+      run([published]),
+      `Runtime changed vs ${published} but plugin version 2.1.1-rc.10 did not increase from 2.1.1-rc.10:\nscripts/build-mcpb.mjs`,
+    )
+    writeManifests(dir, '2.1.1-rc.11')
+    assertOk(
+      run([published]),
+      'Source distribution 2.1.1-rc.11 > 2.1.1-rc.10 (',
+    )
+    writeFileSync(packager, originalPackager)
+    writeManifests(dir, '2.1.1-rc.10')
 
     writeFileSync(map, mapV2)
     writeManifests(dir, '2.1.1-rc.2')
@@ -818,23 +849,19 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
       actions: ['open-3d'],
     },
   }
-  assert.equal(
-    fixtureInputProblem(scenario, capture, structuredClone(capture)),
-    null,
-  )
-  const changed = structuredClone(capture)
+  const candidateCapture = structuredClone(capture)
+  candidateCapture.fixture.actions = ['copy-browser-link']
+  assert.equal(fixtureInputProblem(scenario, capture, candidateCapture), null)
+  const changed = structuredClone(candidateCapture)
   changed.fixture.input.state.events.value[0].p = 'notes/other.md'
-  assert.match(
-    fixtureInputProblem(scenario, capture, changed),
-    /transcripts differ/,
-  )
-  const omitted = structuredClone(capture)
+  assert.match(fixtureInputProblem(scenario, capture, changed), /inputs differ/)
+  const omitted = structuredClone(candidateCapture)
   omitted.fixture.actions = []
   assert.match(
     fixtureInputProblem(scenario, capture, omitted),
     /expected actions/,
   )
-  const missing = structuredClone(capture)
+  const missing = structuredClone(candidateCapture)
   delete missing.fixture.input.state.meter
   assert.match(fixtureInputProblem(scenario, capture, missing), /seeded state/)
   assert.match(
@@ -849,10 +876,12 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
     const next = structuredClone(capture)
     next.fixture.input.scenario = nextScenario
     next.fixture.actions = [action]
-    assert.equal(fixtureInputProblem(nextScenario, next, next), null)
+    const candidateNext = structuredClone(next)
+    candidateNext.fixture.actions = []
+    assert.equal(fixtureInputProblem(nextScenario, next, candidateNext), null)
     next.fixture.actions = []
     assert.match(
-      fixtureInputProblem(nextScenario, next, next),
+      fixtureInputProblem(nextScenario, next, candidateNext),
       /expected actions/,
     )
   }

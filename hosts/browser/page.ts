@@ -2,7 +2,6 @@
 import { makeIndex, type Index } from '../../hooks/files'
 import { createMapRenderer, DARK, LIGHT } from '../../hooks/map'
 import {
-  cameraDuringGesture,
   GESTURE0,
   VIEW_STATE0,
   mapGesture,
@@ -31,32 +30,23 @@ import type {
   ServerEvent,
 } from '../../types/browser'
 import { DomRenderer, runtime } from './dom'
+import type { DashboardTransport, PageBootstrap } from './transport'
+
+export async function toggleDocumentFullscreen() {
+  if (document.fullscreenElement) await document.exitFullscreen()
+  else await document.documentElement.requestFullscreen()
+}
 
 export function startPage(
   container: HTMLElement,
   status: HTMLElement,
   toastElement: HTMLElement,
+  transport: DashboardTransport,
+  bootstrap: PageBootstrap = {},
+  toggleFullscreen: () => Promise<void> = toggleDocumentFullscreen,
 ) {
-  const handoffUrl = new URL(window.location.href)
-  const rawGeneration = handoffUrl.searchParams.get('generation')
-  const path = handoffUrl.searchParams.get('file')
-  const hadHandoff = rawGeneration !== null || path !== null
-  const requestedGeneration =
-    rawGeneration !== null && /^[1-9]\d*$/.test(rawGeneration)
-      ? Number(rawGeneration)
-      : 0
-  let pendingFile =
-    Number.isSafeInteger(requestedGeneration) &&
-    requestedGeneration > 0 &&
-    path !== null &&
-    path !== ''
-      ? { generation: requestedGeneration, p: path }
-      : undefined
-  if (hadHandoff) {
-    handoffUrl.searchParams.delete('generation')
-    handoffUrl.searchParams.delete('file')
-    history.replaceState(history.state, '', handoffUrl)
-  }
+  let pendingFile = bootstrap.handoff
+  container.inert = false
   let state: ViewState = { ...VIEW_STATE0, view3d: true },
     memory: GestureMemory = { ...GESTURE0 }
   let generation = 0,
@@ -64,7 +54,7 @@ export function startPage(
     facts: FactsWire | undefined,
     layout: LayoutWire | undefined,
     index: Index | undefined
-  let frames: DrawnFrames = { d2: undefined, d3: undefined },
+  let frames: DrawnFrames = { d2: undefined },
     maps = createMapRenderer()
   let mapWidth = 0,
     mapHeight = 0
@@ -75,16 +65,17 @@ export function startPage(
       | { ref: PreviewRef; status: 'failed' }
       | undefined,
     previewSerial = 0,
-    ended = false
+    ended = false,
+    disposed = false
   const theme = matchMedia('(prefers-color-scheme: light)')
   const toast = (message: string) => {
+    if (disposed) return
     toastElement.textContent = message
     clearTimeout(toastTimer)
     toastTimer = window.setTimeout(() => {
       toastElement.textContent = ''
     }, 5000)
   }
-  if (hadHandoff && pendingFile === undefined) toast('Invalid file link')
   const reset = (next: number) => {
     generation = next
     revision = 0
@@ -93,7 +84,7 @@ export function startPage(
     index = undefined
     state = { ...VIEW_STATE0, view3d: true }
     memory = { ...GESTURE0 }
-    frames = { d2: undefined, d3: undefined }
+    frames = { d2: undefined }
     maps = createMapRenderer()
     preview = undefined
     previewSerial++
@@ -132,27 +123,27 @@ export function startPage(
   const command = async <C extends HostCommand>(
     cmd: C,
   ): Promise<CommandReplies[C['kind']] | undefined> => {
-    if (ended || generation === 0) {
+    if (disposed || ended || generation === 0) {
       toast('Session unavailable')
       return undefined
     }
     const currentGeneration = generation
     try {
-      const response = await fetch('command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ v: 1, generation, command: cmd }),
-        referrerPolicy: 'no-referrer',
+      const result = await transport.execute({
+        v: 1,
+        generation: currentGeneration,
+        command: cmd,
       })
-      const result: CommandReplies[C['kind']] | { ok: false; error: string } =
-        await response.json()
-      if (ended || generation !== currentGeneration) return undefined
+      if (disposed || ended || generation !== currentGeneration)
+        return undefined
       if (!result.ok) {
         toast(result.error)
         return undefined
       }
       return result
     } catch (error) {
+      if (disposed || ended || generation !== currentGeneration)
+        return undefined
       toast(error instanceof Error ? error.message : 'Command failed')
       return undefined
     }
@@ -165,6 +156,7 @@ export function startPage(
     preview = { ref, status: 'pending' }
     const result = await command({ kind: 'preview-read', ref })
     if (
+      disposed ||
       ended ||
       generation !== currentGeneration ||
       serial !== previewSerial ||
@@ -180,22 +172,33 @@ export function startPage(
   const intent = async (i: ViewIntent) => {
     if (ended || generation === 0) return
     if (isSharedViewIntent(i)) {
+      const origin3d = state.view3d
       const result = await command({ kind: 'view', intent: i })
       if (result === undefined) return
       apply(
-        plan(i, { now: Date.now(), frames }).filter(
+        plan(i, {
+          now: Date.now(),
+          frames,
+          view3d: i.kind === 'whole' ? origin3d : state.view3d,
+        }).filter(
           (step) =>
             step.key !== 'zoomed' &&
             step.key !== 'play' &&
             step.key !== 'preview',
         ),
       )
-      if (i.kind === 'whole' || (i.kind === 'follow' && i.following))
-        dom.resetScene()
       render()
+      // after the scene took the new props (a zoom change scales its camera): it fits the whole
+      // brain again, whatever its own camera did, even when the props did not change; a reset
+      // of the 2D map leaves the 3D scene's camera alone
+      if (
+        (i.kind === 'whole' && origin3d && state.view3d) ||
+        (i.kind === 'follow' && i.following)
+      )
+        dom.resetScene()
       return
     }
-    const steps = plan(i, { now: Date.now(), frames })
+    const steps = plan(i, { now: Date.now(), frames, view3d: state.view3d })
     if (steps.some((step) => step.key === 'zoomed') && state.zoomed) {
       if (
         (await command({ kind: 'view', intent: { kind: 'whole' } })) ===
@@ -273,14 +276,13 @@ export function startPage(
     retryLayout: () => {
       void command({ kind: 'retry-layout' })
     },
+    // The map view reports a failure with the localized open3dFailed message.
     open3d: async () => {
       if (ended) return false
       try {
-        if (document.fullscreenElement) await document.exitFullscreen()
-        else await document.documentElement.requestFullscreen()
+        await toggleFullscreen()
         return true
       } catch {
-        toast('Fullscreen unavailable')
         return false
       }
     },
@@ -314,7 +316,16 @@ export function startPage(
     },
     wheel: (by, fx, fy) => {
       if (ended || state.tab !== 'map') return false
-      const steps = mapWheel(by, state.view3d, { fx, fy }, frames)
+      const result = mapWheel(
+        by,
+        state.view3d,
+        { fx, fy },
+        memory,
+        frames,
+        Date.now(),
+      )
+      memory = result.memory
+      const steps = result.steps
       if (!steps.length) return false
       if (steps.some((step) => step.key === 'zoomed') && state.zoomed)
         void command({ kind: 'view', intent: { kind: 'whole' } })
@@ -341,7 +352,7 @@ export function startPage(
     },
   })
   function render() {
-    if (facts === undefined || ended) return
+    if (disposed || facts === undefined || ended) return
     container.dataset.tab = state.tab
     const f = facts,
       connected = new Map(f.connected.map(([k, v]) => [k, new Set(v)])),
@@ -416,14 +427,13 @@ export function startPage(
         )
           return
         else {
-          const cam3d = cameraDuringGesture(state.cam3d, memory)
           body = {
             tab: 'map',
             kind: 'ready',
             layout: layout.layout,
             shallow: f.workspace.shallow,
             fold: { ...fold, index },
-            state: cam3d === state.cam3d ? state : { ...state, cam3d },
+            state,
           }
         }
         break
@@ -443,8 +453,12 @@ export function startPage(
       ),
       lang: f.lang,
       assistant: f.assistant,
-      costInfoCommand: '/session info',
-      palette: theme.matches ? LIGHT : DARK,
+      costInfoCommand: f.ownerHost === 'code' ? '/cost' : '/session info',
+      palette:
+        document.documentElement.dataset.theme === 'light' ||
+        (document.documentElement.dataset.theme !== 'dark' && theme.matches)
+          ? LIGHT
+          : DARK,
       meter: f.meter,
       events: f.events,
       open: state.open,
@@ -468,33 +482,20 @@ export function startPage(
     }
     const out = renderPane(runtime, snapshot, actions, maps)
     if (out.drawn?.kind === '2d') frames = { ...frames, d2: out.drawn.frame }
-    else if (out.drawn?.kind === '3d')
-      frames = { ...frames, d3: out.drawn.frame }
     dom.hoverNames = f.settings.hover
     dom.render(out.node)
   }
-  const events = new EventSource('events')
-  events.onopen = () => {
-    status.textContent = ''
-  }
-  events.onerror = () => {
-    events.close()
-    ended = true
-    previewSerial++
-    container.inert = true
-    dom.dispose()
-    status.textContent = 'Connection lost. Reopen from the host.'
-  }
-  events.onmessage = (message) => {
-    if (ended) return
-    let event: ServerEvent
-    try {
-      event = JSON.parse(message.data) as ServerEvent
-    } catch {
+  const onEvent = (event: ServerEvent) => {
+    if (disposed || ended) return
+    if (event.v !== 1 || event.generation < generation) return
+    if (
+      event.kind === 'snapshot' &&
+      event.facts?.ownerHost !== 'code' &&
+      event.facts?.ownerHost !== 'omp'
+    ) {
       toast('Invalid dashboard event')
       return
     }
-    if (event.v !== 1 || event.generation < generation) return
     if (
       pendingFile !== undefined &&
       (event.generation !== pendingFile.generation || event.kind === 'ended')
@@ -504,12 +505,7 @@ export function startPage(
     }
     if (event.generation > generation) reset(event.generation)
     if (event.kind === 'ended') {
-      ended = true
-      previewSerial++
-      container.inert = true
-      dom.dispose()
-      status.textContent = 'Session ended'
-      events.close()
+      close('ended')
       return
     }
     if (event.kind === 'layout') {
@@ -543,21 +539,60 @@ export function startPage(
   }
   const resizeObserver = new ResizeObserver(render)
   resizeObserver.observe(container)
+  const themeObserver = new MutationObserver(render)
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
   theme.addEventListener('change', render)
   const redraw = window.setInterval(() => {
     if (!ended && facts?.workspace.kind === 'loading') render()
   }, 1000)
-  window.addEventListener(
-    'pagehide',
-    () => {
-      ended = true
-      events.close()
-      resizeObserver.disconnect()
-      theme.removeEventListener('change', render)
-      clearInterval(redraw)
-      clearTimeout(toastTimer)
-      dom.dispose()
+  let unsubscribe = () => {}
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    ended = true
+    previewSerial++
+    unsubscribe()
+    resizeObserver.disconnect()
+    theme.removeEventListener('change', render)
+    window.removeEventListener('pagehide', dispose)
+    themeObserver.disconnect()
+    clearInterval(redraw)
+    clearTimeout(toastTimer)
+    pendingFile = undefined
+    facts = undefined
+    layout = undefined
+    index = undefined
+    preview = undefined
+    state = { ...VIEW_STATE0, view3d: true }
+    memory = { ...GESTURE0 }
+    frames = { d2: undefined }
+    maps = createMapRenderer()
+    container.inert = true
+    delete container.dataset.tab
+    dom.dispose()
+    toastElement.textContent = ''
+  }
+  const close = (reason: 'ended' | 'revoked' | 'disconnected') => {
+    if (disposed) return
+    dispose()
+    status.textContent =
+      reason === 'ended'
+        ? 'Session ended'
+        : reason === 'revoked'
+          ? 'Access revoked'
+          : 'Connection lost. Reopen from the host.'
+  }
+  window.addEventListener('pagehide', dispose)
+  unsubscribe = transport.listen({
+    ready: () => {
+      if (!disposed) status.textContent = ''
     },
-    { once: true },
-  )
+    event: onEvent,
+    closed: close,
+  })
+  if (disposed) unsubscribe()
+  return dispose
 }

@@ -4,7 +4,7 @@
 
 # Brain Trail
 
-A pane beside the Claude Code chat. It shows what your session put in front of the model: the files it read and wrote, the ones it only saw in a search or through a link, and the tools it called.
+A shared web dashboard for your native Claude Code or Oh My Pi session, available in a browser or a Desktop MCP App. It shows the files the session read and wrote, the ones it only saw in a search or through a link, and the tools it called. Chat can view an explicitly paired native session; it is not automatically traced.
 
 You see why Claude answers the way it does, what it never looked at, and when its context starts to work against you.
 
@@ -17,7 +17,7 @@ You see why Claude answers the way it does, what it never looked at, and when it
 
 <sub>A session preparing a client call, on a demo company brain (made-up notes). Claude reads the account, the kickoff notes and the proposal, checks the CRM, the inbox and the calendar, then writes a call prep.</sub>
 
-## Install (30 seconds)
+## Install
 
 ### 1. Get the plugin
 
@@ -60,15 +60,27 @@ claude plugin update brain-trail-v2
 claude plugin uninstall brain-trail-v2
 ```
 
-Had an earlier copy in `~/.claude/mods/`? Remove it, or two panes open.
+Had an earlier copy in `~/.claude/mods/`? Remove it to avoid loading the plugin twice.
 
 </details>
 
-### 2. Open a new session
+### 2. Choose a dashboard surface
 
-The pane opens by itself beside the chat, whatever the folder: a code project, an Obsidian vault, a client folder. Closed it? Type `/brain-trail-v2`.
+With the [Desktop MCP server](#desktop-mcp-app) registered, use **Open Brain Trail** in the Desktop prompt band. If the band is disabled or collapsed, type `/brain-trail-v2` for the same explicit controls. The native control calls the discovered opener directly; it does not send a model prompt. Actual Desktop rendering and routing remain release-acceptance checks.
 
-The map is drawn in the desktop app. The terminal shows the text tabs only.
+For a browser, choose **Copy link**, then paste into the address bar of a live Claude Browser tab or an external browser—not into the conversation. Copying does not open a tab automatically. The private link expires shortly and works once; issue a new one if it expires, and treat it like a password.
+
+The native plugin captures activity and owns session state, permissions, files and the relay. The App and browser render the same dashboard; there is no second native graph engine.
+
+### Desktop MCP App
+
+The separate Desktop MCP server uses the matching shipped Go executable and App assets; it does not require end users to install Node, Bun or Go. For manual stdio configuration, register it under the key `brain-trail`, with the absolute executable path as command and `mcp` followed by the absolute App-assets directory as arguments. MCPB installation may assign a host-generated server name; that name and native Code binding to it are not established. Do not add a second server registration to the native plugin.
+
+The App is a viewer/controller for a deliberately paired native Code or OMP session, not automatic tracing of a Chat conversation. The six binary targets cover Linux, macOS and Windows on x64 and arm64; target availability is not proof of host installation or sandbox compatibility. Actual host tool forwarding, pairing and model-free opening require separate verification. Existing browser and OMP launch instructions remain independent of this registration.
+
+To view a native session in Chat, choose **Pair with Chat** in that session's native controls or browser dashboard. Paste the one-use envelope into the Brain Trail App's pairing field, not into the chat prompt. Detach before choosing another session. A restored view with missing private state remains detached; **Reset view** creates a fresh unpaired view, never automatic reconnection.
+
+Inline, a paired App asks the host for a height derived from its width, about 900 px in a 736 px Claude Chat column, and stays within any maximum height the host announces. In 3D, **Full screen** uses the host's full-screen display mode when the host offers one, and the browser's full-screen mode otherwise.
 
 ### Oh My Pi
 
@@ -78,7 +90,7 @@ With Oh My Pi 18.18.9, install a local checkout and start a new session:
 omp install /path/to/brain-trail
 ```
 
-Type `/brain-trail` to open the dashboard in your browser. Claude and OMP use the same views and controller: the native pane uses SVG and the browser offers WebGL. Both use the Go relay's application registry and the same opening-settings model, while each host retains its own settings. An optional context and cost band appears above the OMP input; you can turn it on or off in Settings.
+Type `/brain-trail` to open the same dashboard in your browser. OMP and Claude use the Go relay's application registry and the same opening-settings model, while each host retains its own settings. An optional context and cost band appears above the OMP input; you can turn it on or off in Settings.
 
 ChatGPT is not supported yet.
 
@@ -96,26 +108,26 @@ Your folder as one disc: one circle per folder, one dot per file. Every file tha
 
 The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc with their logo and their call count. The legend under the map counts each colour; click it to list the files.
 
-Follow the session as it works, replay it step by step, and zoom with the wheel. The **3D** button changes the map's renderer; **Full screen** opens the shared interface in your browser. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each surface.
+Follow the session as it works and replay it step by step. The **3D** button switches between the browser's 2D SVG and 3D Three.js views. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each browser surface.
+
+3D requires WebGL in the browser hosting the dashboard. If WebGL is unavailable, a notice preserves access to the rest of the dashboard: choose **2D** or use a browser with WebGL. Where supported, check the host's graphics acceleration settings.
+
+Dashboard navigation:
+
+| Gesture | 2D | 3D |
+| --- | --- | --- |
+| Wheel | Zoom toward the pointer | Zoom toward the pointer |
+| Middle-button vertical drag | Zoom out when dragging down, in when dragging up | Same |
+| Left-button drag | Move the map | Turn the scene |
+| Right-button drag | Move the map | Move the scene without turning it |
+
+Only a left click opens a note; pressing several mouse buttons together never opens one. Wheel zoom during a drag is retained when the drag continues. Manual navigation stops following Claude; a drag pauses automatic rotation and restores the prior rotation choice when it ends. The **⤢** control in the 3D toolbar fits the scene back into view. Resetting either view preserves the other view's camera.
 
 Browser 3D adapts to the theme: dark mode uses restrained ambient connections and activity glows; light mode retains its point rendering without bloom.
 
-Opening the browser or a file reports that the launch was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
+Copying a link does not open the dashboard; paste it into a browser address bar. OMP browser launches and file launches report that an opener was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
 
-In a docked Claude Desktop pane, every tab stays within the available height:
-the header and footer remain fixed, and the map fits the space between them.
-Long text tabs navigate inside their body with the wheel, page keys, or the
-First, Previous, Next and Last page buttons. The host reports Home/End like
-page keys, so use First/Last to jump to the ends. Extremely short panes ask you
-to enlarge the pane; the full interface returns when space is available. Inline panes, the terminal
-and the OMP dashboard retain their content-height layout. Desktop sizing uses
-the host's cell measurements, so font and density settings affect pixel scale.
-The map's Client holder uses a pane-height bound and Desktop's flex-shrink
-behavior to match the allocated paint height.
-The map image stretches across its allocated paint area on Desktop.
-Fitted 3D activity glows are bounded so new reads and writes do not move the
-camera. Hiding the map during a drag preserves its final orientation and
-restores rotation only if it was running before the drag.
+The browser dashboard adapts to its available space. Resizing and fit behavior should be checked in the actual browser surface used with the host.
 
 Inside an Obsidian vault, the map shows the whole vault, even when the session started in a sub-folder.
 
@@ -158,4 +170,4 @@ Report vulnerabilities privately using the contact in [SECURITY.md](SECURITY.md)
 
 </details>
 
-MIT license. `hooks/vendor/d3-hierarchy` is ISC. The browser bundle includes its third-party licenses; Go and x/sys licenses are in `hosts/relay/bin/`.
+MIT license. `hooks/vendor/d3-hierarchy` is ISC. Web bundles include third-party notices; Go, MCP SDK and linked-module licenses are in `hosts/relay/bin/` and the MCPB archives.

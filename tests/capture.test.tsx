@@ -6,19 +6,6 @@ import type { TrailEvent } from '../types'
 const HOME = '/Users/me'
 const VAULT = `${HOME}/vault`
 const CWD = `${VAULT}/clients/acme`
-const PANE = {
-  plugin: 'brain-trail-v2',
-  component: 'Pane',
-  requestId: 'brain-trail-v2',
-  props: {
-    title: 'Brain Trail',
-    isFocused: false,
-    bodyColumns: 60,
-    placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
-    view: {},
-  },
-} as const
 
 const FILES = [
   'notes/Plan.md',
@@ -32,14 +19,6 @@ const NOTES: Record<string, string> = { 'notes/Plan.md': 'See [[Ideas]]\n' }
 type Run = { argv: string[]; cwd?: string }
 const runs: Run[] = []
 const outs: string[] = []
-
-const altOf = (el: unknown) => {
-  if (el === null || typeof el !== 'object' || !('props' in el)) return ''
-  const props = el.props
-  if (props === null || typeof props !== 'object' || !('alt' in props))
-    return ''
-  return typeof props.alt === 'string' ? props.alt : ''
-}
 
 const eventsOf = (raw: unknown): TrailEvent[] => {
   if (Array.isArray(raw)) return raw as TrailEvent[]
@@ -172,26 +151,4 @@ test('a tool call records a search, a connector, a read and a link, and a vault 
     ),
     'rg from cwd seen',
   ).toBe(true)
-
-  const first = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await first.unmount()
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  const map = (await ui.findAll({ type: 'Svg' })).find((el) =>
-    altOf(el).includes('files touched'),
-  )
-  expect(altOf(map)).toContain('vault:')
-  expect(await ui.find({ key: 'play' })).toBeDefined()
-  await ui.press({ key: 'play' })
-  expect(await ui.find({ key: 'lg-btn-read', text: '1 read' })).toBeDefined()
-  expect(await ui.find({ key: 'lg-mcp' })).toBeUndefined()
-  await ui.press({ key: 't-files' })
-  await ui.press({ key: 'kpi-open-read' })
-  expect(await ui.find({ key: 'kd-open-notes/Plan.md' })).toBeDefined()
-  expect(await ui.find({ key: 'kd-open-notes/Secret.md' })).toBeDefined()
-  await ui.press({ key: 'kpi-open-linked' })
-  expect(await ui.find({ key: 'kd-open-notes/Ideas.md' })).toBeDefined()
-  await ui.press({ key: 'kpi-open-found' })
-  expect(await ui.find({ key: 'kd-open-clients/acme/brief.md' })).toBeDefined()
-  expect(await ui.find({ key: 'kd-open-notes/Other.md' })).toBeDefined()
-  await ui.unmount()
 })

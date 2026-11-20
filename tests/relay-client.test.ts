@@ -239,3 +239,243 @@ test('launch outcomes are correlated before receipts, nonfatal, and generation-s
     client.close()
   }
 })
+
+test('browser link rejects stale and closed requests across the transport boundary', async () => {
+  let generation = 1
+  let listener = (_event: ServerEvent) => {}
+  let token = 0
+  let resolveLink:
+    | ((value: { status: number; body: string }) => void)
+    | undefined
+  const requests: Array<Record<string, unknown>> = []
+  let notifyLaunch = () => {}
+  const nextLaunch = () =>
+    new Promise<void>((resolve) => {
+      notifyLaunch = resolve
+    })
+  const feed = {
+    current: () => ({
+      generation,
+      revision: 1,
+      layout: undefined,
+      facts: {},
+      shared: {},
+    }),
+    subscribe: (onEvent: (event: ServerEvent) => void) => {
+      listener = onEvent
+      return () => {}
+    },
+    execute: async () => ({ ok: true }),
+  } as unknown as DashboardFeed
+  const io: RelayIO = {
+    async start(_binary, _args, _stdin, onChunk) {
+      onChunk(
+        `${JSON.stringify({ t: 'hello', protocol: 1, socket: '/private/relay.sock' })}\n`,
+      )
+      return { close() {} }
+    },
+    request(_socket, _token, route, body) {
+      if (route === '/h/launch') {
+        requests.push(JSON.parse(body) as Record<string, unknown>)
+        return new Promise((resolve) => {
+          resolveLink = resolve
+          notifyLaunch()
+        })
+      }
+      return Promise.resolve({ status: 200, body: '{"ok":true}' })
+    },
+    schedule: () => () => {},
+    onFailure: () => {},
+    onLaunchOutcome: () => {},
+    randomToken: () => `token-${++token}`,
+    log: () => {},
+  }
+  const client = await startRelay(io, '/relay', '/assets', feed)
+  const refusal = async (operation: Promise<unknown>) => {
+    try {
+      await operation
+      return ''
+    } catch (error) {
+      return error instanceof RelayRefusal ? error.code : 'unexpected'
+    }
+  }
+  const response = () => ({
+    status: 200,
+    body: JSON.stringify({
+      ok: true,
+      url: `http://127.0.0.1:1234/launch/${'a'.repeat(43)}`,
+      expiresAt: Date.now() + 60_000,
+    }),
+  })
+  try {
+    expect(
+      await refusal(Promise.resolve().then(() => client.prepareBrowserLink(2))),
+    ).toBe('stale-generation')
+    expect(requests).toEqual([])
+    const firstStarted = nextLaunch()
+    const first = client.prepareBrowserLink(1)
+    await firstStarted
+    resolveLink?.(response())
+    const link = await first
+    expect(link.url).toBe(`http://127.0.0.1:1234/launch/${'a'.repeat(43)}`)
+    expect(link.expiresAt > Date.now()).toBe(true)
+
+    for (const url of [
+      `http://localhost:1234/launch/${'a'.repeat(43)}`,
+      `http://127.0.0.1:1234/s/${'a'.repeat(43)}`,
+    ]) {
+      const started = nextLaunch()
+      const invalid = client.prepareBrowserLink(1)
+      await started
+      resolveLink?.({
+        status: 200,
+        body: JSON.stringify({ ok: true, url, expiresAt: Date.now() + 60_000 }),
+      })
+      expect(await refusal(invalid)).toBe('invalid')
+    }
+
+    const oldStarted = nextLaunch()
+    const old = client.prepareBrowserLink(1)
+    const oldResult = refusal(old)
+    await oldStarted
+    const replacementStarted = nextLaunch()
+    const replacement = client.prepareBrowserLink(1)
+    resolveLink?.(response())
+    expect(await oldResult).toBe('stale-generation')
+    await replacementStarted
+    resolveLink?.(response())
+    expect((await replacement).url).toBe(
+      `http://127.0.0.1:1234/launch/${'a'.repeat(43)}`,
+    )
+
+    const pendingStarted = nextLaunch()
+    const pending = client.prepareBrowserLink(1)
+    await pendingStarted
+    generation = 2
+    resolveLink?.(response())
+    expect(await refusal(pending)).toBe('stale-generation')
+    listener({ v: 1, kind: 'ended', generation: 2 })
+    expect(
+      await refusal(Promise.resolve().then(() => client.prepareBrowserLink(2))),
+    ).toBe('stale-generation')
+    generation = 3
+    const closedStarted = nextLaunch()
+    const closed = client.prepareBrowserLink(3)
+    await closedStarted
+    const closedResult = refusal(closed)
+    client.close()
+    resolveLink?.(response())
+    expect(await closedResult).toBe('disconnected')
+    expect(
+      await refusal(Promise.resolve().then(() => client.prepareBrowserLink(3))),
+    ).toBe('disconnected')
+  } finally {
+    client.close()
+  }
+})
+
+for (const ending of [false, true])
+  test(`${ending ? 'end' : 'generation update'} cannot overtake an in-flight publication`, async () => {
+    let receive = (_chunk: string) => {}
+    let listener = (_event: ServerEvent) => {}
+    let generation = 1
+    let serverGeneration = 0
+    let serverEnded = false
+    let releaseEvent: (() => void) | undefined
+    let held = false
+    const failures: string[] = []
+    const requests: Array<{
+      route: string
+      generation: number
+      kind?: string
+    }> = []
+    const feed = {
+      current: () => ({
+        generation,
+        revision: 1,
+        layout: {},
+        facts: {},
+        shared: {},
+      }),
+      subscribe: (callback: (event: ServerEvent) => void) => {
+        listener = callback
+        return () => {}
+      },
+      execute: async () => ({ ok: true }),
+    } as unknown as DashboardFeed
+    const io: RelayIO = {
+      async start(_binary, _args, _stdin, onChunk) {
+        receive = onChunk
+        onChunk(
+          `${JSON.stringify({ t: 'hello', protocol: 1, socket: '/private/relay.sock' })}\n`,
+        )
+        return { close() {} }
+      },
+      request(_socket, _token, route, raw) {
+        const body = JSON.parse(raw) as { generation?: number; kind?: string }
+        const value = body.generation ?? 0
+        requests.push({ route, generation: value, kind: body.kind })
+        const complete = () => {
+          if (
+            route === '/h/event' &&
+            (value < serverGeneration || (serverEnded && body.kind !== 'ended'))
+          )
+            return { status: 409, body: '{}' }
+          if (route === '/h/event' || route === '/h/generation')
+            serverGeneration = Math.max(serverGeneration, value)
+          if (route === '/h/event' && body.kind === 'ended') serverEnded = true
+          return { status: 200, body: '{"ok":true}' }
+        }
+        if (route === '/h/event' && value === 1 && !held) {
+          held = true
+          return new Promise((resolve) => {
+            releaseEvent = () => resolve(complete())
+          })
+        }
+        return Promise.resolve(complete())
+      },
+      schedule: () => () => {},
+      onFailure: (error) => {
+        failures.push(error.code)
+      },
+      onLaunchOutcome: () => {},
+      randomToken: () => 'token',
+      log: () => {},
+    }
+    const client = await startRelay(io, '/relay', '/assets', feed)
+    const settle = async () => {
+      for (let i = 0; i < 80; i++) await Promise.resolve()
+    }
+    try {
+      receive(`${JSON.stringify({ t: 'clients', n: 1, seq: 1 })}\n`)
+      await settle()
+      expect(held).toBe(true)
+      if (ending) listener({ v: 1, kind: 'ended', generation: 1 })
+      else {
+        generation = 2
+        listener({
+          v: 1,
+          kind: 'layout',
+          generation: 2,
+          layout: {},
+        } as ServerEvent)
+      }
+      await settle()
+      expect(
+        requests.some((item) =>
+          ending
+            ? item.kind === 'ended'
+            : item.route === '/h/generation' && item.generation === 2,
+        ),
+      ).toBe(false)
+      releaseEvent?.()
+      await settle()
+      expect(failures).toEqual([])
+      expect(client.isClosed()).toBe(false)
+      expect(serverGeneration).toBe(ending ? 1 : 2)
+      expect(serverEnded).toBe(ending)
+    } finally {
+      releaseEvent?.()
+      client.close()
+    }
+  })

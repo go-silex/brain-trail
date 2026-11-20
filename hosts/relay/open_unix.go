@@ -62,10 +62,10 @@ func openCommand(path, app string) (*exec.Cmd, error) {
 	return exec.Command(executable, path), nil
 }
 
-func (s *relay) openPath(path, app, id string, generation int64, launchCode string) (string, error) {
+func (s *relay) openPath(path, app, id string, generation int64, launchCode string, scopes ...*Guard) (string, error) {
 	command, err := openCommand(path, app)
 	if err != nil {
 		return "", err
 	}
-	return s.startLaunchForCode(command, id, generation, launchCode)
+	return s.startLaunchForCode(command, id, generation, launchCode, scopes...)
 }

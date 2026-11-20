@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -79,6 +80,50 @@ try {
         copyFileSync(output, join(dist, name))
         chmodSync(join(dist, name), 0o755)
       }
+    }
+  }
+  // These modules are linked by the MCP server; copy their exact upstream
+  // license texts from the pinned module cache after the builds populate it.
+  const moduleCache = spawnSync('go', ['env', 'GOMODCACHE'], {
+    cwd: relay,
+    encoding: 'utf8',
+    env,
+  })
+  if (moduleCache.status !== 0 || !moduleCache.stdout.trim())
+    throw new Error(
+      `Cannot locate Go module cache: ${moduleCache.stderr || moduleCache.error}`,
+    )
+  const notices = [
+    [
+      'LICENSE-mcp-go-sdk',
+      'github.com/modelcontextprotocol/go-sdk@v1.8.0/LICENSE',
+    ],
+    ['LICENSE-jsonschema-go', 'github.com/google/jsonschema-go@v0.4.3/LICENSE'],
+    [
+      'LICENSE-uritemplate',
+      'github.com/yosida95/uritemplate/v3@v3.0.2/LICENSE',
+    ],
+    [
+      'LICENSE-segmentio-encoding',
+      'github.com/segmentio/encoding@v0.5.4/LICENSE',
+    ],
+    ['LICENSE-segmentio-asm', 'github.com/segmentio/asm@v1.1.3/LICENSE'],
+    ['LICENSE-x-oauth2', 'golang.org/x/oauth2@v0.35.0/LICENSE'],
+    ['LICENSE-x-sync', 'golang.org/x/sync@v0.20.0/LICENSE'],
+    ['LICENSE-x-time', 'golang.org/x/time@v0.15.0/LICENSE'],
+  ]
+  for (const [name, source] of notices) {
+    const origin = join(moduleCache.stdout.trim(), source)
+    const destination = join(dist, name)
+    if (check) {
+      if (!readFileSync(origin).equals(readFileSync(destination)))
+        throw new Error(`${name} differs from the pinned Go module`)
+    } else {
+      // Go's module cache is read-only; copied files inherit its mode.
+      // Repair earlier generated copies before replacing their contents.
+      if (existsSync(destination)) chmodSync(destination, 0o644)
+      copyFileSync(origin, destination)
+      chmodSync(destination, 0o644)
     }
   }
 } finally {

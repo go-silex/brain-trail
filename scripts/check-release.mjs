@@ -97,6 +97,8 @@ function nonRuntime(path) {
     return true
   if (path === 'types/contracts.ts') return true
   if (path.startsWith('docs/')) return true
+  // This script defines the separately distributed MCPB manifest and archive.
+  if (path === 'scripts/build-mcpb.mjs') return false
   if (
     path.endsWith('/LICENSE') ||
     path.endsWith('/README.md') ||

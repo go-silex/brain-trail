@@ -42,6 +42,7 @@ type heldFile struct {
 	workspaceInfo os.FileInfo
 	expires       time.Time
 	timer         *time.Timer
+	scope         *Guard
 }
 
 type FileAuthority struct {
@@ -64,7 +65,7 @@ func (h *heldFile) close() {
 
 // Prepare opens the workspace and file through directory capabilities. The
 // displayed path comes from the held descriptor, never directly from input.
-func (a *FileAuthority) Prepare(root, path string) (FilePrepared, error) {
+func (a *FileAuthority) Prepare(root, path string, scope ...*Guard) (FilePrepared, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
@@ -131,6 +132,10 @@ func (a *FileAuthority) Prepare(root, path string) (FilePrepared, error) {
 		return FilePrepared{}, err
 	}
 	h := &heldFile{file: file, parent: parent, workspace: workspace, workspaceDir: workspaceDir, workspacePath: workspacePath, requestedRoot: root, requestedPath: path, workspaceInfo: workspaceInfo}
+	if len(scope) > 0 && scope[0] != nil {
+		copy := *scope[0]
+		h.scope = &copy
+	}
 	defer func() {
 		if h != nil {
 			h.close()
@@ -262,6 +267,20 @@ func (a *FileAuthority) Verify(id string) (string, error) {
 		return "", err
 	}
 	return h.path, nil
+}
+
+func (a *FileAuthority) Scope(id string) (*Guard, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	h, ok := a.handles[id]
+	if !ok || !time.Now().Before(h.expires) {
+		return nil, errors.New("unknown or expired file handle")
+	}
+	if h.scope == nil {
+		return nil, nil
+	}
+	copy := *h.scope
+	return &copy, nil
 }
 
 func (a *FileAuthority) Release(id string) {

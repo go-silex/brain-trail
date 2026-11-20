@@ -1,128 +1,194 @@
+import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
+import { latestSnapshot } from './fixtures/mounted'
+import { mountReady, type ViewCase } from './fixtures/views'
 
-const PANE = {
-  plugin: 'brain-trail-v2',
-  component: 'Pane',
-  requestId: 'brain-trail-v2',
-  props: {
-    title: 'Brain Trail',
-    isFocused: false,
-    bodyColumns: 60,
-    placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
-    view: {},
+const scenario: ViewCase = {
+  id: 'coach-feed',
+  component: 'AbovePrompt',
+  surface: 'desktop',
+  theme: 'dark',
+  lang: 'en',
+  tab: 'map',
+  phase: 'ready',
+  view3d: false,
+  browser3d: true,
+  transition: 'none',
+}
+
+test(
+  'coach analysis is published and a refused overlapping request leaves the first active',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.setForkResult(
+      '## Your requests\nBe specific.\n## Add to CLAUDE.md\n```context\n- Offers are in 01_COMPANY/Offer.\n```',
+    )
+    host.holdFork()
+    try {
+      await ui.press({ key: 'copy-browser-link' })
+      await host.browserReady
+      const generation = latestSnapshot(host.browserEvents)!.generation
+      const first = host.command(generation, { kind: 'coach-analyse' })
+      await host.forkStarted
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: false, error: 'busy' },
+      )
+      host.releaseFork()
+      expect(await first).toEqual({ ok: true })
+      await host.clock.settle()
+      expect(latestSnapshot(host.browserEvents)?.facts.coach.busy).toBe(false)
+      expect(await host.command(generation, { kind: 'coach-apply' })).toEqual({
+        ok: true,
+        filled: true,
+      })
+      expect(host.promptFills[0]).toContain('01_COMPANY/Offer')
+      expect(
+        latestSnapshot(host.browserEvents)?.facts.coach.text.length,
+      ).toBeGreaterThan(0)
+    } finally {
+      host.releaseFork()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
   },
-} as const
+)
 
-// a short request that made Claude search six times and read the same note three times
-const EVENTS = [
-  { k: 'prompt', text: 'Fais le point', at: 1 },
-  ...Array.from({ length: 6 }, (_, i) => ({
-    k: 'act',
-    tool: 'Grep',
-    what: `q${i}`,
-    at: 2 + i,
-  })),
-  ...Array.from({ length: 3 }, (_, i) => ({
-    k: 'read',
-    p: 'notes/a.md',
-    at: 10 + i,
-  })),
-  ...Array.from({ length: 3 }, (_, i) => ({
-    k: 'act',
-    tool: 'Read',
-    what: 'a.md',
-    at: 10 + i,
-  })),
-]
+test(
+  'a refused coach analysis publishes an error and allows retry',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    try {
+      await ui.press({ key: 'copy-browser-link' })
+      await host.browserReady
+      const generation = latestSnapshot(host.browserEvents)!.generation
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: true },
+      )
+      await host.clock.settle()
+      expect(
+        latestSnapshot(host.browserEvents)?.facts.coach.error,
+      ).toBeDefined()
+      host.setForkResult('Analysis completed')
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: true },
+      )
+      await host.clock.settle()
+      expect(
+        latestSnapshot(host.browserEvents)?.facts.coach.error,
+      ).toBeUndefined()
+      expect(latestSnapshot(host.browserEvents)?.facts.coach.text).toBe(
+        'Analysis completed',
+      )
+    } finally {
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
 
-test('the coach turns the session into tips, and fills the prompt box to apply them', async ($, on) => {
-  const filled: string[] = []
-  on('state.get', (_$, e, next) => {
-    if (e.key === 'lang') return { value: { value: 'fr', version: 1 } }
-    if (e.key === 'events')
-      return {
-        value: { value: { shape: 'events-1', value: EVENTS }, version: 1 },
+test(
+  'cancelled App coaching retires only its reservation while model work remains pending',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.holdFork()
+    host.setForkResult('new analysis')
+    const busy = (want: boolean) =>
+      host.waitForState(
+        ({ key, value }) =>
+          key === 'coach' &&
+          typeof value === 'object' &&
+          value !== null &&
+          'value' in value &&
+          typeof value.value === 'object' &&
+          value.value !== null &&
+          'busy' in value.value &&
+          value.value.busy === want,
+      )
+    try {
+      await ui.press({ key: 'copy-browser-link' })
+      await host.browserReady
+      const generation = latestSnapshot(host.browserEvents)!.generation
+      host.appCoach(generation)
+      await host.forkStarted
+      const retired = busy(false)
+      host.cancelAppCoach(generation)
+      await retired
+      const reserved = busy(true)
+      const second = host.command(generation, { kind: 'coach-analyse' })
+      await reserved
+      host.releaseFork()
+      expect(await second).toEqual({ ok: true })
+      await host.clock.settle()
+      expect(latestSnapshot(host.browserEvents)?.facts.coach.busy).toBe(false)
+      expect(latestSnapshot(host.browserEvents)?.facts.coach.text).toBe(
+        'new analysis',
+      )
+    } finally {
+      host.releaseFork()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
+  'cancelled forks remain bounded across clear without blocking short controls',
+  { timeoutMs: 30_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.holdFork()
+    host.setForkResult('completed')
+    const busy = (want: boolean) =>
+      host.waitForState(
+        ({ key, value }) =>
+          key === 'coach' &&
+          typeof value === 'object' &&
+          value !== null &&
+          'value' in value &&
+          typeof value.value === 'object' &&
+          value.value !== null &&
+          'busy' in value.value &&
+          value.value.busy === want,
+      )
+    try {
+      await ui.press({ key: 'copy-browser-link' })
+      await host.browserReady
+      let generation = latestSnapshot(host.browserEvents)!.generation
+      for (let index = 0; index < 16; index++) {
+        const started = host.waitForForks(index + 1)
+        host.appCoach(generation, index)
+        await started
+        const retired = busy(false)
+        host.cancelAppCoach(generation, index)
+        await retired
       }
-    if (e.key === 'meter')
-      return {
-        value: {
-          value: {
-            shape: 'meter-1',
-            value: { tokens: 1, window: 200000, percent: 60 },
-          },
-          version: 1,
-        },
-      }
-    return next(e)
-  })
-  on('clock.now', () => ({ value: 10_000 }))
-  on('env.get', (_$, e) => ({
-    value: e.name === 'HOME' ? '/Users/me' : undefined,
-  }))
-  on('config.list', () => ({ value: [] }))
-  on('session.cwd', () => ({ value: '/w' }))
-  on('session.id', () => ({ value: 'coach-session' }))
-  on('session.usage', () => ({
-    value: { startedAt: 0, rateLimits: [], context: { window: 200000 } },
-  }))
-  on('process.run', () => ({
-    value: {
-      exitCode: 0,
-      stdout: 'notes/a.md\n',
-      stderr: '',
-      isStdoutTruncated: false,
-      isStderrTruncated: false,
-    },
-  }))
-  on('fs.read', () => ({ value: '' }))
-  on('fs.exists', (_: unknown, e: { path: string }) => ({
-    value: String(e.path).endsWith('AGENTS.md'),
-  }))
-  on('fs.write', () => ({ value: undefined }))
-  on('ui.invalidate', () => ({ value: undefined }))
-  on('model.fork', () => ({
-    value: {
-      isAnswered: true,
-      text: '## Tes demandes\nPrécise le format.\n## À ajouter à AGENTS.md\nVoici.\n```context\n- Les offres sont dans 01_COMPANY/Offer.\n```',
-      usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
-      },
-    },
-  }))
-  on('prompt.fill', (_: unknown, e: { text: string }) => {
-    filled.push(e.text)
-    return { isFilled: true }
-  })
-  on('ui.toast', () => ({ value: undefined }))
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 't-coach' })
-  expect(
-    await ui.find({
-      type: 'Text',
-      text: /Claude a cherché 6 fois avant de trouver/,
-    }),
-  ).toBeDefined()
-  expect(
-    await ui.find({ type: 'Text', text: /a.md a été ouvert 3 fois/ }),
-  ).toBeDefined()
-  expect(
-    await ui.find({
-      type: 'Text',
-      text: /« Fais le point » a laissé Claude deviner/,
-    }),
-  ).toBeDefined()
-  // no technical word in the tips
-  expect(await ui.find({ type: 'Text', text: /tokens/ })).toBeUndefined()
-  await ui.press({ key: 'coach-run' })
-  expect(
-    await ui.find({ type: 'Text', text: /À AJOUTER À AGENTS.MD/ }),
-  ).toBeDefined()
-  await ui.press({ key: 'coach-apply' })
-  expect(filled[0]).toContain('Ajoute ces lignes à AGENTS.md')
-  expect(filled[0]).toContain('01_COMPANY/Offer')
-  await ui.unmount()
-})
+      expect(host.forkCount()).toBe(16)
+      expect(
+        await host.command(generation, { kind: 'lang', lang: 'fr' }),
+      ).toEqual({ ok: true })
+      expect(await host.command(generation, { kind: 'clear-trail' })).toEqual({
+        ok: true,
+      })
+      await host.clock.settle()
+      generation = latestSnapshot(host.browserEvents)!.generation
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: false, error: 'busy' },
+      )
+      expect(host.forkCount()).toBe(16)
+      host.releaseFork()
+      await host.waitForForksReleased(16)
+      await host.clock.settle()
+      expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
+        { ok: true },
+      )
+      expect(host.forkCount()).toBe(17)
+    } finally {
+      host.releaseFork()
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)

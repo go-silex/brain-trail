@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -63,6 +64,10 @@ func secureDirectory(dir string) error {
 		return fmt.Errorf("private directory ownership or mode invalid: %s", dir)
 	}
 	return secureParent(filepath.Dir(dir))
+}
+
+func privateListener(socket string) (net.Listener, error) {
+	return net.Listen("unix", socket)
 }
 
 func privacyEvidence(dir, socket string) (string, error) {

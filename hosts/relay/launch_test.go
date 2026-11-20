@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -407,5 +408,120 @@ func TestFirstBrowserLaunchAcceptsHostGenerationBeforePublication(t *testing.T) 
 	}
 	if response.StatusCode != http.StatusOK || result["ok"] != true {
 		t.Fatalf("failed first launch did not free its reservation: %d %v", response.StatusCode, result)
+	}
+}
+
+func TestBrowserLinkSecurityAndLifecycle(t *testing.T) {
+	h := newRelayHarness(t)
+	// Link mode must not create the legacy bootstrap file.
+	if err := os.Mkdir(filepath.Join(h.relay.dir, "open.html"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "http://localhost/h/launch"
+	payload := []byte(`{"link":true,"generation":1}`)
+	status(t, request(t, h.private, "POST", endpoint, "wrong", "", "", payload), http.StatusUnauthorized)
+	public := *h.public
+	public.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	issue := func() (string, int64) {
+		t.Helper()
+		response := request(t, h.private, "POST", endpoint, "host-secret", "", "", payload)
+		defer response.Body.Close()
+		var result struct {
+			OK        bool   `json:"ok"`
+			URL       string `json:"url"`
+			ExpiresAt int64  `json:"expiresAt"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK || !result.OK || !regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]+/launch/[A-Za-z0-9_-]+$`).MatchString(result.URL) {
+			t.Fatalf("invalid link response: %d %+v", response.StatusCode, result)
+		}
+		now := time.Now().UnixMilli()
+		if result.ExpiresAt <= now || result.ExpiresAt > now+121000 {
+			t.Fatalf("invalid expiry: %d", result.ExpiresAt)
+		}
+		return result.URL, result.ExpiresAt
+	}
+	first, _ := issue()
+	second, _ := issue()
+	if first == second {
+		t.Fatal("refresh reused launch URL")
+	}
+	status(t, request(t, &public, "GET", first, "", "", "", nil), http.StatusNotFound)
+	status(t, request(t, &public, "GET", second, "", "", "evil.example", nil), http.StatusForbidden)
+	status(t, request(t, &public, "GET", second, "", "http://evil.example", "", nil), http.StatusForbidden)
+	alias := "localhost" + strings.TrimPrefix(h.relay.host, "127.0.0.1")
+	status(t, request(t, &public, "GET", second, "", "", alias, nil), http.StatusForbidden)
+	status(t, request(t, &public, "GET", second, "", "http://"+alias, "", nil), http.StatusForbidden)
+	status(t, request(t, &public, "GET", second, "", h.base, "", nil), http.StatusSeeOther)
+	status(t, request(t, &public, "GET", second, "", "", "", nil), http.StatusNotFound)
+	expired, _ := issue()
+	h.relay.mu.Lock()
+	h.relay.launchExpiry = time.Now().Add(-time.Second)
+	h.relay.mu.Unlock()
+	status(t, request(t, &public, "GET", expired, "", "", "", nil), http.StatusNotFound)
+}
+
+func TestBrowserLinkGenerationInvalidation(t *testing.T) {
+	h := newRelayHarness(t)
+	public := *h.public
+	public.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	launch := func(body string) map[string]any {
+		t.Helper()
+		res := request(t, h.private, "POST", "http://localhost/h/launch", "host-secret", "", "", []byte(body))
+		defer res.Body.Close()
+		var result map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := launch(`{"link":true,"generation":1}`)
+	url, ok := first["url"].(string)
+	if !ok {
+		t.Fatalf("missing first link: %v", first)
+	}
+	status(t, request(t, h.private, "POST", "http://localhost/h/generation", "host-secret", "", "", []byte(`{"generation":2,"ended":false}`)), http.StatusOK)
+	status(t, request(t, &public, "GET", url, "", "", "", nil), http.StatusNotFound)
+	if stale := launch(`{"link":true,"generation":1}`); stale["error"] != "stale-generation" {
+		t.Fatalf("stale generation accepted: %v", stale)
+	}
+	second := launch(`{"link":true,"generation":2}`)
+	url, ok = second["url"].(string)
+	if !ok {
+		t.Fatalf("missing current link: %v", second)
+	}
+	status(t, request(t, h.private, "POST", "http://localhost/h/generation", "host-secret", "", "", []byte(`{"generation":2,"ended":true}`)), http.StatusOK)
+	status(t, request(t, &public, "GET", url, "", "", "", nil), http.StatusNotFound)
+	if ended := launch(`{"link":true,"generation":2}`); ended["error"] != "stale-generation" {
+		t.Fatalf("ended generation accepted: %v", ended)
+	}
+}
+
+func TestLegacyBootstrapSurvivesFirstGenerationPublication(t *testing.T) {
+	for _, update := range []struct {
+		name, route, body string
+	}{
+		{"generation", "/h/generation", `{"generation":1,"ended":false}`},
+		{"layout", "/h/event", `{"v":1,"kind":"layout","generation":1}`},
+	} {
+		t.Run(update.name, func(t *testing.T) {
+			h := newRelayHarness(t)
+			status(t, request(t, h.private, "POST", "http://localhost/h/launch", "host-secret", "", "", []byte(`{}`)), http.StatusOK)
+			bootstrap, err := os.ReadFile(filepath.Join(h.relay.dir, "open.html"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			match := regexp.MustCompile(`url=(http://[^"]+)`).FindSubmatch(bootstrap)
+			if len(match) != 2 {
+				t.Fatal("missing bootstrap URL")
+			}
+			status(t, request(t, h.private, "POST", "http://localhost"+update.route, "host-secret", "", "", []byte(update.body)), http.StatusOK)
+			public := *h.public
+			public.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+			status(t, request(t, &public, "GET", string(match[1]), "", "", "", nil), http.StatusSeeOther)
+			status(t, request(t, &public, "GET", string(match[1]), "", "", "", nil), http.StatusNotFound)
+		})
 	}
 }

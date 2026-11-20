@@ -1,9 +1,8 @@
 import type { Index } from '../hooks/files'
 import type { Layout, Palette } from '../hooks/map'
-import type { MapFrame } from '../hooks/pointer'
+import type { MapFrame, PointerButton } from '../hooks/pointer'
 import type { FigureId } from '../hooks/readout'
-import type { Cam, SpinView } from '../hooks/spin'
-import type { SceneSemantics } from '../hooks/scene3d'
+import type { Cam, SceneSemantics } from '../hooks/scene3d'
 import type {
   Camera,
   Coach,
@@ -136,21 +135,6 @@ export type ViewSnapshot = {
   fill?: {
     rows: number
     mapAspect: number
-    body?: {
-      stamp: string
-      offset: number
-      viewport: number
-      content: number
-      reach: number
-    }
-    chrome?: {
-      stamp: string
-      header: number
-      footer: number
-      headerReach: number
-      footerReach: number
-      notice: boolean
-    }
   }
 }
 
@@ -247,15 +231,6 @@ export type ViewRuntime<N, Press> = {
   Code: ViewTag<ViewCodeProps, N> | undefined
   MapHit: ViewTag<Keyed, N> | undefined
   Scene3d?: ViewTag<Scene3dProps, N>
-  Measure?: ViewTag<
-    Keyed & {
-      stamp: string
-      expectedRows: number
-      reach: number
-      kind: 'viewport' | 'content' | 'header' | 'footer'
-    },
-    N
-  >
 }
 
 export type ViewIntent =
@@ -295,7 +270,6 @@ export type CompactOutcome =
   | { kind: 'skipped'; reason: string }
   | { kind: 'failed' }
 export type ViewActions<Press> = {
-  scrollBody?: (to: 'first' | 'previous' | 'next' | 'last') => void
   intent: (i: ViewIntent) => Promise<void>
   openFile: (ref: PreviewRef) => Promise<void>
   openIn: (ref: PreviewRef, app: string) => Promise<void>
@@ -315,10 +289,11 @@ export type ViewActions<Press> = {
 export type MapGesture =
   | { kind: 'hover'; fx: number; fy: number; x: number; y: number }
   | { kind: 'leave' }
-  | { kind: 'click'; fx: number; fy: number; right: boolean }
+  | { kind: 'click'; fx: number; fy: number; button: PointerButton }
   | {
       kind: 'drag'
       press: number
+      button: PointerButton
       fx: number
       fy: number
       sfx: number
@@ -327,15 +302,22 @@ export type MapGesture =
   | { kind: 'dragend' }
 export type MapTip = { text: string; x: number; y: number }
 export type Drawn2d = { view: MapFrame; layout: Layout; touched: Set<number> }
-export type Drawn3d = { view: SpinView; layout: Layout; touched: Set<number> }
-export type DrawnMap =
-  | { kind: '2d'; frame: Drawn2d }
-  | { kind: '3d'; frame: Drawn3d }
-export type DrawnFrames = { d2: Drawn2d | undefined; d3: Drawn3d | undefined }
+export type DrawnMap = { kind: '2d'; frame: Drawn2d }
+export type DrawnFrames = { d2: Drawn2d | undefined }
+export type MapPoint = { fx: number; fy: number }
+// A press in progress goes on in stretches: the frame its current stretch started from, where the
+// pointer was then (`from`) and where it was last seen (`at`). A wheel turned during the press
+// starts a new stretch from the frame it made, drawn or not.
+export type Drag2d = {
+  press: number
+  button: PointerButton
+  view: MapFrame
+  from: MapPoint
+  at: MapPoint
+}
 export type GestureMemory = {
-  hover: { fx: number; fy: number } | undefined
-  drag2d: { press: number; view: MapFrame } | undefined
-  drag3d: { press: number; yaw: number; pitch: number } | undefined
+  hover: MapPoint | undefined
+  drag2d: Drag2d | undefined
 }
 export type GestureResult = {
   memory: GestureMemory

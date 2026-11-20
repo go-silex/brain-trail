@@ -1,3 +1,4 @@
+import type { CommandScope } from '../../types/browser'
 import type { PreviewRef } from '../../types/model'
 import type { RelayClient } from '../relay/client'
 
@@ -8,6 +9,7 @@ export type FileAuthority = {
   currentGeneration(): number
   known(ref: PreviewRef): Promise<boolean>
   apps: readonly string[]
+  scope?: CommandScope
 }
 
 /** Resolve a session-owned reference, hold it across the effect, then release it. */
@@ -19,9 +21,11 @@ export async function withNativeFile<T>(
   use: (id: string) => Promise<T>,
 ): Promise<T> {
   const current = async () => {
+    await authority.scope?.assertCurrent()
     await authority.refreshGeneration()
     if (authority.currentGeneration() !== authority.generation)
       throw new Error('stale-generation')
+    await authority.scope?.assertCurrent()
   }
   await current()
   const known = await authority.known(ref)
@@ -34,14 +38,18 @@ export async function withNativeFile<T>(
   )
     throw new Error('forbidden')
   const path = ref.out ? ref.p : `${authority.root}/${ref.p}`
-  const held = await relay.prepareFile(authority.root, path)
+  const held = await relay.prepareFile(
+    authority.root,
+    path,
+    authority.scope?.guard,
+  )
   try {
     await current()
     if (!ref.out && !held.inside) throw new Error('forbidden')
     if (!(await relay.verifyFile(held.id))) throw new Error('forbidden')
     await current()
     const value = await use(held.id)
-    if (action.kind === 'preview') await current()
+    if (action.kind === 'preview' || authority.scope) await current()
     return value
   } finally {
     await relay.releaseFile(held.id).catch(() => {})

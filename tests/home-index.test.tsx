@@ -4,31 +4,10 @@ import type { On } from 'claude-code'
 import type { TrailEvent } from '../types'
 
 const HOME = '/Users/me'
-const PANE = {
-  plugin: 'brain-trail-v2',
-  component: 'Pane',
-  requestId: 'brain-trail-v2',
-  props: {
-    title: 'Brain Trail',
-    isFocused: false,
-    bodyColumns: 60,
-    placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
-    view: {},
-  },
-} as const
 
 const DEEP = Array.from({ length: 11_999 }, (_, i) => `d/f${i}.md`)
 const FILES = ['kept.md', ...DEEP, 'a/b/deep.md']
 const runs: { argv: string[]; cwd?: string }[] = []
-
-const altOf = (el: unknown) => {
-  if (el === null || typeof el !== 'object' || !('props' in el)) return ''
-  const props = el.props
-  if (props === null || typeof props !== 'object' || !('alt' in props))
-    return ''
-  return typeof props.alt === 'string' ? props.alt : ''
-}
 
 const eventsOf = (raw: unknown): TrailEvent[] => {
   if (Array.isArray(raw)) return raw as TrailEvent[]
@@ -124,14 +103,4 @@ test('a session in the home folder lists only its first levels, and a large inde
   expect(readOf('a/b/deep.md'), 'deep.md dropped from the capped index').toBe(
     false,
   )
-
-  const first = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await first.unmount()
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /home folder/ })).toBeDefined()
-  const map = (await ui.findAll({ type: 'Svg' })).find((el) =>
-    altOf(el).includes('files touched'),
-  )
-  expect(altOf(map), 'map alt').toMatch(/me: \d+ files touched/)
-  await ui.unmount()
 })

@@ -36,10 +36,12 @@ import {
   vaultProbe,
 } from '../../hooks/workspace'
 import type { PreviewRef, TrailEvent, TrailSettings } from '../../types/model'
+import { isAdapterOperation } from '../../types/apps'
 import { RelayRefusal, type RelayClient } from '../relay/client'
 import { captureTool, connectedTools, type CapturedTool } from './facts'
 import { TrailStore } from './store'
 import type {
+  CommandScope,
   CommandRefusal,
   CommandReplies,
   DashboardFeed,
@@ -57,6 +59,10 @@ type Lifecycle = {
   ): Promise<void>
   onRootStop(): Promise<void>
   authority(): Promise<RelayClient>
+  revokeGeneration(
+    owner: { host: 'omp'; sessionId: string },
+    generation: number,
+  ): Promise<void>
 }
 const object = (x: unknown): x is Record<string, unknown> =>
   typeof x === 'object' && x !== null && !Array.isArray(x)
@@ -77,15 +83,35 @@ const refusal = (error: CommandRefusal['error']): CommandRefusal => ({
   error,
 })
 
+const MAX_ACTIVE_COMMANDS = 16
+// Reserve four slots for short controls even if long native effects never settle.
+const MAX_ACTIVE_LONG_COMMANDS = 12
+
 export function registerCapture(
   pi: ExtensionAPI,
   lifecycle: Lifecycle,
-): DashboardFeed & { refreshApps(): Promise<void> } {
+): DashboardFeed & {
+  refreshApps(): Promise<void>
+  nativeCurrent(): Promise<{
+    owner: { host: 'omp'; sessionId: string }
+    generation: number
+    label: string
+  }>
+} {
   let ctx: ExtensionContext | undefined
+  let sessionId = ''
+  let transitioning = false
+  let transitionOwner: object | undefined
+  let activeCommands = 0
+  let activeLongCommands = 0
+  let coachRun = 0
+  let coachAbort: AbortController | undefined
   let store: TrailStore | undefined
   let generation = 0,
     revision = 0,
     layoutRev = 0
+  let layoutLoad = 0
+  let cacheWrites: Promise<void> = Promise.resolve()
   let abort = new AbortController()
   let timer: ReturnType<ExtensionContext['setInterval']> | undefined
   let unsubscribe: (() => void) | undefined
@@ -110,6 +136,7 @@ export function registerCapture(
   const listeners = new Set<(event: ServerEvent) => void>()
   let facts: FactsWire = {
     assistant: 'OMP',
+    ownerHost: 'omp',
     lang: 'en',
     meter: { window: 0 },
     events: [],
@@ -137,7 +164,31 @@ export function registerCapture(
     })
   }
   const current = (g: number) =>
-    generation === g && !abort.signal.aborted && ctx !== undefined
+    generation === g &&
+    !transitioning &&
+    !abort.signal.aborted &&
+    ctx !== undefined &&
+    ctx.sessionManager.getSessionId() === sessionId
+  const excludedTool = (name: string, details?: unknown) => {
+    const tool = pi.getAllTools().find((candidate) => candidate.name === name)
+    if (tool?.mcpServerName && tool.mcpToolName)
+      return (
+        !tool.mcpToolName.startsWith('mcp__') &&
+        isAdapterOperation(tool.mcpToolName)
+      )
+    if (
+      name.startsWith('mcp__') &&
+      object(details) &&
+      typeof details.serverName === 'string' &&
+      details.serverName &&
+      typeof details.mcpToolName === 'string'
+    )
+      return (
+        !details.mcpToolName.startsWith('mcp__') &&
+        isAdapterOperation(details.mcpToolName)
+      )
+    return isAdapterOperation(name)
+  }
   const enqueue = (work: () => Promise<void>) => {
     pending = pending.then(work, work).catch((error) => {
       pi.logger.error('Brain Trail capture failed', { error: String(error) })
@@ -196,14 +247,41 @@ export function registerCapture(
       new Date().toISOString().slice(0, 7),
     )
   }
-  const load = async (g: number, publishReady = true) => {
+  const load = async (g: number, publishReady = true, scope?: CommandScope) => {
     const context = ctx
     if (!context) return
+    const loadId = ++layoutLoad
     const signal = abort.signal,
       home = homedir()
+    const assertLoad = async () => {
+      if (!current(g) || ctx !== context || layoutLoad !== loadId)
+        throw new RelayRefusal('stale-generation', 'Session changed')
+      await scope?.assertCurrent()
+      if (!current(g) || ctx !== context || layoutLoad !== loadId)
+        throw new RelayRefusal('stale-generation', 'Session changed')
+    }
+    const retireLoad = () => {
+      if (
+        !current(g) ||
+        ctx !== context ||
+        layoutLoad !== loadId ||
+        facts.workspace.kind !== 'loading'
+      )
+        return
+      layoutLoad++
+      facts = {
+        ...facts,
+        workspace: { kind: 'failed', message: 'Workspace loading cancelled' },
+      }
+      publish()
+    }
+    scope?.signal.addEventListener('abort', retireLoad, { once: true })
+    if (scope?.signal.aborted) retireLoad()
     try {
+      await assertLoad()
       let chosen = context.cwd
       for (const dir of vaultProbe(context.cwd, home)) {
+        await assertLoad()
         try {
           if ((await stat(join(dir, '.obsidian'))).isDirectory()) {
             chosen = dir
@@ -213,7 +291,9 @@ export function registerCapture(
           /* no vault here */
         }
       }
+      await assertLoad()
       const canonical = await realpath(chosen)
+      await assertLoad()
       const isVault = await stat(join(canonical, '.obsidian')).then(
         (s) => s.isDirectory(),
         () => false,
@@ -221,6 +301,7 @@ export function registerCapture(
       const shallow = isShallow(canonical, home)
       let raw = ''
       if (!shallow) {
+        await assertLoad()
         const localEnv = await pi.exec(
           'git',
           ['rev-parse', '--local-env-vars'],
@@ -248,6 +329,7 @@ export function registerCapture(
               ),
             )
             env.GIT_NO_LAZY_FETCH = '1'
+            await assertLoad()
             const git = Bun.spawn(
               gitInventoryArgv(process.platform === 'win32'),
               {
@@ -269,6 +351,7 @@ export function registerCapture(
         }
       }
       if (!raw.trim()) {
+        await assertLoad()
         const args = findArgv(shallow)
         const result = await pi.exec(args[0]!, args.slice(1), {
           cwd: canonical,
@@ -283,6 +366,7 @@ export function registerCapture(
       const cacheDir = join(getAgentDir(), 'brain-trail'),
         cache = join(cacheDir, `layout-${hash(canonical)}.json`)
       let packed = packFiles(paths, canonical.split('/').pop() || canonical)
+      await assertLoad()
       try {
         const cached: unknown = JSON.parse(await readFile(cache, 'utf8'))
         if (
@@ -297,7 +381,7 @@ export function registerCapture(
       } catch {
         /* cache is optional */
       }
-      if (!current(g)) return
+      await assertLoad()
       root = canonical
       const saved = store?.read('settings')
       if (isVault && (!object(saved) || saved.openMd === undefined))
@@ -316,18 +400,40 @@ export function registerCapture(
         }
       emit({ v: 1, kind: 'layout', generation, layout })
       if (publishReady) publish()
-      await mkdir(cacheDir, { recursive: true })
-      if (current(g))
-        await writeFile(cache, JSON.stringify({ root, paths, layout: packed }))
+      const cacheWrite = cacheWrites.then(async () => {
+        await assertLoad()
+        await mkdir(cacheDir, { recursive: true })
+        await assertLoad()
+        await writeFile(
+          cache,
+          JSON.stringify({ root: canonical, paths, layout: packed }),
+        )
+      })
+      cacheWrites = cacheWrite.catch(() => {})
+      await cacheWrite
       return shallow
     } catch (error) {
-      if (current(g)) {
+      if (
+        current(g) &&
+        ctx === context &&
+        layoutLoad === loadId &&
+        facts.workspace.kind === 'loading'
+      ) {
         facts = {
           ...facts,
-          workspace: { kind: 'failed', message: String(error) },
+          workspace: {
+            kind: 'failed',
+            message:
+              error instanceof RelayRefusal
+                ? 'Workspace loading cancelled'
+                : String(error),
+          },
         }
         publish()
       }
+      if (scope) throw error
+    } finally {
+      scope?.signal.removeEventListener('abort', retireLoad)
     }
   }
   const capture = async (
@@ -336,6 +442,7 @@ export function registerCapture(
     g: number,
     epoch = captureEpoch,
   ) => {
+    if (excludedTool(call.name, call.details)) return
     await ready
     if (!current(g) || epoch !== captureEpoch || completed.has(key) || !ctx)
       return
@@ -419,13 +526,17 @@ export function registerCapture(
       }
       if (m.role === 'assistant') {
         for (const part of m.content)
-          if (part.type === 'toolCall')
+          if (part.type === 'toolCall' && !excludedTool(part.name))
             starts.set(part.id, { name: part.name, input: part.arguments })
         if (m.stopReason === 'stop') events.push({ k: 'done', at })
       }
       if (m.role === 'toolResult') {
         const start = starts.get(m.toolCallId)
-        if (start && !savedCalls.has(`root:${m.toolCallId}`)) {
+        if (
+          start &&
+          !excludedTool(start.name, m.details) &&
+          !savedCalls.has(`root:${m.toolCallId}`)
+        ) {
           completed.add(`root:${m.toolCallId}`)
           const captured = captureTool(
             {
@@ -471,6 +582,7 @@ export function registerCapture(
         if (
           !object(value) ||
           typeof value.name !== 'string' ||
+          excludedTool(value.name, value.details) ||
           !object(value.input) ||
           typeof value.output !== 'string' ||
           typeof value.isError !== 'boolean' ||
@@ -635,6 +747,7 @@ export function registerCapture(
               part.type === 'toolCall' &&
               typeof part.id === 'string' &&
               typeof part.name === 'string' &&
+              !excludedTool(part.name) &&
               object(part.arguments)
             )
               callsById.set(part.id, { name: part.name, input: part.arguments })
@@ -646,7 +759,12 @@ export function registerCapture(
           continue
         const start = callsById.get(message.toolCallId),
           key = `task:${id}:${message.toolCallId}`
-        if (start && at > cutoff && !completed.has(key)) {
+        if (
+          start &&
+          !excludedTool(start.name, message.details) &&
+          at > cutoff &&
+          !completed.has(key)
+        ) {
           await capture(
             {
               ...start,
@@ -681,12 +799,25 @@ export function registerCapture(
   }
   const bind = async (context: ExtensionContext, first: boolean) => {
     if (context.agent.kind !== 'main') return
+    const previous =
+      ctx && sessionId
+        ? { owner: { host: 'omp' as const, sessionId }, generation }
+        : undefined
+    coachRun++
+    coachAbort?.abort()
+    coachAbort = undefined
+    transitionOwner = undefined
+    transitioning = true
+    abort.abort()
+    if (previous)
+      await lifecycle.revokeGeneration(previous.owner, previous.generation)
     replayEpoch++
     if (replayTimer !== undefined && ctx) ctx.clearTimer(replayTimer)
     replayTimer = undefined
     shared = sharedView(VIEW_STATE0)
-    abort.abort()
+    transitioning = false
     abort = new AbortController()
+    sessionId = context.sessionManager.getSessionId()
     generation++
     revision = 0
     ctx = context
@@ -704,6 +835,7 @@ export function registerCapture(
     connected = connectedTools(pi.getAllTools(), pi.getActiveTools())
     facts = {
       assistant: 'OMP',
+      ownerHost: 'omp',
       lang: savedLang === 'fr' ? 'fr' : 'en',
       meter: { window: 0 },
       events: [],
@@ -784,7 +916,11 @@ export function registerCapture(
         const payload = data as unknown as SubagentEventPayload,
           event = payload.event,
           scope = `task:${payload.id}`
-        if (event.type === 'tool_execution_start' && object(event.args))
+        if (
+          event.type === 'tool_execution_start' &&
+          !excludedTool(event.toolName) &&
+          object(event.args)
+        )
           calls.set(`${scope}:${event.toolCallId}`, {
             name: event.toolName,
             input: event.args,
@@ -793,7 +929,11 @@ export function registerCapture(
           const key = `${scope}:${event.toolCallId}`,
             start = calls.get(key),
             result: unknown = event.result
-          if (start && object(result)) {
+          if (
+            start &&
+            object(result) &&
+            !excludedTool(start.name, result.details)
+          ) {
             const g = generation,
               epoch = captureEpoch
             const call: CapturedTool = {
@@ -842,12 +982,20 @@ export function registerCapture(
   const run = async (
     g: number,
     command: HostCommand,
+    scope?: CommandScope,
   ): Promise<CommandReplies[HostCommand['kind']] | CommandRefusal> => {
     if (!current(g) || !ctx || !store) return refusal('stale-generation')
     const context = ctx,
-      signal = abort.signal,
       epoch = captureEpoch
     const valid = () => current(g) && epoch === captureEpoch
+    const assertValid = async () => {
+      if (!valid())
+        throw new RelayRefusal('stale-generation', 'Session changed')
+      await scope?.assertCurrent()
+      if (!valid())
+        throw new RelayRefusal('stale-generation', 'Session changed')
+    }
+    await assertValid()
     switch (command.kind) {
       case 'open':
       case 'preview-read': {
@@ -855,37 +1003,38 @@ export function registerCapture(
         if (!path) return refusal('forbidden')
         if (command.kind === 'open' && command.app !== 'default') {
           await appsReady
-          if (!valid()) return refusal('stale-generation')
+          await assertValid()
         }
         let authority: RelayClient | undefined
         let handle: string | undefined
         try {
           authority = await lifecycle.authority()
-          if (!valid()) return refusal('stale-generation')
+          await assertValid()
           if (command.kind === 'open' && command.app !== 'default') {
             const apps = await authority.listApps()
-            if (!valid()) return refusal('stale-generation')
+            await assertValid()
             facts = { ...facts, apps }
             publish()
             if (!apps.includes(command.app)) return refusal('forbidden')
           }
-          const file = await authority.prepareFile(root, path)
+          const file = await authority.prepareFile(root, path, scope?.guard)
           handle = file.id
-          if (!valid()) return refusal('stale-generation')
+          await assertValid()
           if (!command.ref.out && !file.inside) return refusal('forbidden')
           if (command.kind === 'preview-read') {
             const text = await authority.readFile(file.id)
-            if (!valid()) return refusal('stale-generation')
+            await assertValid()
             return { ok: true, text: text.slice(0, 40001) }
           }
           const verified = await authority.verifyFile(file.id)
-          if (!valid()) return refusal('stale-generation')
+          await assertValid()
           if (!verified) return refusal('forbidden')
           const launch = await authority.openFile(
             file.id,
             command.app === 'default' ? undefined : command.app,
             g,
           )
+          await assertValid()
           return { ok: true, launch }
         } catch (error) {
           if (!valid()) return refusal('stale-generation')
@@ -961,12 +1110,30 @@ export function registerCapture(
         facts = { ...facts, lang: command.lang }
         publish()
         return { ok: true }
-      case 'clear-trail':
+      case 'clear-trail': {
+        await assertValid()
+        if (!valid() || ctx !== context) return refusal('stale-generation')
+        const transition = {}
+        transitionOwner = transition
+        transitioning = true
+        coachRun++
+        coachAbort?.abort()
+        coachAbort = undefined
+        if (facts.coach.busy)
+          facts = { ...facts, coach: { ...facts.coach, busy: false } }
+        // The reserved transition remains exclusive until revocation completes.
         replayEpoch++
         if (replayTimer !== undefined) context.clearTimer(replayTimer)
         replayTimer = undefined
         shared = sharedView(VIEW_STATE0)
         generation++
+        const nextGeneration = generation
+        await lifecycle.revokeGeneration({ host: 'omp', sessionId }, g)
+        if (transitionOwner !== transition) return refusal('stale-generation')
+        transitionOwner = undefined
+        transitioning = false
+        if (!current(nextGeneration) || ctx !== context)
+          return refusal('stale-generation')
         revision = 0
         if (layout) emit({ v: 1, kind: 'layout', generation, layout })
         captureEpoch++
@@ -980,16 +1147,16 @@ export function registerCapture(
         accessed.clear()
         facts.linked = []
         if (facts.workspace.kind === 'loading') {
-          const nextGeneration = generation
           ready = load(nextGeneration).then(() => {})
         }
         publish()
         return { ok: true }
+      }
       case 'compact': {
         const before = compactCount
         try {
           await context.compact()
-          if (!current(g)) return refusal('stale-generation')
+          await assertValid()
           return {
             ok: true,
             outcome:
@@ -998,6 +1165,7 @@ export function registerCapture(
                 : { kind: 'skipped', reason: 'No compaction was performed' },
           }
         } catch {
+          await assertValid()
           if (!valid()) return refusal('stale-generation')
           return { ok: true, outcome: { kind: 'failed' } }
         }
@@ -1009,9 +1177,11 @@ export function registerCapture(
       case 'retry-layout':
         facts = { ...facts, workspace: { kind: 'loading', since: Date.now() } }
         publish()
-        void load(g)
+        await load(g, true, scope)
+        await assertValid()
         return { ok: true }
       case 'coach-analyse': {
+        if (facts.coach.busy) return refusal('busy')
         if (!context.runEphemeralTurn) {
           facts = {
             ...facts,
@@ -1027,20 +1197,37 @@ export function registerCapture(
           file = facts.instructionFile,
           session = context.sessionManager.getSessionId(),
           runTurn = context.runEphemeralTurn
+        const runId = ++coachRun
+        const controller = new AbortController()
+        coachAbort = controller
+        const retire = () => {
+          controller.abort()
+          if (coachRun !== runId || !valid() || ctx !== context) return
+          coachRun++
+          coachAbort = undefined
+          facts = { ...facts, coach: { ...facts.coach, busy: false } }
+          publish()
+        }
+        scope?.signal.addEventListener('abort', retire, { once: true })
+        if (scope?.signal.aborted) {
+          retire()
+          return refusal('forbidden')
+        }
         facts = { ...facts, coach: coachBusy(facts.coach) }
         publish()
-        void (async () => {
+        await (async () => {
           try {
             let source = ''
             try {
               const authority = await lifecycle.authority()
-              if (!valid()) return
+              await assertValid()
               const held = await authority.prepareFile(
                 root,
                 join(context.cwd, file),
+                scope?.guard,
               )
               try {
-                if (!valid()) return
+                await assertValid()
                 if (!held.inside) throw new Error('forbidden')
                 source = (await authority.readFile(held.id)).slice(0, 40000)
               } finally {
@@ -1050,20 +1237,24 @@ export function registerCapture(
               if (!(error instanceof RelayRefusal && error.code === 'missing'))
                 throw error
             }
-            if (!valid()) return
+            await assertValid()
+            let sideCost = 0
             const reply = await runTurn({
               promptText: `${coachPrompt(lang, file, 'OMP')}\n\n${file} (existing content):\n${source.slice(0, 40000)}`,
               tools: false,
-              signal,
+              signal: controller.signal,
               onUsage: (message) => {
+                sideCost += message.usage.cost.total
+              },
+            })
+            await assertValid()
+            if (valid() && coachRun === runId) {
+              if (sideCost)
                 store?.addSide(
                   session,
                   new Date().toISOString().slice(0, 10),
-                  message.usage.cost.total,
+                  sideCost,
                 )
-              },
-            })
-            if (valid()) {
               facts = {
                 ...facts,
                 coach: coachDone(reply.replyText, Date.now()),
@@ -1072,6 +1263,9 @@ export function registerCapture(
               publish()
             }
           } catch (error) {
+            if (coachRun !== runId)
+              throw new RelayRefusal('stale-generation', 'Coach run retired')
+            await assertValid()
             if (valid()) {
               facts = {
                 ...facts,
@@ -1083,6 +1277,10 @@ export function registerCapture(
               usage()
               publish()
             }
+          } finally {
+            scope?.signal.removeEventListener('abort', retire)
+            if (coachRun === runId && facts.coach.busy) retire()
+            else if (coachRun === runId) coachAbort = undefined
           }
         })()
         return { ok: true }
@@ -1098,8 +1296,30 @@ export function registerCapture(
       }
     }
   }
-  const feed: DashboardFeed & { refreshApps(): Promise<void> } = {
+  const feed: DashboardFeed & {
+    refreshApps(): Promise<void>
+    nativeCurrent(): Promise<{
+      owner: { host: 'omp'; sessionId: string }
+      generation: number
+      label: string
+    }>
+  } = {
     current: () => ({ generation, revision, facts, layout, shared }),
+    async nativeCurrent() {
+      const g = generation,
+        owner = sessionId,
+        context = ctx
+      if (!context || !current(g) || !owner)
+        throw new RelayRefusal('stale-generation', 'Session unavailable')
+      await ready
+      if (ctx !== context || sessionId !== owner || !current(g))
+        throw new RelayRefusal('stale-generation', 'Session unavailable')
+      return {
+        owner: { host: 'omp', sessionId: owner },
+        generation: g,
+        label: 'OMP',
+      }
+    },
     async refreshApps() {
       const g = generation
       const authority = await lifecycle.authority()
@@ -1115,8 +1335,66 @@ export function registerCapture(
         listeners.delete(listener)
       }
     },
-    execute: async <C extends HostCommand>(g: number, command: C) =>
-      (await run(g, command)) as CommandReplies[C['kind']] | CommandRefusal,
+    execute: async <C extends HostCommand>(
+      g: number,
+      command: C,
+      scope?: CommandScope,
+    ) => {
+      const long = [
+        'open',
+        'preview-read',
+        'compact',
+        'retry-layout',
+        'coach-analyse',
+      ].includes(command.kind)
+      if (
+        activeCommands >= MAX_ACTIVE_COMMANDS ||
+        (long && activeLongCommands >= MAX_ACTIVE_LONG_COMMANDS)
+      )
+        return refusal('busy')
+      activeCommands++
+      if (long) activeLongCommands++
+      if (scope?.signal.aborted) {
+        activeCommands--
+        if (long) activeLongCommands--
+        return refusal('forbidden')
+      }
+      const work = run(g, command, scope)
+      void work.then(
+        () => {
+          activeCommands--
+          if (long) activeLongCommands--
+        },
+        () => {
+          activeCommands--
+          if (long) activeLongCommands--
+        },
+      )
+      let onAbort: (() => void) | undefined
+      try {
+        const result = scope
+          ? await Promise.race([
+              work,
+              new Promise<CommandRefusal>((resolve) => {
+                onAbort = () => resolve(refusal('forbidden'))
+                scope.signal.addEventListener('abort', onAbort, { once: true })
+                if (scope.signal.aborted) onAbort()
+              }),
+            ])
+          : await work
+        return result as CommandReplies[C['kind']] | CommandRefusal
+      } catch (error) {
+        return error instanceof RelayRefusal
+          ? refusal(
+              error.code === 'http' || error.code === 'missing'
+                ? 'disconnected'
+                : error.code,
+            )
+          : refusal('forbidden')
+      } finally {
+        if (scope && onAbort) scope.signal.removeEventListener('abort', onAbort)
+      }
+    },
   }
   pi.on('session_start', async (_event, context) => {
     await bind(context, true)
@@ -1172,6 +1450,7 @@ export function registerCapture(
       (context.agent.kind !== 'main' && context.agent.id !== 'advisor')
     )
       return
+    if (excludedTool(event.toolName, event.details)) return
     const g = generation,
       epoch = captureEpoch,
       scope = context.agent.id === 'advisor' ? 'advisor' : 'root'
@@ -1188,6 +1467,11 @@ export function registerCapture(
   })
   pi.on('session_shutdown', async (_event, context) => {
     if (context.agent.kind !== 'main' || !ctx) return
+    transitionOwner = undefined
+    transitioning = true
+    coachRun++
+    coachAbort?.abort()
+    coachAbort = undefined
     abort.abort()
     if (timer) context.clearTimer(timer)
     replayEpoch++

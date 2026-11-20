@@ -1,6 +1,276 @@
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+
+async function rendererFailureProof(browser, root) {
+  const temp = await mkdtemp(path.join(tmpdir(), 'renderer-failure-'))
+  const dependencies = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../node_modules',
+  )
+  const link = path.join(root, 'node_modules')
+  let linked = false
+  try {
+    await symlink(dependencies, link, 'dir')
+    linked = true
+    const output = path.join(temp, 'fixture.js')
+    await execFileAsync(
+      'bun',
+      [
+        'build',
+        path.join(root, 'scripts/fixtures/renderer-failure.ts'),
+        '--target=browser',
+        `--outfile=${output}`,
+      ],
+      { cwd: root },
+    )
+    const context = await browser.newContext()
+    try {
+      const page = await context.newPage()
+      await page.setContent('<!doctype html><body></body>')
+      await page.addScriptTag({ content: await readFile(output, 'utf8') })
+      return await page.evaluate(() => window.rendererFailureProof())
+    } finally {
+      await context.close()
+    }
+  } finally {
+    if (linked) await rm(link, { force: true })
+    await rm(temp, { recursive: true, force: true })
+  }
+}
+
+async function deniedWebGLProof(
+  browser,
+  origin,
+  clients,
+  layout,
+  snapshot,
+  lang,
+) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+  })
+  try {
+    const page = await context.newPage()
+    const errors = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.addInitScript(() => {
+      const original = HTMLCanvasElement.prototype.getContext
+      window.__glAttempts = 0
+      HTMLCanvasElement.prototype.getContext = function (kind, ...args) {
+        if (['webgl2', 'webgl', 'experimental-webgl'].includes(kind)) {
+          window.__glAttempts++
+          return null
+        }
+        return original.call(this, kind, ...args)
+      }
+    })
+    await page.goto(origin, { waitUntil: 'load' })
+    const notice = page.locator('.bt-scene3d-unavailable[role="status"]')
+    await notice.waitFor({ state: 'visible' })
+    const text = await notice.innerText()
+    if (
+      !/webgl/i.test(text) ||
+      !/2D/.test(text) ||
+      !(lang === 'fr' ? /indisponible/i : /unavailable/i).test(text)
+    )
+      throw new Error(`unavailable notice is not localized or honest: ${text}`)
+    const attempts = await page.evaluate(() => window.__glAttempts)
+    if (!attempts) throw new Error('WebGL context denial was not exercised')
+    const assertLayout = async () => {
+      await page.evaluate(() => {
+        window.__btUnavailableSample = undefined
+      })
+      await page.waitForFunction(
+        () => {
+          const header = document.querySelector('[data-key="pane-header"]')
+          const footer = document.querySelector('[data-key="pane-footer"]')
+          const notice = document.querySelector('.bt-scene3d-unavailable')
+          if (!header || !footer || !notice) return false
+          const h = header.getBoundingClientRect()
+          const f = footer.getBoundingClientRect()
+          const n = notice.getBoundingClientRect()
+          const values = [
+            h.top,
+            h.bottom,
+            f.left,
+            f.top,
+            f.right,
+            f.bottom,
+            n.left,
+            n.top,
+            n.right,
+            n.bottom,
+            document.documentElement.scrollWidth,
+            document.documentElement.scrollHeight,
+            document.body.scrollWidth,
+            document.body.scrollHeight,
+          ]
+          const previous = window.__btUnavailableSample
+          const stable =
+            previous &&
+            values.every(
+              (value, index) => Math.abs(value - previous.values[index]) < 0.1,
+            )
+          const count = stable ? previous.count + 1 : 0
+          window.__btUnavailableSample = { values, count }
+          return count >= 3
+        },
+        null,
+        { polling: 'raf' },
+      )
+      const geometry = await page.evaluate(() => {
+        const header = document.querySelector('[data-key="pane-header"]')
+        const footer = document.querySelector('[data-key="pane-footer"]')
+        const notice = document.querySelector('.bt-scene3d-unavailable')
+        const rect = (element) => {
+          const bounds = element.getBoundingClientRect()
+          const style = getComputedStyle(element)
+          return {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+            width: bounds.width,
+            height: bounds.height,
+            visible:
+              style.display !== 'none' &&
+              style.visibility === 'visible' &&
+              Number(style.opacity) > 0,
+          }
+        }
+        return {
+          header: rect(header),
+          footer: rect(footer),
+          notice: rect(notice),
+          width: innerWidth,
+          height: innerHeight,
+          scrollWidth: Math.max(
+            document.documentElement.scrollWidth,
+            document.body.scrollWidth,
+          ),
+          scrollHeight: Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight,
+          ),
+          scrollX,
+          scrollY,
+        }
+      })
+      const { header, footer, notice, width, height } = geometry
+      if (
+        !header.visible ||
+        !footer.visible ||
+        !notice.visible ||
+        footer.width <= 0 ||
+        footer.height <= 0 ||
+        notice.width <= 0 ||
+        notice.height <= 0 ||
+        footer.left < -1 ||
+        footer.right > width + 1 ||
+        footer.top < -1 ||
+        footer.bottom > height + 1 ||
+        notice.left < -1 ||
+        notice.right > width + 1 ||
+        notice.top < header.bottom - 1 ||
+        notice.bottom > footer.top + 1 ||
+        geometry.scrollWidth > width + 1 ||
+        geometry.scrollHeight > height + 1 ||
+        geometry.scrollX !== 0 ||
+        geometry.scrollY !== 0
+      )
+        throw new Error(
+          `invalid unavailable WebGL layout: ${JSON.stringify(geometry)}`,
+        )
+      return geometry
+    }
+    const unavailableLayouts = [await assertLayout()]
+    for (const [index, width] of [900, 1100, 1280].entries()) {
+      await page.setViewportSize({ width, height: 720 })
+      const event = {
+        ...snapshot,
+        revision: snapshot.revision + index + 1,
+        facts: {
+          ...snapshot.facts,
+          meter: { ...snapshot.facts.meter, percent: 51 + index },
+        },
+      }
+      for (const client of clients) {
+        client.write(`data: ${JSON.stringify(layout)}\n\n`)
+        client.write(`data: ${JSON.stringify(event)}\n\n`)
+      }
+      await page
+        .getByText(`${51 + index} %`, { exact: false })
+        .first()
+        .waitFor({ state: 'visible' })
+      const state = await page.evaluate(() => ({
+        roots: document.querySelector('#app')?.children.length,
+        headers: document.querySelectorAll('[data-key="pane-header"]').length,
+        footers: document.querySelectorAll('[data-key="pane-footer"]').length,
+        notices: document.querySelectorAll('.bt-scene3d-unavailable').length,
+        attempts: window.__glAttempts,
+      }))
+      if (
+        state.roots !== 1 ||
+        state.headers !== 1 ||
+        state.footers !== 1 ||
+        state.notices !== 1 ||
+        state.attempts !== attempts
+      )
+        throw new Error(
+          `denied WebGL update leaked roots or retried: ${JSON.stringify(state)}`,
+        )
+      unavailableLayouts.push(await assertLayout())
+    }
+    for (const [tab, landmark] of [
+      ['t-goal', '[data-key="plan-0"]'],
+      ['t-files', '[data-key="kpi-start"]'],
+      ['t-context', 'button[data-key="more-context"]'],
+      ['t-coach', '[data-key="coach-run"]'],
+      ['settings', '[data-key="lang-en"]'],
+    ]) {
+      await page.locator(`[data-key="${tab}"]`).click()
+      await page.locator(landmark).waitFor({ state: 'visible' })
+    }
+    const langRequest = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === '/command' &&
+        request.postDataJSON()?.command?.kind === 'lang',
+    )
+    await page
+      .locator(`[data-key="lang-${lang === 'fr' ? 'en' : 'fr'}"]`)
+      .click()
+    await langRequest
+    await page.locator('[data-key="t-map"]').click()
+    await notice.waitFor({ state: 'visible' })
+    await page.locator('[data-key="view-3d"]').click()
+    await page
+      .locator('[data-key="map-wrap"] .bt-svg')
+      .waitFor({ state: 'visible' })
+    if (
+      (await page.locator('[data-key="view-3d"]').innerText()).trim() !== '3D'
+    )
+      throw new Error('explicit 2D control did not switch dimensions')
+    if (errors.length)
+      throw new Error(`denied WebGL caused page errors: ${errors.join('; ')}`)
+    return {
+      notice: text,
+      initialContextAttempts: attempts,
+      layouts: unavailableLayouts,
+      updates: 3,
+      tabs: 5,
+      explicit2D: true,
+    }
+  } finally {
+    await context.close()
+  }
+}
 
 // Replay the actual adapter's captured feed through the built application. Commands
 // are deliberately refused: this transport does not stand in for a live host.
@@ -10,6 +280,7 @@ export async function captureBrowserScene(
   captured,
   scenario,
   semantic = false,
+  candidate = false,
 ) {
   const events = captured.browserEvents
   if (!Array.isArray(events))
@@ -60,15 +331,30 @@ export async function captureBrowserScene(
     )
   )
     throw new Error('captured adapter layout geometry or language is invalid')
+  const dist = path.join(root, 'hosts/browser/dist')
   const assets = new Map(
     await Promise.all(
       ['app.js', 'app.css'].map(async (name) => [
         name,
-        await readFile(path.join(root, 'hosts/browser/dist', name)),
+        await readFile(path.join(dist, name)),
       ]),
     ),
   )
+  let shell
+  if (candidate) {
+    shell = await readFile(path.join(dist, 'index.html'))
+  } else {
+    // The historical relay serves its Go raw-string page directly at the
+    // session root; use that revision's source, not a reconstructed shell.
+    const relay = await readFile(path.join(root, 'hosts/relay/main.go'), 'utf8')
+    const match = /^const page = `([^`]*)`$/m.exec(relay)
+    if (!match) throw new Error('historical relay production page not found')
+    shell = match[1]
+  }
   const clients = new Set()
+  let deferWhole = false
+  let wholeArrived = () => {}
+  let releaseWhole
   const server = createServer((req, res) => {
     if (req.url === '/events') {
       res.writeHead(200, {
@@ -86,13 +372,29 @@ export async function captureBrowserScene(
       })
       res.end(assets.get(name))
     } else if (req.url === '/command') {
+      let body = ''
+      req.on('data', (chunk) => {
+        body += chunk
+      })
+      req.on('end', () => {
+        const command = JSON.parse(body).command
+        res.writeHead(200, { 'content-type': 'application/json' })
+        if (
+          deferWhole &&
+          command?.kind === 'view' &&
+          command.intent?.kind === 'whole'
+        ) {
+          deferWhole = false
+          releaseWhole = () => res.end('{"ok":true}')
+          wholeArrived()
+        } else res.end('{"ok":false,"error":"unsupported"}')
+      })
+    } else if (req.url === '/pair') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end('{"ok":false,"error":"unsupported"}')
+      res.end('{"v":1,"ok":false,"error":"unsupported"}')
     } else if (req.url === '/') {
       res.writeHead(200, { 'content-type': 'text/html' })
-      res.end(
-        '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="app.css"><main id="app"></main><div id="status" role="status"></div><div id="toast" role="status"></div><script type="module" src="app.js"></script>',
-      )
+      res.end(shell)
     } else {
       res.writeHead(404)
       res.end()
@@ -132,6 +434,19 @@ export async function captureBrowserScene(
     return route.continue()
   })
   try {
+    const failureProof =
+      candidate && semantic ? await rendererFailureProof(browser, root) : null
+    const unavailableProof =
+      candidate && semantic
+        ? await deniedWebGLProof(
+            browser,
+            origin,
+            clients,
+            layout,
+            snapshot,
+            scenario.lang,
+          )
+        : null
     await page.clock.install({ time: new Date('2026-11-11T12:00:00.000Z') })
     await page.goto(origin, { waitUntil: 'load' })
     await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
@@ -180,8 +495,8 @@ export async function captureBrowserScene(
     }
     await page.locator('button[data-key="spin"]').click()
     const canvas = await page.locator('.bt-scene3d canvas').elementHandle()
-    const scanFiles = () =>
-      canvas.evaluate((element) => {
+    const scanFiles = (target = canvas) =>
+      target.evaluate((element) => {
         const rect = element.getBoundingClientRect()
         const tip = element.parentElement?.querySelector('.bt-tip')
         const found = new Map()
@@ -427,8 +742,8 @@ export async function captureBrowserScene(
           const parent = label.parentElement.getBoundingClientRect()
           return {
             text: label.textContent,
-            left: label.style.left,
-            top: label.style.top,
+            left: label.hidden ? null : label.style.left,
+            top: label.hidden ? null : label.style.top,
             parent: [parent.x, parent.y, parent.width, parent.height],
             hidden: label.hidden,
           }
@@ -469,7 +784,7 @@ export async function captureBrowserScene(
       )
     }
     const projectionBefore = await projected()
-    if (projectionBefore.length < 2)
+    if (projectionBefore.filter((label) => !label.hidden).length < 2)
       throw new Error(
         'WebGL camera proof needs at least two projected landmarks',
       )
@@ -668,6 +983,93 @@ export async function captureBrowserScene(
     )
     if (!(await canvas.evaluate((el) => el.isConnected)))
       throw new Error('ordinary settings update replaced the WebGL canvas')
+    // Screenshot the composited canvas during real Chromium input. Hide DOM
+    // labels/tooltip so their motion cannot masquerade as changed WebGL pixels.
+    const dragStyle = await page.addStyleTag({
+      content: '.bt-scene-labels, .bt-tip { visibility: hidden !important }',
+    })
+    const dragBounds = await canvas.boundingBox()
+    if (!dragBounds) throw new Error('held drag needs visible canvas bounds')
+    const dragClip = {
+      x: Math.ceil(dragBounds.x),
+      y: Math.ceil(dragBounds.y),
+      width: Math.floor(dragBounds.width) - 1,
+      height: Math.floor(dragBounds.height) - 1,
+    }
+    await canvas.evaluate((element) => {
+      window.__btHeldMoves = []
+      element.addEventListener('pointermove', (event) => {
+        if (event.isTrusted && event.buttons === 1)
+          window.__btHeldMoves.push([event.clientX, event.clientY])
+      })
+    })
+    const frame = async () => {
+      await page.clock.runFor(180)
+      return page.screenshot({ type: 'png', scale: 'css', clip: dragClip })
+    }
+    const x = dragBounds.x + dragBounds.width * 0.5
+    const y = dragBounds.y + dragBounds.height * 0.5
+    await page.mouse.move(x, y)
+    const beforeWheel = await frame()
+    await page.mouse.wheel(0, 220)
+    const afterWheel = await frame()
+    const beforeDragProjection = await projected()
+    await page.mouse.down()
+    await page.mouse.move(x + 55, y + 15, { steps: 5 })
+    const heldFirst = await frame()
+    const firstDragProjection = await projected()
+    await page.mouse.move(x + 115, y + 35, { steps: 5 })
+    const heldSecond = await frame()
+    const secondDragProjection = await projected()
+    const heldMoves = await page.evaluate(() => window.__btHeldMoves.length)
+    // Both screenshots were captured above while the primary button was held.
+    await page.mouse.up()
+    await dragStyle.evaluate((element) => element.remove())
+    const pixelChanges = await page.evaluate(
+      async (sources) => {
+        const buffers = []
+        for (const source of sources) {
+          const image = new Image()
+          image.src = source
+          await image.decode()
+          const canvas = document.createElement('canvas')
+          canvas.width = image.naturalWidth
+          canvas.height = image.naturalHeight
+          const context = canvas.getContext('2d')
+          if (!context) throw new Error('cannot decode gesture screenshots')
+          context.drawImage(image, 0, 0)
+          buffers.push(
+            context.getImageData(0, 0, canvas.width, canvas.height).data,
+          )
+        }
+        return buffers.slice(1).map((right, index) => {
+          const left = buffers[index]
+          let changed = 0
+          for (let i = 0; i < right.length; i += 4)
+            if (
+              left[i] !== right[i] ||
+              left[i + 1] !== right[i + 1] ||
+              left[i + 2] !== right[i + 2]
+            )
+              changed++
+          return changed
+        })
+      },
+      [beforeWheel, afterWheel, heldFirst, heldSecond].map(
+        (png) => `data:image/png;base64,${png.toString('base64')}`,
+      ),
+    )
+    if (
+      heldMoves < 2 ||
+      pixelChanges.some((count) => count < 20) ||
+      JSON.stringify(beforeDragProjection) ===
+        JSON.stringify(firstDragProjection) ||
+      JSON.stringify(firstDragProjection) ===
+        JSON.stringify(secondDragProjection)
+    )
+      throw new Error(
+        `wheel/held drag did not paint distinct frames: ${JSON.stringify({ heldMoves, pixelChanges })}`,
+      )
     if (
       !snapshot.facts.breakdown?.memoryFiles?.some(
         (file) => file.path === '/work/demo/CLAUDE.md' && file.tokens === 900,
@@ -714,10 +1116,398 @@ export async function captureBrowserScene(
       revealed.canvas.height <= 0
     )
       throw new Error('WebGL scene did not survive hide/reveal')
+    const compactMeasurements = []
+    for (const height of [430, 320, 430]) {
+      await page.setViewportSize({ width: 700, height })
+      // Playwright polls a synchronous predicate. An async predicate returns a
+      // truthy Promise before its animation-frame samples have completed.
+      await page.evaluate(() => {
+        window.__btCompactSample = undefined
+      })
+      await page.waitForFunction((expected) => {
+        const app = document.querySelector('#app')
+        const brand = !!document.querySelector('[data-key="brand"]')
+        const canvas = document.querySelector('.bt-scene3d canvas')
+        const header = document.querySelector('[data-key="pane-header"]')
+        const footer = document.querySelector('[data-key="pane-footer"]')
+        const wantsBrand = app?.clientHeight >= 408
+        if (
+          !app ||
+          app.clientHeight <= 0 ||
+          app.getBoundingClientRect().bottom > expected + 1 ||
+          brand !== wantsBrand ||
+          !canvas ||
+          !header ||
+          !footer
+        ) {
+          window.__btCompactSample = undefined
+          return false
+        }
+        const c = canvas.getBoundingClientRect()
+        const h = header.getBoundingClientRect()
+        const f = footer.getBoundingClientRect()
+        const values = [
+          c.left,
+          c.top,
+          c.width,
+          c.height,
+          h.bottom,
+          f.top,
+          f.bottom,
+        ]
+        const fits =
+          c.width > 0 &&
+          c.height > 0 &&
+          c.top >= h.bottom - 1 &&
+          c.bottom <= f.top + 1 &&
+          f.bottom <= innerHeight + 1
+        const previous = window.__btCompactSample
+        const stable =
+          fits &&
+          previous &&
+          values.every(
+            (value, index) => Math.abs(value - previous.values[index]) < 0.1,
+          )
+        const count = stable ? previous.count + 1 : 0
+        window.__btCompactSample = { values, count }
+        return count >= 3
+      }, height)
+      const compact = await page.evaluate(() => {
+        const app = document.querySelector('#app')
+        const canvas = document.querySelector('.bt-scene3d canvas')
+        const header = document.querySelector('[data-key="pane-header"]')
+        const footer = document.querySelector('[data-key="pane-footer"]')
+        const c = canvas?.getBoundingClientRect()
+        const h = header?.getBoundingClientRect()
+        const f = footer?.getBoundingClientRect()
+        return {
+          appHeight: app?.clientHeight,
+          roots: app?.children.length,
+          maps: document.querySelectorAll('[data-key="t-map"]').length,
+          brand: !!document.querySelector('[data-key="brand"]'),
+          canvas: c && {
+            width: c.width,
+            height: c.height,
+            top: c.top,
+            bottom: c.bottom,
+          },
+          headerBottom: h?.bottom,
+          footerTop: f?.top,
+          footerBottom: f?.bottom,
+          viewportHeight: innerHeight,
+        }
+      })
+      if (
+        compact.roots !== 1 ||
+        compact.maps !== 1 ||
+        compact.brand !== compact.appHeight >= 408 ||
+        !compact.canvas ||
+        compact.canvas.width <= 0 ||
+        compact.canvas.height <= 0 ||
+        compact.headerBottom === undefined ||
+        compact.footerTop === undefined ||
+        compact.footerBottom === undefined ||
+        compact.canvas.top < compact.headerBottom - 1 ||
+        compact.canvas.bottom > compact.footerTop + 1 ||
+        compact.footerBottom > compact.viewportHeight + 1
+      )
+        throw new Error(
+          `invalid compact transition: ${JSON.stringify(compact)}`,
+        )
+      compactMeasurements.push(compact)
+    }
+    if (candidate) {
+      // The pairing shell consumes height outside #app. At a short, wide
+      // viewport both its control and the dashboard header must receive clicks.
+      await page.setViewportSize({ width: 800, height: 320 })
+      const pair = page.getByRole('button', {
+        name: 'Pair with Chat',
+        exact: true,
+      })
+      const pairRequest = page.waitForRequest(
+        (request) => new URL(request.url()).pathname === '/pair',
+      )
+      await pair.click()
+      const request = await pairRequest
+      if (
+        JSON.stringify(request.postDataJSON()) !==
+        JSON.stringify({
+          v: 1,
+          generation: snapshot.generation,
+        })
+      )
+        throw new Error('compact pairing click sent the wrong generation')
+      await page
+        .getByText('Pairing refused: unsupported.', { exact: false })
+        .waitFor({ state: 'visible' })
+      await page.locator('[data-key="t-goal"]').click()
+      await page.locator('[data-key="plan-0"]').waitFor({ state: 'visible' })
+      await page.locator('[data-key="t-map"]').click()
+      await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
+    }
     await page.setViewportSize({ width: 1280, height: 720 })
+    // Local browser navigation is real; commands are refused by this fixture,
+    // so it cannot establish that a host mutation or file operation succeeded.
+    const tabs = {}
+    const landmarks = {
+      goal: '[data-key="plan-0"]',
+      files: '[data-key="kpi-start"]',
+      context: 'button[data-key="more-context"]',
+      coach: '[data-key="coach-run"]',
+      settings: '[data-key="lang-en"]',
+    }
+    for (const tab of ['goal', 'files', 'context', 'coach', 'settings']) {
+      const key = tab === 'settings' ? 'settings' : `t-${tab}`
+      await page.locator(`[data-key="${key}"]`).click()
+      await page.locator(landmarks[tab]).waitFor({ state: 'visible' })
+      if (tab === 'goal') {
+        const current = await page.locator('[data-key="goal"]').innerText()
+        const plan = await page.locator('[data-key="plan"]').innerText()
+        const complete = await page.locator('[data-key="plan-0"]').innerText()
+        const active = await page.locator('[data-key="plan-1"]').innerText()
+        if (
+          !current.includes('Check the final summary') ||
+          !plan.includes('1/2') ||
+          !complete.includes('✓') ||
+          !complete.includes('Read the note') ||
+          !active.includes('●') ||
+          !active.includes('Write the summary')
+        )
+          throw new Error(
+            'goal or plan progress does not match captured events',
+          )
+        const history = await page.locator('[data-key="history"]').innerText()
+        if (
+          history.indexOf('Check the final summary') < 0 ||
+          history.indexOf('Summarise the notes') < 0 ||
+          history.indexOf('Check the final summary') >=
+            history.indexOf('Summarise the notes')
+        )
+          throw new Error('goal history is not newest first')
+      }
+      tabs[tab] = await page.screenshot({ type: 'png', scale: 'css' })
+    }
+    await page.locator('[data-key="t-map"]').click()
+    await page.locator('[data-key="view-3d"]').click()
+    const svgMap = page.locator('[data-key="map-wrap"] .bt-svg')
+    await svgMap.waitFor({ state: 'visible' })
+    const mapBounds = await svgMap.boundingBox()
+    if (!mapBounds || mapBounds.width <= 0 || mapBounds.height <= 0)
+      throw new Error('2D map has no visible area')
+    tabs.map2d = await page.screenshot({ type: 'png', scale: 'css' })
+    await page.locator('[data-key="view-3d"]').click()
+    await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
     await page.waitForTimeout(100)
     if (errors.length) throw new Error(errors.join('; '))
     const png = await page.screenshot({ type: 'png', scale: 'css' })
+    // Exercise the real Chromium touch boundary after the visual screenshot: the
+    // captured host feed refuses commands, but requests still expose attempted opens.
+    const touchCanvas = await page.locator('.bt-scene3d canvas').elementHandle()
+    const touchFiles = await scanFiles(touchCanvas)
+    const touchTarget = touchFiles.find(([name]) => name === 'notes/a.md')
+    if (!touchTarget) throw new Error('touch proof needs a pickable file')
+    const [, point] = touchTarget
+    const touchBounds = await touchCanvas.boundingBox()
+    if (!touchBounds) throw new Error('touch proof needs canvas bounds')
+    const other = {
+      x:
+        point.x + (point.x + 40 < touchBounds.x + touchBounds.width ? 40 : -40),
+      y: point.y,
+      id: 1,
+    }
+    const file = { x: point.x, y: point.y, id: 2 }
+    if (
+      other.x <= touchBounds.x ||
+      other.x >= touchBounds.x + touchBounds.width
+    )
+      throw new Error('touch proof needs room for two distinct contacts')
+    const touchEvents = []
+    await page.exposeFunction('__brainTrailTouchProof', (event) =>
+      touchEvents.push(event),
+    )
+    await touchCanvas.evaluate((element) => {
+      for (const type of ['pointerdown', 'pointerup'])
+        element.addEventListener(
+          type,
+          (event) => {
+            if (event.pointerType === 'touch')
+              void window.__brainTrailTouchProof({
+                type: event.type,
+                pointerId: event.pointerId,
+                trusted: event.isTrusted,
+              })
+          },
+          true,
+        )
+    })
+    const opens = []
+    const isOpen = (request) => {
+      if (new URL(request.url()).pathname !== '/command') return false
+      const command = request.postDataJSON()?.command
+      return (
+        command?.kind === 'open' ||
+        (command?.kind === 'view' &&
+          command.intent?.kind === 'preview' &&
+          command.intent.ref !== null)
+      )
+    }
+    page.on('request', (request) => {
+      if (isOpen(request)) opens.push(request.postDataJSON().command)
+    })
+    const cdp = await context.newCDPSession(page)
+    await cdp.send('Emulation.setTouchEmulationEnabled', {
+      enabled: true,
+      maxTouchPoints: 2,
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [other],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [other, file],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [other],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [],
+    })
+    await page.clock.runFor(350)
+    await page.waitForTimeout(100)
+    if (
+      touchEvents.length !== 4 ||
+      touchEvents.some((event) => !event.trusted) ||
+      touchEvents[0].type !== 'pointerdown' ||
+      touchEvents[1].type !== 'pointerdown' ||
+      touchEvents[2].type !== 'pointerup' ||
+      touchEvents[3].type !== 'pointerup' ||
+      touchEvents[0].pointerId !== touchEvents[2].pointerId ||
+      touchEvents[1].pointerId !== touchEvents[3].pointerId ||
+      touchEvents[0].pointerId === touchEvents[1].pointerId
+    )
+      throw new Error(
+        `touch proof did not deliver trusted first-contact-first release: ${JSON.stringify(touchEvents)}`,
+      )
+    if (opens.length !== 0)
+      throw new Error(
+        `two-finger gesture attempted to open a file: ${JSON.stringify(opens)}`,
+      )
+    const positiveOpen = page.waitForEvent('request', {
+      predicate: isOpen,
+      timeout: 5000,
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [file],
+    })
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [],
+    })
+    await page.clock.runFor(350)
+    const positive = (await positiveOpen).postDataJSON().command
+    const openedPath =
+      positive.kind === 'open' ? positive.ref?.p : positive.intent?.ref?.p
+    if (openedPath !== 'notes/a.md')
+      throw new Error(
+        `single touch opened the wrong file: ${JSON.stringify(positive)}`,
+      )
+    await cdp.detach()
+    if (candidate) {
+      // A controlled delayed success tests the real page's response race. It
+      // does not stand in for a host executing the command.
+      await page.locator('[data-key="view-3d"]').click()
+      const mapImage = page.locator('[data-key="map-wrap"] .bt-svg')
+      await mapImage.waitFor({ state: 'visible' })
+      const viewBox = async () => {
+        const src = await mapImage.getAttribute('src')
+        return /viewBox="([^"]+)"/.exec(decodeURIComponent(src ?? ''))?.[1]
+      }
+      const originalBox = await viewBox()
+      const mapRect = await mapImage.boundingBox()
+      if (!mapRect || !originalBox) throw new Error('2D race probe has no map')
+      await page.mouse.move(
+        mapRect.x + mapRect.width / 2,
+        mapRect.y + mapRect.height / 2,
+      )
+      await page.mouse.wheel(0, -360)
+      await page.clock.runFor(200)
+      const zoomedBox = await viewBox()
+      if (!zoomedBox || zoomedBox === originalBox)
+        throw new Error(
+          '2D race probe could not establish a non-default camera',
+        )
+      await page.locator('[data-key="view-3d"]').click()
+      await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
+      const arrival = new Promise((resolve) => {
+        wholeArrived = resolve
+      })
+      deferWhole = true
+      await page.locator('[data-key="whole"]').click()
+      await arrival
+      await page.locator('[data-key="view-3d"]').click()
+      await mapImage.waitFor({ state: 'visible' })
+      const beforeReplyBox = await viewBox()
+      if (beforeReplyBox !== zoomedBox)
+        throw new Error('2D camera changed before delayed 3D reset completed')
+      const wholeResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === '/command' &&
+          response.request().postDataJSON()?.command?.intent?.kind === 'whole',
+      )
+      releaseWhole()
+      releaseWhole = undefined
+      await wholeResponse
+      await page.clock.runFor(100)
+      if ((await viewBox()) !== beforeReplyBox)
+        throw new Error('delayed 3D reset changed the current 2D camera')
+      await page.locator('[data-key="view-3d"]').click()
+      await page.waitForSelector('.bt-scene3d canvas', { state: 'visible' })
+    }
+    // Synthetic presentation variants derived from the captured SDK feed;
+    // command execution and host-side failure are not asserted by this replay.
+    let probeRevision = snapshot.revision + 20
+    const publishVariant = (changes) => {
+      const event = {
+        ...snapshot,
+        revision: probeRevision++,
+        facts: { ...snapshot.facts, ...changes },
+      }
+      for (const client of clients)
+        client.write(`data: ${JSON.stringify(event)}\n\n`)
+    }
+    publishVariant({ workspace: { kind: 'loading', since: Date.now() } })
+    await page
+      .getByText(
+        scenario.lang === 'fr'
+          ? 'Je range le dossier en un disque'
+          : 'Packing the folder into one disc',
+        { exact: false },
+      )
+      .waitFor({ state: 'visible' })
+    tabs.loading = await page.screenshot({ type: 'png', scale: 'css' })
+    publishVariant({
+      workspace: { kind: 'failed', message: 'SYNTHETIC_INDEX_FAILURE' },
+    })
+    await page
+      .getByText('SYNTHETIC_INDEX_FAILURE', { exact: false })
+      .waitFor({ state: 'visible' })
+    await page.locator('[data-key="retry"]').waitFor({ state: 'visible' })
+    tabs.error = await page.screenshot({ type: 'png', scale: 'css' })
+    publishVariant({ events: [] })
+    await page.locator('[data-key="map-empty"]').waitFor({ state: 'visible' })
+    tabs.empty = await page.screenshot({ type: 'png', scale: 'css' })
+    await page.locator('[data-key="t-coach"]').click()
+    publishVariant({
+      coach: { text: '', at: 0, busy: false, error: 'SYNTHETIC_COACH_REFUSAL' },
+    })
+    await page
+      .getByText('SYNTHETIC_COACH_REFUSAL', { exact: false })
+      .waitFor({ state: 'visible' })
+    tabs.coachError = await page.screenshot({ type: 'png', scale: 'css' })
     for (const client of clients) client.end()
     await page
       .getByText('Connection lost. Reopen from the host.')
@@ -727,9 +1517,22 @@ export async function captureBrowserScene(
     if (errors.length) throw new Error(errors.join('; '))
     return {
       png,
-      probe: { initial, resized, revealed, readFilePixels: pixels },
+      tabs,
+      probe: {
+        failureProof,
+        unavailableProof,
+        initial,
+        resized,
+        revealed,
+        compactMeasurements,
+        mapBounds,
+        stateScreenshotLimit:
+          'State screenshots are manual diagnostics, not pixel equality proofs; empty-state WebGL paint timing is nondeterministic.',
+        readFilePixels: pixels,
+      },
     }
   } finally {
+    releaseWhole?.()
     await context.close()
     for (const client of clients) client.end()
     await new Promise((resolve) => server.close(resolve))

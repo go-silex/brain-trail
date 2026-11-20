@@ -7,10 +7,9 @@ import type {
 } from '../types/view'
 import { replay, sliceToStep } from './fold'
 import { strings } from './i18n'
-import { DARK, kindColors } from './map'
+import { kindColors } from './map'
 import type { MapRenderer } from './map'
 import type { FigureId } from './readout'
-import { drawSpin } from './spin'
 import { projectSemantics } from './scene3d'
 
 // In a framed pane (`s.fill`) the map takes the whole box the header and the footer leave, and its
@@ -69,22 +68,7 @@ export const renderMap = <N, Press>(
   let svg = '',
     drawn: DrawnMap | undefined
   const scene = in3d && R.Scene3d
-  if (scene) {
-    // WebGL owns its camera and pointer handling; the shared shell remains here.
-  } else if (in3d) {
-    const result = drawSpin(L, T, P, {
-      widthPx: s.widthPx,
-      now: s.now,
-      cam,
-      follow: isTrail,
-      filesWord: vault ? S.notes : S.files,
-      outside: folded.outside,
-      dark: P.bg === DARK.bg,
-      ...(fill !== undefined && { aspect: fill.mapAspect }),
-    })
-    svg = result.svg
-    drawn = { kind: '3d', frame: { view: result.view, layout: L, touched } }
-  } else {
+  if (!in3d) {
     const result = maps.draw(L, T, P, {
       zoomed: isTrail,
       widthPx: s.widthPx,
@@ -191,6 +175,12 @@ export const renderMap = <N, Press>(
       key: 'zoom-in',
       label: '+',
       onPress: () => act.intent({ kind: 'zoom-3d', dir: 'in' }),
+    }),
+    // always there: the browser scene's own camera is not in the props, so no host can tell it is whole
+    h(Button, {
+      key: 'whole',
+      label: '⤢',
+      onPress: () => act.intent({ kind: 'whole' }),
     }),
   ]
   const zoomControls = in3d

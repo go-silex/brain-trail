@@ -8,30 +8,58 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { brain } from '../../hooks/scene3d'
 import { kindColors } from '../../hooks/map'
 import { LOGOS } from '../../hooks/logos'
+import {
+  dragAction,
+  dragZoom,
+  heldBesides,
+  heldIn,
+  pointerButton,
+  wheelRows,
+  wheelZoom,
+  type DragAction,
+  type PointerButton,
+} from '../../hooks/pointer'
+import { ZOOM_MAX, ZOOM_MIN } from '../../hooks/scene3d'
 import type { Scene3dProps } from '../../types/view'
+
+type Pose = {
+  position: THREE.Vector3
+  target: THREE.Vector3
+  quaternion: THREE.Quaternion
+}
+// A press of the pointer on the scene. Mouse and pen drags are the scene's own (`action`);
+// touch turns and pans stay OrbitControls'. A drag goes on in stretches: `from` is the camera
+// the current one started from, at the pointer's (x, y); `wrote` the camera it last set, with
+// the pointer at `at`. `mixed`: another button joined the press, which is then never a click.
+type Press = {
+  pointerId: number
+  button: PointerButton
+  action?: DragAction
+  x: number
+  y: number
+  at: { x: number; y: number }
+  mixed: boolean
+  from?: Pose
+  wrote?: Pose
+}
+export class WebGLUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('WebGL context creation failed', { cause })
+    this.name = 'WebGLUnavailableError'
+  }
+}
 
 // A scene belongs to one mounted map, not to an individual render of the pane.
 export class WebGLScene {
-  private readonly renderer = new THREE.WebGLRenderer({
-    antialias: true,
-    powerPreference: 'high-performance',
-  })
-  private readonly scene = new THREE.Scene()
-  private readonly camera = new THREE.PerspectiveCamera(52, 1, 0.5, 30000)
-  private readonly controls = new OrbitControls(
-    this.camera,
-    this.renderer.domElement,
-  )
-  private readonly composer = new EffectComposer(this.renderer)
-  private readonly bloom = new UnrealBloomPass(
-    new THREE.Vector2(1, 1),
-    0.85,
-    0.5,
-    0.32,
-  )
-  private readonly output = new OutputPass()
-  private readonly content = new THREE.Group()
-  private readonly background = new THREE.Group()
+  private readonly renderer!: THREE.WebGLRenderer
+  private readonly scene!: THREE.Scene
+  private readonly camera!: THREE.PerspectiveCamera
+  private readonly controls!: OrbitControls
+  private readonly composer!: EffectComposer
+  private readonly bloom!: UnrealBloomPass
+  private readonly output!: OutputPass
+  private readonly content!: THREE.Group
+  private readonly background!: THREE.Group
   private backgroundLayout?: Scene3dProps['layout']
   private backgroundColor = ''
   private backgroundLight?: boolean
@@ -39,13 +67,16 @@ export class WebGLScene {
   private readonly pointer = new THREE.Vector2()
   private readonly labels = document.createElement('div')
   private readonly tip = document.createElement('div')
+  private readonly cleanup: (() => void)[] = []
+  private readonly resources = new Set<{ dispose(): void }>()
   private labelItems: { element: HTMLElement; position: THREE.Vector3 }[] = []
   private hoverNames = true
   private adjusted = false
-  private autoPaused = false
-  private readonly observer: ResizeObserver
+  // An OrbitControls touch turn or pan in progress: the spin waits for it, then resumes if it was on.
+  private gesturing = false
+  private readonly observer!: ResizeObserver
   private points?: THREE.Points
-  private readonly halo = this.makeHalo()
+  private readonly halo!: THREE.Texture
   private readonly logos = new Map<string, THREE.Texture>()
   private comets: {
     sprite: THREE.Sprite
@@ -57,7 +88,9 @@ export class WebGLScene {
   private frame = 0
   private width = 0
   private height = 0
-  private down?: { x: number; y: number }
+  private press?: Press
+  // the camera's distance for the whole picture: the zoom limits are relative to it, as on the SVG maps
+  private fitted = 1
   private openTimer?: number
   private tween?: {
     start: number
@@ -78,45 +111,117 @@ export class WebGLScene {
     props: Scene3dProps,
   ) {
     this.props = props
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    this.renderer.domElement.tabIndex = 0
-    this.renderer.domElement.setAttribute('aria-label', 'Interactive 3D map')
-    element.appendChild(this.renderer.domElement)
-    this.labels.className = 'bt-scene-labels'
-    element.appendChild(this.labels)
-    this.tip.className = 'bt-tip'
-    this.tip.hidden = true
-    element.appendChild(this.tip)
-    this.scene.add(this.content)
-    this.scene.add(this.background)
-    this.composer.addPass(new RenderPass(this.scene, this.camera))
-    this.composer.addPass(this.bloom)
-    this.composer.addPass(this.output)
-    this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.07
-    this.controls.rotateSpeed = 0.55
-    this.controls.enableZoom = false
-    this.controls.screenSpacePanning = true
-    this.controls.addEventListener('start', this.manual)
-    this.renderer.domElement.addEventListener('pointerdown', this.pointerDown)
-    this.renderer.domElement.addEventListener('pointerup', this.pointerUp)
-    this.renderer.domElement.addEventListener('pointermove', this.pointerMove)
-    this.renderer.domElement.addEventListener('pointerleave', this.pointerLeave)
-    this.renderer.domElement.addEventListener('dblclick', this.doubleClick)
-    this.renderer.domElement.addEventListener('wheel', this.wheel, {
-      passive: false,
-    })
-    this.renderer.domElement.addEventListener('keydown', this.keyDown)
-    this.renderer.domElement.addEventListener('keyup', this.keyUp)
-    this.renderer.domElement.addEventListener('blur', this.blur)
-    this.observer = new ResizeObserver(() => this.resize())
-    this.observer.observe(element)
-    this.build()
-    this.fit()
-    this.resize()
-    this.follow()
-    this.positionLabels()
-    this.frame = requestAnimationFrame(this.tick)
+    try {
+      try {
+        this.renderer = new THREE.WebGLRenderer({
+          antialias: true,
+          powerPreference: 'high-performance',
+        })
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message === 'Error creating WebGL context.' ||
+            error.message ===
+              'Error creating WebGL context with your selected attributes.')
+        )
+          throw new WebGLUnavailableError(error)
+        throw error
+      }
+      this.cleanup.push(() => this.renderer.dispose())
+      this.cleanup.push(() => this.renderer.forceContextLoss())
+      this.cleanup.push(() => this.renderer.domElement.remove())
+      this.cleanup.push(() => this.labels.remove())
+      this.cleanup.push(() => this.tip.remove())
+      this.scene = new THREE.Scene()
+      this.camera = new THREE.PerspectiveCamera(52, 1, 0.5, 30000)
+      this.content = new THREE.Group()
+      this.background = new THREE.Group()
+      this.cleanup.push(() => {
+        for (const resource of this.resources) this.releaseResource(resource)
+      })
+      this.cleanup.push(() => this.clearGroup(this.content))
+      this.cleanup.push(() => this.clearGroup(this.background))
+      this.cleanup.push(() => {
+        for (const texture of this.logos.values()) {
+          try {
+            texture.dispose()
+          } catch {}
+        }
+        this.logos.clear()
+      })
+      this.controls = new OrbitControls(this.camera, this.renderer.domElement)
+      this.cleanup.push(() => this.controls.dispose())
+      this.composer = new EffectComposer(this.renderer)
+      this.cleanup.push(() => this.composer.dispose())
+      this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.85, 0.5, 0.32)
+      this.cleanup.push(() => this.bloom.dispose())
+      this.output = new OutputPass()
+      this.cleanup.push(() => this.output.dispose())
+      this.halo = this.makeHalo()
+      this.cleanup.push(() => this.halo.dispose())
+      this.cleanup.push(() => this.removeListeners())
+      this.cleanup.push(() => clearTimeout(this.openTimer))
+      this.cleanup.push(() => cancelAnimationFrame(this.frame))
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+      this.renderer.domElement.tabIndex = 0
+      this.renderer.domElement.setAttribute('aria-label', 'Interactive 3D map')
+      element.appendChild(this.renderer.domElement)
+      this.labels.className = 'bt-scene-labels'
+      element.appendChild(this.labels)
+      this.tip.className = 'bt-tip'
+      this.tip.hidden = true
+      element.appendChild(this.tip)
+      this.scene.add(this.content)
+      this.scene.add(this.background)
+      this.composer.addPass(new RenderPass(this.scene, this.camera))
+      this.composer.addPass(this.bloom)
+      this.composer.addPass(this.output)
+      this.controls.enableDamping = true
+      this.controls.dampingFactor = 0.07
+      this.controls.rotateSpeed = 0.55
+      this.controls.enableZoom = false
+      this.controls.screenSpacePanning = true
+      // Mouse and pen drags follow the maps' shared policy (`drag`), whatever modifier is held:
+      // OrbitControls keeps touch and the spin, none of its button or modifier mappings.
+      this.controls.mouseButtons = { LEFT: null, MIDDLE: null, RIGHT: null }
+      this.controls.addEventListener('start', this.grab)
+      this.controls.addEventListener('end', this.release)
+      this.renderer.domElement.addEventListener('pointerdown', this.pointerDown)
+      this.renderer.domElement.addEventListener('pointerup', this.pointerUp)
+      this.renderer.domElement.addEventListener(
+        'pointercancel',
+        this.pointerCancel,
+      )
+      this.renderer.domElement.addEventListener(
+        'lostpointercapture',
+        this.pointerCancel,
+      )
+      this.renderer.domElement.addEventListener('mousedown', this.mouseDown)
+      this.renderer.domElement.addEventListener('pointermove', this.pointerMove)
+      this.renderer.domElement.addEventListener(
+        'pointerleave',
+        this.pointerLeave,
+      )
+      this.renderer.domElement.addEventListener('dblclick', this.doubleClick)
+      this.renderer.domElement.addEventListener('wheel', this.wheel, {
+        passive: false,
+      })
+      this.renderer.domElement.addEventListener('keydown', this.keyDown)
+      this.renderer.domElement.addEventListener('keyup', this.keyUp)
+      this.renderer.domElement.addEventListener('blur', this.blur)
+      this.observer = new ResizeObserver(() => this.resize())
+      this.cleanup.push(() => this.observer.disconnect())
+      this.observer.observe(element)
+      this.build()
+      this.fit()
+      this.resize()
+      this.follow()
+      this.positionLabels()
+      this.frame = requestAnimationFrame(this.tick)
+    } catch (error) {
+      this.dispose()
+      throw error
+    }
   }
 
   update(props: Scene3dProps) {
@@ -132,7 +237,6 @@ export class WebGLScene {
     if (changedLayout) this.fit()
     const before = previous.state.cam3d,
       after = props.state.cam3d
-    if (before.spin !== after.spin) this.autoPaused = false
     if (before.yaw !== after.yaw) {
       const offset = this.camera.position.clone().sub(this.controls.target)
       offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), after.yaw - before.yaw)
@@ -140,10 +244,7 @@ export class WebGLScene {
       this.adjusted = true
     }
     if (before.zoom !== after.zoom && before.zoom > 0 && after.zoom > 0) {
-      this.camera.position
-        .sub(this.controls.target)
-        .multiplyScalar(before.zoom / after.zoom)
-        .add(this.controls.target)
+      this.zoomAbout(this.controls.target, before.zoom / after.zoom)
       this.adjusted = true
     }
     if (previous.state.zoomed && !props.state.zoomed && before === after)
@@ -173,6 +274,18 @@ export class WebGLScene {
     return new THREE.CanvasTexture(canvas)
   }
 
+  private own<T extends { dispose(): void }>(resource: T): T {
+    this.resources.add(resource)
+    return resource
+  }
+
+  private releaseResource(resource: { dispose(): void }) {
+    if (!this.resources.delete(resource)) return
+    try {
+      resource.dispose()
+    } catch {}
+  }
+
   private clearGroup(group: THREE.Group) {
     group.traverse((obj) => {
       if (
@@ -181,11 +294,15 @@ export class WebGLScene {
         obj instanceof THREE.Mesh ||
         obj instanceof THREE.Sprite
       ) {
-        if (!(obj instanceof THREE.Sprite)) obj.geometry.dispose()
+        if (!(obj instanceof THREE.Sprite)) {
+          this.releaseResource(obj.geometry)
+        }
         const materials = Array.isArray(obj.material)
           ? obj.material
           : [obj.material]
-        for (const material of materials) material.dispose()
+        for (const material of materials) {
+          this.releaseResource(material)
+        }
       }
     })
     group.clear()
@@ -253,7 +370,7 @@ export class WebGLScene {
       }
       color.set([c.r, c.g, c.b], i * 3)
     }
-    const geometry = new THREE.BufferGeometry()
+    const geometry = this.own(new THREE.BufferGeometry())
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setAttribute('color', new THREE.BufferAttribute(color, 3))
     geometry.setAttribute('pointSize', new THREE.BufferAttribute(sizes, 1))
@@ -263,24 +380,26 @@ export class WebGLScene {
     }
     this.points = new THREE.Points(
       geometry,
-      new THREE.ShaderMaterial({
-        uniforms: {
-          scale: { value: Math.max(1, this.height) * 1.3 },
-          time: { value: 0 },
-        },
-        vertexShader: lightBackground
-          ? 'attribute float pointSize; uniform float scale; uniform float time; varying vec3 vColor; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float pulse = 0.9 + 0.1*sin(time*1.1 + position.x*.02 + position.z*.01); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * pulse; }'
-          : 'attribute float pointSize; attribute float phase; attribute float glow; uniform float scale; uniform float time; varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float tw = 0.8 + 0.2 * sin(time * 1.1 + phase * 6.283); float pulse = 1.0 + glow * 0.28 * sin(time * 2.6 + phase * 6.283); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * mix(tw, 1.0, glow); vGlow = glow; vFar = 1.0 - smoothstep(1400.0, 9000.0, -mv.z); }',
-        fragmentShader: lightBackground
-          ? 'varying vec3 vColor; void main(){ float d = length(gl_PointCoord - vec2(0.5)); if (d > 0.5) discard; float a = pow(1.0 - d * 2.0, 1.5); gl_FragColor = vec4(vColor, a); }'
-          : 'varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard; float core = 1.0 - smoothstep(0.0, 0.5, d); float a = pow(core, mix(2.2, 1.3, vGlow)); gl_FragColor = vec4(vColor, a * mix(0.5, 1.0, vGlow) * mix(0.35, 1.0, vFar)); }',
-        transparent: true,
-        depthWrite: false,
-        blending: lightBackground
-          ? THREE.NormalBlending
-          : THREE.AdditiveBlending,
-        vertexColors: true,
-      }),
+      this.own(
+        new THREE.ShaderMaterial({
+          uniforms: {
+            scale: { value: Math.max(1, this.height) * 1.3 },
+            time: { value: 0 },
+          },
+          vertexShader: lightBackground
+            ? 'attribute float pointSize; uniform float scale; uniform float time; varying vec3 vColor; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float pulse = 0.9 + 0.1*sin(time*1.1 + position.x*.02 + position.z*.01); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * pulse; }'
+            : 'attribute float pointSize; attribute float phase; attribute float glow; uniform float scale; uniform float time; varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); float tw = 0.8 + 0.2 * sin(time * 1.1 + phase * 6.283); float pulse = 1.0 + glow * 0.28 * sin(time * 2.6 + phase * 6.283); gl_PointSize = clamp(pointSize * pulse * scale / -mv.z, 3.0, 70.0); gl_Position = projectionMatrix * mv; vColor = color * mix(tw, 1.0, glow); vGlow = glow; vFar = 1.0 - smoothstep(1400.0, 9000.0, -mv.z); }',
+          fragmentShader: lightBackground
+            ? 'varying vec3 vColor; void main(){ float d = length(gl_PointCoord - vec2(0.5)); if (d > 0.5) discard; float a = pow(1.0 - d * 2.0, 1.5); gl_FragColor = vec4(vColor, a); }'
+            : 'varying vec3 vColor; varying float vGlow; varying float vFar; void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard; float core = 1.0 - smoothstep(0.0, 0.5, d); float a = pow(core, mix(2.2, 1.3, vGlow)); gl_FragColor = vec4(vColor, a * mix(0.5, 1.0, vGlow) * mix(0.35, 1.0, vFar)); }',
+          transparent: true,
+          depthWrite: false,
+          blending: lightBackground
+            ? THREE.NormalBlending
+            : THREE.AdditiveBlending,
+          vertexColors: true,
+        }),
+      ),
     )
     this.content.add(this.points)
     const point = (n: number) =>
@@ -338,7 +457,7 @@ export class WebGLScene {
               )
         }
       }
-      const synapses = new THREE.BufferGeometry()
+      const synapses = this.own(new THREE.BufferGeometry())
       synapses.setAttribute(
         'position',
         new THREE.Float32BufferAttribute(segments, 3),
@@ -346,34 +465,38 @@ export class WebGLScene {
       this.background.add(
         new THREE.LineSegments(
           synapses,
-          new THREE.LineBasicMaterial({
-            color: lightBackground ? palette.fg : '#9fb6c4',
-            transparent: true,
-            opacity: lightBackground ? 0.08 : 0.045,
-            blending: lightBackground
-              ? THREE.NormalBlending
-              : THREE.AdditiveBlending,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.LineBasicMaterial({
+              color: lightBackground ? palette.fg : '#9fb6c4',
+              transparent: true,
+              opacity: lightBackground ? 0.08 : 0.045,
+              blending: lightBackground
+                ? THREE.NormalBlending
+                : THREE.AdditiveBlending,
+              depthWrite: false,
+            }),
+          ),
         ),
       )
       const rim = (color: string, opacity: number) =>
-        new THREE.ShaderMaterial({
-          uniforms: {
-            tint: { value: new THREE.Color(color) },
-            strength: { value: opacity },
-          },
-          vertexShader:
-            'varying vec3 n; varying vec3 v; void main(){ vec4 p = modelViewMatrix * vec4(position,1.0); n = normalize(normalMatrix * normal); v = normalize(-p.xyz); gl_Position = projectionMatrix * p; }',
-          fragmentShader:
-            'uniform vec3 tint; uniform float strength; varying vec3 n; varying vec3 v; void main(){ float f = pow(1.0 - abs(dot(n,v)),4.5) * strength; gl_FragColor = vec4(tint*f,f); }',
-          transparent: true,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-        })
+        this.own(
+          new THREE.ShaderMaterial({
+            uniforms: {
+              tint: { value: new THREE.Color(color) },
+              strength: { value: opacity },
+            },
+            vertexShader:
+              'varying vec3 n; varying vec3 v; void main(){ vec4 p = modelViewMatrix * vec4(position,1.0); n = normalize(normalMatrix * normal); v = normalize(-p.xyz); gl_Position = projectionMatrix * p; }',
+            fragmentShader:
+              'uniform vec3 tint; uniform float strength; varying vec3 n; varying vec3 v; void main(){ float f = pow(1.0 - abs(dot(n,v)),4.5) * strength; gl_FragColor = vec4(tint*f,f); }',
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+          }),
+        )
       const membrane = new THREE.Mesh(
-        new THREE.SphereGeometry(1, 64, 32),
+        this.own(new THREE.SphereGeometry(1, 64, 32)),
         rim('#35b0ff', 0.1),
       )
       membrane.scale.set(
@@ -385,7 +508,7 @@ export class WebGLScene {
       this.background.add(membrane)
       for (const label of shape.labels) {
         const lobe = new THREE.Mesh(
-          new THREE.SphereGeometry(1, 32, 16),
+          this.own(new THREE.SphereGeometry(1, 32, 16)),
           rim('#8fb0c4', 0.13),
         )
         lobe.position.set(
@@ -415,18 +538,20 @@ export class WebGLScene {
           i * 3,
         )
       }
-      const dustGeometry = new THREE.BufferGeometry()
+      const dustGeometry = this.own(new THREE.BufferGeometry())
       dustGeometry.setAttribute('position', new THREE.BufferAttribute(dust, 3))
       this.background.add(
         new THREE.Points(
           dustGeometry,
-          new THREE.PointsMaterial({
-            color: '#5b6b75',
-            size: 14,
-            transparent: true,
-            opacity: 0.45,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.PointsMaterial({
+              color: '#5b6b75',
+              size: 14,
+              transparent: true,
+              opacity: 0.45,
+              depthWrite: false,
+            }),
+          ),
         ),
       )
     }
@@ -447,20 +572,24 @@ export class WebGLScene {
       const curve = new THREE.QuadraticBezierCurve3(start, mid, end)
       curves.push(curve)
       const material = b.gap
-        ? new THREE.LineDashedMaterial({
-            color: colors.gap,
-            dashSize: 10,
-            gapSize: 8,
-            transparent: true,
-            opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
-          })
-        : new THREE.LineBasicMaterial({
-            color: colors.read,
-            transparent: true,
-            opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
-          })
+        ? this.own(
+            new THREE.LineDashedMaterial({
+              color: colors.gap,
+              dashSize: 10,
+              gapSize: 8,
+              transparent: true,
+              opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
+            }),
+          )
+        : this.own(
+            new THREE.LineBasicMaterial({
+              color: colors.read,
+              transparent: true,
+              opacity: Math.max(0.2, 1 - (trail.moves.length - i) / 35),
+            }),
+          )
       const line = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(curve.getPoints(40)),
+        this.own(new THREE.BufferGeometry()).setFromPoints(curve.getPoints(40)),
         material,
       )
       if (b.gap) line.computeLineDistances()
@@ -499,21 +628,25 @@ export class WebGLScene {
       stations.set(name, position)
       addLabel(`${name} · ${count}`, position)
       const halo = new THREE.Sprite(
-        new THREE.SpriteMaterial({
-          map: this.halo,
-          color: '#35b0ff',
-          transparent: true,
-          opacity: 0.55,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
+        this.own(
+          new THREE.SpriteMaterial({
+            map: this.halo,
+            color: '#35b0ff',
+            transparent: true,
+            opacity: 0.55,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          }),
+        ),
       )
       halo.position.copy(position)
       halo.scale.set(150, 150, 1)
       this.content.add(halo)
       const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(Math.max(8, layout.size / 120), 12, 8),
-        new THREE.MeshBasicMaterial({ color: '#35b0ff' }),
+        this.own(
+          new THREE.SphereGeometry(Math.max(8, layout.size / 120), 12, 8),
+        ),
+        this.own(new THREE.MeshBasicMaterial({ color: '#35b0ff' })),
       )
       marker.position.copy(position)
       this.content.add(marker)
@@ -522,15 +655,17 @@ export class WebGLScene {
         let texture = this.logos.get(src)
         if (texture === undefined) {
           texture = new THREE.TextureLoader().load(src)
-          texture.colorSpace = THREE.SRGBColorSpace
           this.logos.set(src, texture)
+          texture.colorSpace = THREE.SRGBColorSpace
         }
         const logo = new THREE.Sprite(
-          new THREE.SpriteMaterial({
-            map: texture,
-            transparent: true,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.SpriteMaterial({
+              map: texture,
+              transparent: true,
+              depthWrite: false,
+            }),
+          ),
         )
         logo.position.copy(position)
         logo.scale.set(64, 64, 1)
@@ -552,25 +687,31 @@ export class WebGLScene {
       curves.push(curve)
       this.content.add(
         new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(curve.getPoints(24)),
-          new THREE.LineBasicMaterial({
-            color: call.err ? colors.gap : '#35b0ff',
-            transparent: true,
-            opacity: 0.6,
-          }),
+          this.own(new THREE.BufferGeometry()).setFromPoints(
+            curve.getPoints(24),
+          ),
+          this.own(
+            new THREE.LineBasicMaterial({
+              color: call.err ? colors.gap : '#35b0ff',
+              transparent: true,
+              opacity: 0.6,
+            }),
+          ),
         ),
       )
     }
     curves.slice(-8).forEach((curve, i) => {
       for (let j = 0; j < 2; j++) {
         const sprite = new THREE.Sprite(
-          new THREE.SpriteMaterial({
-            map: this.halo,
-            color: '#ffc9a8',
-            transparent: true,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-          }),
+          this.own(
+            new THREE.SpriteMaterial({
+              map: this.halo,
+              color: '#ffc9a8',
+              transparent: true,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false,
+            }),
+          ),
         )
         sprite.scale.set(26, 26, 1)
         this.content.add(sprite)
@@ -656,6 +797,7 @@ export class WebGLScene {
     })
     this.controls.target.copy(target)
     this.camera.position.copy(target).addScaledVector(direction, distance)
+    this.fitted = distance
     this.camera.far = Math.max(30000, distance * 4)
     this.camera.updateProjectionMatrix()
     this.controls.update()
@@ -707,9 +849,16 @@ export class WebGLScene {
     this.hoverNames = enabled
     if (!enabled) this.pointerLeave()
   }
+  private grab = () => {
+    this.gesturing = true
+    this.manual()
+  }
+  private release = () => {
+    this.gesturing = false
+  }
+  // Moving the camera by hand stops following Claude; the spin choice stays the person's.
   private manual = () => {
     this.adjusted = true
-    this.autoPaused = true
     this.tween = undefined
     if (this.props.state.zoomed && !this.stoppingFollow) {
       this.stoppingFollow = true
@@ -720,9 +869,118 @@ export class WebGLScene {
         })
     }
   }
+  // A press ends once: on its button's release, a cancel or a lost capture, or, when that
+  // release was lost, at the next press, the first move or another button's release that no
+  // longer holds its button. Only its own release, never dragged nor chorded, is a click; a
+  // press that replaces another pointer's (a second finger) is chorded from the start.
   private pointerDown = (event: PointerEvent) => {
-    this.down = { x: event.clientX, y: event.clientY }
     this.renderer.domElement.focus()
+    const button = pointerButton(event.button)
+    if (button === undefined) return
+    // no autoscroll: the middle button zooms
+    if (button === 'middle') event.preventDefault()
+    this.press = {
+      pointerId: event.pointerId,
+      button,
+      action:
+        event.pointerType === 'touch' ? undefined : dragAction(button, true),
+      x: event.clientX,
+      y: event.clientY,
+      at: { x: event.clientX, y: event.clientY },
+      mixed:
+        this.press !== undefined && this.press.pointerId !== event.pointerId,
+    }
+    this.renderer.domElement.setPointerCapture(event.pointerId)
+  }
+  private pointerCancel = (event: PointerEvent) => {
+    if (this.press?.pointerId === event.pointerId) this.press = undefined
+  }
+  private mouseDown = (event: MouseEvent) => {
+    if (event.button === 1) event.preventDefault()
+  }
+  private pose(): Pose {
+    return {
+      position: this.camera.position.clone(),
+      target: this.controls.target.clone(),
+      quaternion: this.camera.quaternion.clone(),
+    }
+  }
+  // whether the camera left a pose, beyond rounding
+  private leftPose(pose: Pose) {
+    const near = (1e-6 * this.fitted) ** 2
+    return (
+      this.camera.position.distanceToSquared(pose.position) > near ||
+      this.controls.target.distanceToSquared(pose.target) > near
+    )
+  }
+  // A drag applies the shared policy to the camera its stretch started from, with the pointer's
+  // whole travel since then: left turns around the target, right pans, middle zooms on the
+  // middle of the view (up in, down out). The projection is the scene's own.
+  private drag(press: Press, event: PointerEvent) {
+    if (press.action === undefined) return
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    if (press.from === undefined) {
+      // a click until the pointer travels
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 5)
+        return
+      press.from = this.pose()
+      this.manual()
+    } else if (press.wrote !== undefined && this.leftPose(press.wrote)) {
+      // Something else moved the camera since the drag did (the wheel, a key, a button): the
+      // drag goes on from there, with the pointer's travel since it was last seen.
+      press.from = this.pose()
+      press.x = press.at.x
+      press.y = press.at.y
+    }
+    const from = press.from,
+      dx = event.clientX - press.x,
+      dy = event.clientY - press.y
+    const offset = from.position.clone().sub(from.target)
+    this.controls.target.copy(from.target)
+    if (press.action === 'orbit') {
+      // as OrbitControls turns: a full turn for the view's height over the rotate speed
+      const turn = (2 * Math.PI * this.controls.rotateSpeed) / rect.height
+      const s = new THREE.Spherical().setFromVector3(offset)
+      s.theta -= dx * turn
+      s.phi = Math.max(
+        this.controls.minPolarAngle,
+        Math.min(this.controls.maxPolarAngle, s.phi - dy * turn),
+      )
+      s.makeSafe()
+      this.camera.position.copy(from.target).add(offset.setFromSpherical(s))
+    } else if (press.action === 'pan') {
+      // the point at the target's depth stays under the pointer
+      const unit =
+        (2 *
+          offset.length() *
+          Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) /
+        rect.height
+      const move = new THREE.Vector3(-dx * unit, dy * unit, 0).applyQuaternion(
+        from.quaternion,
+      )
+      this.controls.target.add(move)
+      this.camera.position.copy(from.position).add(move)
+    } else {
+      this.camera.position.copy(from.position)
+      this.zoomAbout(from.target, dragZoom(dy / rect.height))
+    }
+    press.wrote = this.pose()
+    press.at = { x: event.clientX, y: event.clientY }
+  }
+  // Zooms by the shared factor `f` (> 1 out) around a point at the target's depth, which keeps
+  // its place on the screen. The distance to the target stays within the SVG maps' zoom limits,
+  // relative to the whole picture; a camera already beyond them only comes back.
+  private zoomAbout(point: THREE.Vector3, f: number) {
+    const distance = this.camera.position.distanceTo(this.controls.target)
+    if (!(distance > 0) || !Number.isFinite(f) || f === 1) return
+    const near = Math.min(this.fitted / ZOOM_MAX, distance),
+      far = Math.max(this.fitted / ZOOM_MIN, distance),
+      k = Math.max(near, Math.min(far, distance * f)) / distance
+    if (k === 1) return
+    const anchor = point.clone()
+    this.camera.position.sub(anchor).multiplyScalar(k).add(anchor)
+    this.controls.target.sub(anchor).multiplyScalar(k).add(anchor)
   }
   private pick(x: number, y: number) {
     if (!this.points) return undefined
@@ -742,7 +1000,16 @@ export class WebGLScene {
     return this.ray.intersectObject(this.points)[0]?.index
   }
   private pointerMove = (event: PointerEvent) => {
-    if (this.down || !this.hoverNames) return
+    const press = this.press
+    if (press !== undefined && press.pointerId === event.pointerId) {
+      if (heldIn(press.button, event.buttons)) {
+        if (heldBesides(press.button, event.buttons)) press.mixed = true
+        this.drag(press, event)
+        return
+      }
+      this.press = undefined
+    }
+    if (this.press !== undefined || !this.hoverNames) return
     const n = this.pick(event.clientX, event.clientY)
     const path = n === undefined ? undefined : this.props.layout.files[n]?.[0]
     this.tip.hidden = path === undefined
@@ -759,9 +1026,23 @@ export class WebGLScene {
     this.renderer.domElement.style.cursor = ''
   }
   private pointerUp = (event: PointerEvent) => {
-    const down = this.down
-    this.down = undefined
-    if (!down || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5)
+    const press = this.press
+    if (press === undefined || press.pointerId !== event.pointerId) return
+    // Another button came up: the press goes on while its own button is held; otherwise
+    // its release went unseen and the press ends here, without a click.
+    if (pointerButton(event.button) !== press.button) {
+      if (heldIn(press.button, event.buttons)) press.mixed = true
+      else this.press = undefined
+      return
+    }
+    this.press = undefined
+    // only a left click opens a note
+    if (
+      press.button !== 'left' ||
+      press.mixed ||
+      press.from !== undefined ||
+      Math.hypot(event.clientX - press.x, event.clientY - press.y) > 5
+    )
       return
     const n = this.pick(event.clientX, event.clientY)
     const path = n === undefined ? undefined : this.props.layout.files[n]?.[0]
@@ -791,24 +1072,33 @@ export class WebGLScene {
       to: target.clone().addScaledVector(direction, 70),
     }
   }
+  // The wheel zooms by the shared factor around the point under the pointer, at the target's depth.
   private wheel = (event: WheelEvent) => {
     event.preventDefault()
-    this.manual()
+    const f = wheelZoom(wheelRows(event.deltaY, event.deltaMode))
+    if (f === 1) return
     const rect = this.renderer.domElement.getBoundingClientRect()
     if (!rect.width || !rect.height) return
+    this.manual()
+    this.camera.updateMatrixWorld()
     this.pointer.set(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
       (-(event.clientY - rect.top) / rect.height) * 2 + 1,
     )
     this.ray.setFromCamera(this.pointer, this.camera)
-    const distance = this.camera.position.distanceTo(this.controls.target)
-    const step =
-      ((-Math.sign(event.deltaY) * Math.min(Math.abs(event.deltaY), 120)) /
-        120) *
-      Math.max(18, Math.min(distance, 2400) * 0.16)
-    const move = this.ray.ray.direction.clone().multiplyScalar(step)
-    this.camera.position.add(move)
-    this.controls.target.add(move)
+    const forward = this.camera.getWorldDirection(new THREE.Vector3()),
+      depth = this.controls.target
+        .clone()
+        .sub(this.camera.position)
+        .dot(forward),
+      along = this.ray.ray.direction.dot(forward)
+    if (!(depth > 0) || !(along > 0)) return
+    this.zoomAbout(
+      this.ray.ray.origin
+        .clone()
+        .addScaledVector(this.ray.ray.direction, depth / along),
+      f,
+    )
   }
   private keyDown = (event: KeyboardEvent) => {
     if (
@@ -907,7 +1197,9 @@ export class WebGLScene {
     }
     this.controls.autoRotate =
       this.props.state.cam3d.spin &&
-      !this.autoPaused &&
+      !this.gesturing &&
+      this.press?.from === undefined &&
+      this.tween === undefined &&
       !this.props.state.zoomed &&
       !this.keys.size
     this.controls.autoRotateSpeed = 0.35
@@ -926,13 +1218,23 @@ export class WebGLScene {
   dispose() {
     if (this.disposed) return
     this.disposed = true
-    cancelAnimationFrame(this.frame)
-    this.observer.disconnect()
-    this.controls.removeEventListener('start', this.manual)
-    this.controls.dispose()
+    for (const cleanup of this.cleanup.reverse()) {
+      try {
+        cleanup()
+      } catch {}
+    }
+    this.cleanup.length = 0
+  }
+
+  private removeListeners() {
+    this.controls.removeEventListener('start', this.grab)
+    this.controls.removeEventListener('end', this.release)
     const canvas = this.renderer.domElement
     canvas.removeEventListener('pointerdown', this.pointerDown)
     canvas.removeEventListener('pointerup', this.pointerUp)
+    canvas.removeEventListener('pointercancel', this.pointerCancel)
+    canvas.removeEventListener('lostpointercapture', this.pointerCancel)
+    canvas.removeEventListener('mousedown', this.mouseDown)
     canvas.removeEventListener('pointermove', this.pointerMove)
     canvas.removeEventListener('pointerleave', this.pointerLeave)
     canvas.removeEventListener('dblclick', this.doubleClick)
@@ -940,19 +1242,5 @@ export class WebGLScene {
     canvas.removeEventListener('keydown', this.keyDown)
     canvas.removeEventListener('keyup', this.keyUp)
     canvas.removeEventListener('blur', this.blur)
-    clearTimeout(this.openTimer)
-    this.tip.remove()
-    this.clear()
-    this.clearGroup(this.background)
-    this.bloom.dispose()
-    this.output.dispose()
-    this.composer.dispose()
-    this.halo.dispose()
-    for (const texture of this.logos.values()) texture.dispose()
-    this.logos.clear()
-    this.renderer.dispose()
-    this.renderer.forceContextLoss()
-    this.labels.remove()
-    canvas.remove()
   }
 }

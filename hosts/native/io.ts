@@ -49,12 +49,7 @@ export function relayIO(
         } catch {
           // EOF and spawn failure both disconnect the relay.
         } finally {
-          if (!closed) {
-            onExit()
-            void $.ui.toast(
-              'Brain Trail browser disconnected. Reopen it from the pane.',
-            )
-          }
+          if (!closed) onExit()
         }
       })()
       return {
@@ -91,7 +86,9 @@ export function relayIO(
         error.code === 'too-large'
           ? 'Session data exceeds the browser relay limit.'
           : `Browser relay failed (${error.code}).`
-      void $.ui.toast(`Brain Trail: ${detail} Reopen it from the pane.`)
+      void $.ui.toast(
+        `Brain Trail: ${detail} Copy the link again from the prompt band or use /brain-trail-v2.`,
+      )
     },
     randomToken() {
       const bytes = crypto.getRandomValues(new Uint8Array(32))
