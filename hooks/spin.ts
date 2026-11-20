@@ -1,15 +1,12 @@
-// The brain in 3D, drawn inside the pane as one SVG that turns by itself.
-// The pane runs no WebGL, so the turn is done with the SVG's own animations:
-// the notes are sorted into thin vertical slices around the brain's axis. A slice is a flat plane,
-// and a plane seen from a camera that turns around the axis is just a moving 2D transform.
-// One keyframe list drives every slice, each with its own delay. Names and the notes Claude touched
-// follow their exact path with animateMotion. Nothing runs in the mod while it turns.
+// The native pane renders a shallow, rotating folder map as one SVG.
+// Folder contours and file terraces share a rigid plane rotation. The legacy
+// no-folder scene uses angular slices; annotations remain upright as they turn.
 import type { Trail } from '../types/model'
 import { fileName, fitTitle, fitted, kindColors, type Layout, type Palette } from './map'
 import { svcColor } from './mcp'
 import { LOGOS } from './logos'
 import { fitFrame } from './pointer'
-import { brain, sliceAngle, sliceOf, SPIN_MS, PITCH_MIN, PITCH_MAX, ZOOM_MIN, ZOOM_MAX, yawAt, type Brain, type Cam } from './scene3d'
+import { brain, sliceAngle, sliceOf, SPIN_MS, PITCH_MIN, PITCH_MAX, ZOOM_MIN, ZOOM_MAX, type Brain, type Cam } from './scene3d'
 
 const NB = 72
 const KF = 36
@@ -18,6 +15,7 @@ const FIT_GLOW_LOG_MAX = 4
 const MCP_LABEL_PX = 11
 const MCP_CALL_LIMIT = 14
 const TAU = Math.PI * 2
+const wrapAngle = (angle: number) => ((angle % TAU) + TAU) % TAU
 
 const f = (v: number) => Math.round(v * 10) / 10
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -85,8 +83,8 @@ const frameSpin = (
   const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, cam.pitch))
   const ce = Math.cos(pitch), se = Math.sin(pitch)
   const spinning = cam.spin && !follow
-  const ang = (n: number) => (spinning ? sliceAngle(B.b[n]!) : B.a[n]!)
-  const yaw = follow ? -Math.PI / 2 - ang(cur!) : yawAt(cam, now)
+  const ang = (n: number) => (spinning && !L.groups.length ? sliceAngle(B.b[n]!) : B.a[n]!)
+  const yaw = wrapAngle(follow ? -Math.PI / 2 - ang(cur!) : cam.yaw + (cam.spin ? TAU * (((now - cam.at) % SPIN_MS) / SPIN_MS) : 0))
   // The intrinsic frame stays unchanged without an aspect; fitted views
   // contain a natural picture before expanding it to the available rectangle.
   const stationY = B.yMax + L.size * 0.18
@@ -192,14 +190,14 @@ export const drawSpin = (
   const n3 = (v: number) => String(Math.round(v * 1000) / 1000)
   const frame = (phi: number, unit = 'deg') => `scale(${n3(Math.cos(phi))},${n3(-ce)}) skewY(${f((Math.atan(Math.sin(phi) * tk) * 180) / Math.PI)}${unit})`
   const kf: string[] = []
-  for (let k = 0; k <= KF; k++) {
+  for (let k = 0; spinning && !L.groups.length && k <= KF; k++) {
     const phi = (TAU * k) / KF
     kf.push(`${f((100 * k) / KF)}%{transform:${frame(phi)};opacity:${f(0.7 + 0.3 * nearness(phi) ** 1.4)}}`)
   }
-  const dotW = 2.5 * px, ink = P.fg
+  const dotW = L.groups.length ? 3 * view.px : 2.5 * px, ink = P.fg
   const K = kindColors(P), EMBER = K.read, GAP = K.gap
   out.push(`<style>`
-    + (spinning ? `@keyframes s{${kf.join('')}}.b{animation:s ${SPIN_MS}ms linear infinite;transform-origin:0 0;transform-box:view-box}` : '')
+    + (kf.length ? `@keyframes s{${kf.join('')}}.b{animation:s ${SPIN_MS}ms linear infinite;transform-origin:0 0;transform-box:view-box}` : '')
     + `.d0,.d1,.hit,.link,.read,.write,.tr,.tg{fill:none;stroke-linecap:round}`
     + `.d0{stroke:${K.node};stroke-opacity:1;stroke-width:${f(dotW)}}`
     + `.d1{stroke:${K.node};stroke-opacity:1;stroke-width:${f(dotW * 1.2)}}`
@@ -214,21 +212,42 @@ export const drawSpin = (
   out.push(`<ellipse cx="0" cy="${f(-B.yMax * ce * 0.35)}" rx="${f(B.rMax * 1.05)}" ry="${f(B.rMax * Math.max(0.3, se) * 0.9 + B.yMax * ce * 0.5)}" fill="url(#h3)"/>`)
 
   // Each contour and its direct files share a shallow folder terrace.
-  const folders = L.groups.filter(g => g.depth > 0 && g.r > 0 && Number.isFinite(g.r))
-    .sort((a, b) => a.depth - b.depth || b.r - a.r || a.path.localeCompare(b.path))
-    .slice(0, 40)
+  const byPath = new Map(L.groups.filter(g => g.depth > 0 && g.r > 0 && Number.isFinite(g.r)).map(g => [g.path, g]))
+  const candidates = [...byPath.values()].map(g => {
+    const x = g.x - L.size / 2, z = (g.y - L.size / 2) * 1.18
+    const [sx, sy] = at(Math.hypot(x, z), folderHeight(g.depth), Math.atan2(z, x) + yaw, ce, se)
+    const r = g.r * 1.18
+    const visible = sx + r >= vx && sx - r <= vx + vw && sy + r >= vy && sy - r <= vy + H
+    return { g, visible, score: Math.min(50, g.r / view.px) + Math.min(g.depth, 8) * 4 }
+  }).filter(c => c.visible).sort((a, b) => b.score - a.score || a.g.path.localeCompare(b.g.path))
+  const chosen = new Map<string, (typeof L.groups)[number]>()
+  for (const { g } of candidates) {
+    if (chosen.size >= 40) break
+    chosen.set(g.path, g)
+    let path = g.path
+    while (path.includes('/') && chosen.size < 40) {
+      path = path.slice(0, path.lastIndexOf('/'))
+      const parent = byPath.get(path)
+      if (parent) chosen.set(path, parent)
+    }
+  }
+  const folders = [...chosen.values()].sort((a, b) => a.depth - b.depth || b.r - a.r || a.path.localeCompare(b.path))
   if (folders.length) {
     const C = L.size / 2
     const degrees = yaw * 180 / Math.PI
     const motion = spinning ? `<animateTransform attributeName="transform" type="rotate" from="${n3(degrees)}" to="${n3(degrees + 360)}" dur="${SPIN_MS}ms" repeatCount="indefinite"/>` : ''
-    const colors = o.dark ? ['#7aafbd', '#b199c4', '#b99e7e', '#85b5a0'] : ['#477684', '#756287', '#806a50', '#4e7d69']
+    const siblingCounts = new Map<string, number>(), siblingIndex = new Map<string, number>()
+    for (const path of [...byPath.keys()].sort()) {
+      const parent = path.slice(0, Math.max(0, path.lastIndexOf('/')))
+      const index = siblingCounts.get(parent) ?? 0
+      siblingIndex.set(path, index)
+      siblingCounts.set(parent, index + 1)
+    }
     for (let depth = 1; depth <= 6; depth++) {
       const contours = folders.filter(g => Math.min(g.depth, 6) === depth).map(g => {
-        const branch = g.path.split('/')[2] ?? g.path
-        let hash = 0
-        for (const ch of branch) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
-        const color = colors[hash % colors.length]
-        return `<ellipse data-folder="${esc(g.path)}" cx="${f(g.x - C)}" cy="${f((g.y - C) * 1.18)}" rx="${f(g.r)}" ry="${f(g.r * 1.18)}" stroke="${color}" fill="${color}" fill-opacity=".035" stroke-opacity=".58"/>`
+        const hue = Math.round(((siblingIndex.get(g.path) ?? 0) * 137.508 + 190) % 360)
+        const color = `hsl(${hue} 38% ${o.dark ? 68 : 38}%)`
+        return `<ellipse data-folder="${esc(g.path)}" cx="${f(g.x - C)}" cy="${f((g.y - C) * 1.18)}" rx="${f(g.r)}" ry="${f(g.r * 1.18)}" stroke="${color}" fill="${color}" fill-opacity=".09" stroke-opacity=".8"/>`
       }).join('')
       if (contours) out.push(`<g transform="translate(0 ${f(-folderHeight(depth) * ce)})"><g transform="matrix(1 0 0 ${n3(-se)} 0 0)" stroke-width="${f(1.2 * px)}"><g transform="rotate(${n3(degrees)})">${motion}${contours}</g></g></g>`)
     }
@@ -259,7 +278,7 @@ export const drawSpin = (
   // Reserve the bounded point budget for activity first, then distribute the
   // remaining neutral points across the folder rather than dropping odd IDs.
   const painted = new Set<number>()
-  const pointLimit = folders.length ? 7600 : 9000
+  const pointLimit = L.groups.length ? 6500 : 9000
   for (const n of T.state.keys()) if (n >= 0 && n < N && painted.size < pointLimit) painted.add(n)
   const slots = Math.min(pointLimit - painted.size, N - painted.size)
   const neutralCount = N - painted.size
@@ -270,7 +289,34 @@ export const drawSpin = (
     if (accumulated >= neutralCount) { painted.add(i); accumulated -= neutralCount }
   }
   view.painted = painted
-  if (spinning) {
+  if (spinning && L.groups.length) {
+    // All points on a terrace share one rigid rotation, retaining their exact
+    // X/Z coordinates instead of snapping to angular slices.
+    const levels = new Map<number, { d0: string[]; d1: string[]; hit: string[]; link: string[]; read: string[]; write: string[]; tr: string[]; tg: string[] }>()
+    const level = (height: number) => {
+      let entry = levels.get(height)
+      if (!entry) {
+        entry = { d0: [], d1: [], hit: [], link: [], read: [], write: [], tr: [], tg: [] }
+        levels.set(height, entry)
+      }
+      return entry
+    }
+    for (const i of painted) {
+      const kind = T.state.get(i)?.k ?? (B.v[i]! > lit ? 'd1' : 'd0')
+      level(B.v[i]!)[kind].push(`M${f(B.X[i]!)} ${f(B.Z[i]!)}h0`)
+    }
+    for (const e of beads) {
+      const x = e.u * Math.cos(e.a), z = e.u * Math.sin(e.a)
+      level(Math.round(e.v / 10) * 10)[e.gap ? 'tg' : 'tr'].push(`M${Math.round(x)} ${Math.round(z)}h0`)
+    }
+    const degrees = yaw * 180 / Math.PI
+    const motion = `<animateTransform attributeName="transform" type="rotate" from="${n3(degrees)}" to="${n3(degrees + 360)}" dur="${SPIN_MS}ms" repeatCount="indefinite"/>`
+    for (const [height, paths] of levels) {
+      const marks = (['d0', 'd1', 'link', 'hit', 'read', 'write', 'tg', 'tr'] as const)
+        .filter(k => paths[k].length).map(k => `<path class="${k}" d="${paths[k].join('')}"/>`).join('')
+      out.push(`<g data-terrace="${f(height)}" transform="translate(0 ${f(-height * ce)})"><g transform="matrix(1 0 0 ${n3(-se)} 0 0)"><g transform="rotate(${n3(degrees)})">${motion}${marks}</g></g></g>`)
+    }
+  } else if (spinning) {
     // slice by slice: each slice is a flat plane the keyframes turn
     const slices: string[][] = Array.from({ length: NB }, () => [])
     const buf = Array.from({ length: NB }, () => ({ d0: [] as string[], d1: [] as string[], hit: [] as string[], link: [] as string[], read: [] as string[], write: [] as string[], tr: [] as string[], tg: [] as string[] }))
@@ -332,6 +378,17 @@ export const drawSpin = (
     if (!spinning) {
       return { open: `<g ${position}${fade ? ` opacity="${f(0.7 + 0.3 * nearness(phi0))}"` : ''}>`, close: '</g>' }
     }
+    if (L.groups.length) {
+      // Undo the plane rotation and projection around the annotation so its
+      // anchor follows the same rigid rotation while its glyph stays upright.
+      const degrees = yaw * 180 / Math.PI
+      const turn = (from: number, to: number) => `<animateTransform attributeName="transform" type="rotate" from="${n3(from)}" to="${n3(to)}" dur="${SPIN_MS}ms" repeatCount="indefinite"/>`
+      const opacity = fade ? `<animate attributeName="opacity" dur="${SPIN_MS}ms" repeatCount="indefinite" values="${Array.from({ length: KF + 1 }, (_, k) => f(0.7 + 0.3 * nearness(phi0 + TAU * k / KF) ** 1.3)).join(';')}"/>` : ''
+      return {
+        open: `<g transform="translate(0 ${f(-v * ce)})"><g transform="matrix(1 0 0 ${n3(-se)} 0 0)"><g transform="rotate(${n3(degrees)})">${turn(degrees, degrees + 360)}<g transform="translate(${f(u * Math.cos(a))} ${f(u * Math.sin(a))})"><g transform="rotate(${n3(-degrees)})">${turn(-degrees, -degrees - 360)}<g transform="matrix(1 0 0 ${n3(-1 / se)} 0 0)">${opacity}`,
+        close: '</g></g></g></g></g></g>',
+      }
+    }
     const pts: string[] = [], ops: string[] = []
     for (let k = 0; k <= KF; k++) {
       const phi = phi0 + (TAU * k) / KF
@@ -375,14 +432,19 @@ export const drawSpin = (
     }
     const full = names.join(' / ')
     const name = full.length > 32 ? `${full.slice(0, 31)}…` : full
-    const x = initial.x - L.size / 2, z = (initial.y - L.size / 2 - initial.r * 0.6) * 1.18
-    const u = Math.hypot(x, z), a = Math.atan2(z, x), v = folderHeight(initial.depth)
-    const [sx, sy] = at(u, v, a + yaw, ce, se)
-    const half = (name.length * 3.3 + 4) * px
-    if (occupied.some(p => Math.abs(p.x - sx) < p.half + half && Math.abs(p.y - sy) < 13 * px)) continue
-    occupied.push({ x: sx, y: sy, half })
-    const w = follows(u, v, a, true)
-    out.push(`${w.open}<text class="lb" font-size="${f(10 * px)}" text-anchor="middle"><title>${esc(g.path)}</title>${esc(name)}</text>${w.close}`)
+    const x = initial.x - L.size / 2, v = folderHeight(initial.depth)
+    const half = (name.length * 3.7 + 3) * view.px
+    for (const inset of [-0.60, 0.60, 0]) {
+      const z = (initial.y - L.size / 2 + initial.r * inset) * 1.18
+      const u = Math.hypot(x, z), a = Math.atan2(z, x)
+      const [sx, sy] = at(u, v, a + yaw, ce, se)
+      if (sx + half < vx || sx - half > vx + vw || sy < vy || sy > vy + H) continue
+      if (occupied.some(p => Math.abs(p.x - sx) < p.half + half && Math.abs(p.y - sy) < 14 * view.px)) continue
+      occupied.push({ x: sx, y: sy, half })
+      const w = follows(u, v, a, false)
+      out.push(`${w.open}<text class="lb" style="fill-opacity:1;font-weight:600" font-size="${f(12 * view.px)}" text-anchor="middle"><title>${esc(g.path)}</title>${esc(name)}</text>${w.close}`)
+      break
+    }
   }
 
   // Reserve the complete scene before spending its remaining native SVG budget on icons.
@@ -465,7 +527,7 @@ export const pickSpin = (L: Layout, view: SpinView, now: number, fx: number, fy:
   const X = view.vx + fx * view.vw, Y = view.vy + fy * view.vh
   let best: number | undefined, bd = Infinity
   const scan = (n: number, reach: number) => {
-    const [x, y] = at(B.u[n]!, B.v[n]!, (view.spinning ? sliceAngle(B.b[n]!) : B.a[n]!) + yaw, view.ce, view.se)
+    const [x, y] = at(B.u[n]!, B.v[n]!, (view.spinning && !L.groups.length ? sliceAngle(B.b[n]!) : B.a[n]!) + yaw, view.ce, view.se)
     const d = Math.hypot(x - X, y - Y) / view.px
     if (d < reach && d < bd) { bd = d; best = n }
   }

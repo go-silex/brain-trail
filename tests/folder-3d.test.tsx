@@ -143,3 +143,91 @@ test('native 3D keeps branch breadcrumbs visible at default and quarter yaw', as
     }
   }
 })
+
+test('native spinning uses bounded yaw and exact file angles for rotation and picking', async () => {
+  const layout = packFiles(
+    ['catalog/hooks/a.ts', 'catalog/tests/b.ts'],
+    'catalog',
+  )
+  const scene = nativeBrain(layout)
+  const trail: Trail = {
+    state: new Map([[0, { k: 'read', count: 1 }]]),
+    moves: [],
+    calls: [],
+    perSvc: new Map(),
+  }
+  const now = 1_800_000_000_000
+  const { svg, view } = drawSpin(layout, trail, DARK, {
+    widthPx: 800,
+    now,
+    cam: { ...CAM0, at: 0, spin: true },
+    follow: false,
+    filesWord: 'files',
+    outside: 0,
+    dark: true,
+  })
+  expect(view.yaw >= 0 && view.yaw < 2 * Math.PI).toBe(true)
+  const angles = [...svg.matchAll(/<animateTransform[^>]*from="([^"]+)"/g)].map(
+    (m) => Number(m[1]),
+  )
+  expect(angles.length > 0 && angles.every((a) => Math.abs(a) <= 360)).toBe(
+    true,
+  )
+  const round = (n: number) => Math.round(n * 10) / 10
+  expect(svg).toContain(`M${round(scene.X[0]!)} ${round(scene.Z[0]!)}h0`)
+  for (const dt of [0, 20_000]) {
+    const yaw = view.yaw + (dt * 2 * Math.PI) / 80_000
+    const x = scene.u[0]! * Math.cos(scene.a[0]! + yaw)
+    const y =
+      -scene.v[0]! * view.ce -
+      scene.u[0]! * Math.sin(scene.a[0]! + yaw) * view.se
+    expect(
+      pickSpin(
+        layout,
+        view,
+        now + dt,
+        (x - view.vx) / view.vw,
+        (y - view.vy) / view.vh,
+        new Set([0]),
+      ),
+    ).toBe(0)
+  }
+})
+
+test('zoomed native 3D retains visible nested contours beyond forty folders', async () => {
+  const files = Array.from(
+    { length: 55 },
+    (_, i) => `folder-${String(i).padStart(2, '0')}/file.ts`,
+  )
+  files.push('folder-54/nested/deeper/target.ts')
+  const layout = packFiles(files, 'many')
+  const trail: Trail = {
+    state: new Map(),
+    moves: [],
+    calls: [],
+    perSvc: new Map(),
+  }
+  const options = {
+    widthPx: 800,
+    now: 0,
+    follow: false,
+    filesWord: 'files',
+    outside: 0,
+    dark: true,
+  }
+  const cam = { ...CAM0, yaw: 0, spin: false, zoom: 12 }
+  const initial = drawSpin(layout, trail, DARK, { ...options, cam })
+  const scene = nativeBrain(layout),
+    index = files.length - 1
+  const x = scene.X[index]!,
+    y = -scene.Y[index]! * initial.view.ce - scene.Z[index]! * initial.view.se
+  const focused = drawSpin(layout, trail, DARK, {
+    ...options,
+    cam: {
+      ...cam,
+      pan: { x: x - initial.view.focus.x, y: y - initial.view.focus.y },
+    },
+  })
+  expect(focused.svg).toContain('data-folder="folder-54/nested/deeper"')
+  expect(focused.svg).toContain('data-folder="folder-54/nested"')
+})

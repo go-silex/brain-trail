@@ -96,7 +96,7 @@ ChatGPT is not supported yet.
 
 ## What the map shows
 
-In 2D, nested circles show which folder contains each file. A dot represents a file; its colour shows how it entered the context. The native 3D map projects folder outlines beneath the file clusters. Small or overlapping folder names may be omitted at the current zoom.
+In 2D, nested circles show which folder contains each file. In the native 3D map, files sit on a coloured region for their folder. Zoom into `hosts`, for example, to distinguish `browser` from `relay`. A dot's colour shows how its file entered the context, not which folder it belongs to. Small or overlapping folder names may be omitted at the current zoom.
 
 | Colour | Means |
 | --- | --- |

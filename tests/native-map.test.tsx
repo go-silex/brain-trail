@@ -260,8 +260,7 @@ test('native 3D preserves category colors and depth in still and spinning SVG', 
       expect(svg).toContain('<path class="hit"')
       expect(svg).toContain('<path class="link"')
       expect(svg).toContain(`.hit{stroke:${kindColors(palette).hit}`)
-      if (spin) expect(svg).toContain('<animateMotion calcMode="linear"')
-      else expect(svg).toMatch(/<path class="d1" style="stroke-opacity:/)
+      if (!spin) expect(svg).toMatch(/<path class="d1" style="stroke-opacity:/)
       expect(svg.length).toBeLessThanOrEqual(131_072)
     }
   }
