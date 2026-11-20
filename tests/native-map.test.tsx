@@ -177,15 +177,22 @@ for (const isPlaced of [true, false]) {
               at: i,
             })),
             { k: 'read', p: 'src/app.ts', at: 360 },
+            { k: 'seen', ps: ['notes/b.md'], via: 'search', at: 361 },
           ])
           await pane.redraw()
           const dense = (await pane.find({ type: 'Svg' }))?.props.source
           expect(dense).toMatch(/>app\.ts<\/text>/)
+          expect(dense).toContain(`stroke="${kindColors(DARK).hit}"`)
           expect((dense as string).length).toBeLessThanOrEqual(131_072)
           await pane.press({ key: 'view-3d' })
           const denseProjection = (await pane.find({ type: 'Svg' }))?.props
           expect(denseProjection?.source).toMatch(/>Service 359 · 1<\/text>/)
+          expect(denseProjection?.source).not.toContain('>Service 0 · 1</text>')
           expect(denseProjection?.alt).toMatch(/360 MCP calls/)
+          expect(denseProjection?.source).toContain('<path class="hit"')
+          expect(
+            (denseProjection?.source as string).length,
+          ).toBeLessThanOrEqual(131_072)
 
           expect(host.copyCalls).toEqual([])
           expect(host.relayStarted()).toBe(false)

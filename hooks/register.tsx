@@ -929,8 +929,7 @@ const createNativeMapRenderer = (): MapRenderer => {
     // Keep the workspace outline and the latest activity in the native SVG budget.
     const moves = trail.moves.slice(-24)
     const calls = trail.calls.slice(-1)
-    const state = new Map(moves.map(({ n }) => [n, trail.state.get(n)!]))
-    return reduced.draw({ ...L, groups: L.groups.slice(0, 64) }, { state, moves, calls, perSvc: trail.perSvc }, P, {
+    return reduced.draw({ ...L, groups: L.groups.slice(0, 64) }, { ...trail, moves, calls }, P, {
       ...options, services: calls.map(({ svc }) => svc), widthPx: Math.min(options.widthPx, 320),
     })
   } }
@@ -962,14 +961,12 @@ const nativeRuntime = (ui: ElementTable, drawing: NativePane, lang: Lang, hitBox
         aspect: props.aspect,
       }
       let { svg, view } = drawSpin(props.layout, props.trail, props.palette, opts)
-      let touched = new Set(props.semantics.touched)
+      const touched = new Set(props.semantics.touched)
       if (svg.length > PANE_SVG_LIMIT) {
         const moves = props.trail.moves.slice(-24)
-        const state = new Map(moves.map(({ n }) => [n, props.trail.state.get(n)!]))
         const calls = props.trail.calls.slice(-1)
         const perSvc = new Map(calls.map(({ svc }) => [svc, props.trail.perSvc.get(svc)!]))
-        ;({ svg, view } = drawSpin(props.layout, { state, moves, calls, perSvc }, props.palette, opts))
-        touched = new Set(state.keys())
+        ;({ svg, view } = drawSpin(props.layout, { ...props.trail, moves, calls, perSvc }, props.palette, opts))
       }
       const count = props.trail.state.size
       const summary = lang === 'fr'
