@@ -215,11 +215,19 @@ export const drawSpin = (
   const byPath = new Map(L.groups.filter(g => g.depth > 0 && g.r > 0 && Number.isFinite(g.r)).map(g => [g.path, g]))
   const candidates = [...byPath.values()].map(g => {
     const x = g.x - L.size / 2, z = (g.y - L.size / 2) * 1.18
-    const [sx, sy] = at(Math.hypot(x, z), folderHeight(g.depth), Math.atan2(z, x) + yaw, ce, se)
+    const orbit = Math.hypot(x, z), height = folderHeight(g.depth)
+    const [sx, sy] = at(orbit, height, Math.atan2(z, x) + yaw, ce, se)
     const r = g.r * 1.18
     const visible = sx + r >= vx && sx - r <= vx + vw && sy + r >= vy && sy - r <= vy + H
-    return { g, visible, score: Math.min(50, g.r / view.px) + Math.min(g.depth, 8) * 4 }
-  }).filter(c => c.visible).sort((a, b) => b.score - a.score || a.g.path.localeCompare(b.g.path))
+    // During a turn the centre sweeps a circle in X/Z; include the largest
+    // folder radius before projecting its vertical extent through the pitch.
+    const sweptRadius = orbit + r
+    const floor = -height * ce
+    const swept = spinning && sweptRadius >= vx && -sweptRadius <= vx + vw
+      && floor + sweptRadius * se >= vy && floor - sweptRadius * se <= vy + H
+    return { g, visible, swept, score: Math.min(50, g.r / view.px) + Math.min(g.depth, 8) * 4 }
+  }).filter(c => c.visible || c.swept).sort((a, b) => Number(b.visible) - Number(a.visible) || b.score - a.score || a.g.path.localeCompare(b.g.path))
+  const visiblePaths = new Set(candidates.filter(c => c.visible).map(c => c.g.path))
   const chosen = new Map<string, (typeof L.groups)[number]>()
   for (const { g } of candidates) {
     if (chosen.size >= 40) break
@@ -416,8 +424,10 @@ export const drawSpin = (
   }
   const used = new Set<string>()
   const occupied: { x: number; y: number; half: number }[] = []
-  for (const initial of folders) {
-    if (used.has(initial.path) || occupied.length >= 16 || initial.r < 12 * px) continue
+  let labelCount = 0
+  const labelFolders = spinning ? [...folders].sort((a, b) => Number(visiblePaths.has(b.path)) - Number(visiblePaths.has(a.path))) : folders
+  for (const initial of labelFolders) {
+    if (used.has(initial.path) || labelCount >= 16 || initial.r < 12 * px) continue
     let g = initial
     const names = [g.name]
     used.add(g.path)
@@ -434,16 +444,26 @@ export const drawSpin = (
     const name = full.length > 32 ? `${full.slice(0, 31)}…` : full
     const x = initial.x - L.size / 2, v = folderHeight(initial.depth)
     const half = (name.length * 3.7 + 3) * view.px
+    let anchor: { u: number; a: number } | undefined
     for (const inset of [-0.60, 0.60, 0]) {
       const z = (initial.y - L.size / 2 + initial.r * inset) * 1.18
       const u = Math.hypot(x, z), a = Math.atan2(z, x)
       const [sx, sy] = at(u, v, a + yaw, ce, se)
-      if (sx + half < vx || sx - half > vx + vw || sy < vy || sy > vy + H) continue
+      if (sx + half < vx || sx - half > vx + vw || sy < vy || sy > vy + H) {
+        const floor = -v * ce
+        if (spinning && u + half >= vx && -u - half <= vx + vw
+          && floor + u * se >= vy && floor - u * se <= vy + H) anchor ??= { u, a }
+        continue
+      }
       if (occupied.some(p => Math.abs(p.x - sx) < p.half + half && Math.abs(p.y - sy) < 14 * view.px)) continue
       occupied.push({ x: sx, y: sy, half })
-      const w = follows(u, v, a, false)
-      out.push(`${w.open}<text class="lb" style="fill-opacity:1;font-weight:600" font-size="${f(12 * view.px)}" text-anchor="middle"><title>${esc(g.path)}</title>${esc(name)}</text>${w.close}`)
+      anchor = { u, a }
       break
+    }
+    if (anchor) {
+      const w = follows(anchor.u, v, anchor.a, false)
+      out.push(`${w.open}<text class="lb" style="fill-opacity:1;font-weight:600" font-size="${f(12 * view.px)}" text-anchor="middle"><title>${esc(g.path)}</title>${esc(name)}</text>${w.close}`)
+      labelCount++
     }
   }
 

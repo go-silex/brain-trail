@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { DARK, packFiles } from '../hooks/map'
+import { DARK, packFiles, type Layout } from '../hooks/map'
 import { CAM0 } from '../hooks/scene3d'
 import { drawSpin, nativeBrain, pickSpin } from '../hooks/spin'
 import type { Trail } from '../types/model'
@@ -230,4 +230,53 @@ test('zoomed native 3D retains visible nested contours beyond forty folders', as
   })
   expect(focused.svg).toContain('data-folder="folder-54/nested/deeper"')
   expect(focused.svg).toContain('data-folder="folder-54/nested"')
+})
+
+test('zoomed spinning scene retains the opposite folder and its incoming label', async () => {
+  const layout: Layout = {
+    size: 1800,
+    dot: 2,
+    title: 'opposites',
+    files: [
+      ['near/a.ts', 1300, 900],
+      ['far/b.ts', 500, 900],
+    ],
+    groups: [
+      { depth: 0, name: 'root', path: '', x: 900, y: 900, r: 600, n: 2 },
+      { depth: 1, name: 'near', path: 'near', x: 1300, y: 900, r: 100, n: 1 },
+      { depth: 1, name: 'far', path: 'far', x: 500, y: 900, r: 100, n: 1 },
+    ],
+  }
+  const trail: Trail = {
+    state: new Map(),
+    moves: [],
+    calls: [],
+    perSvc: new Map(),
+  }
+  const opts = {
+    widthPx: 800,
+    now: 0,
+    follow: false,
+    filesWord: 'files',
+    outside: 0,
+    dark: true,
+  }
+  const base = { ...CAM0, at: 0, yaw: 0, zoom: 8, spin: true }
+  const initial = drawSpin(layout, trail, DARK, { ...opts, cam: base })
+  const cam = {
+    ...base,
+    pan: {
+      x: 400 - initial.view.focus.x,
+      y: -10 * initial.view.ce - initial.view.focus.y,
+    },
+  }
+  const spinning = drawSpin(layout, trail, DARK, { ...opts, cam })
+  expect(spinning.svg).toContain('data-folder="near"')
+  expect(spinning.svg).toContain('data-folder="far"')
+  expect(spinning.svg).toContain('<title>far</title>far</text>')
+  const still = drawSpin(layout, trail, DARK, {
+    ...opts,
+    cam: { ...cam, spin: false },
+  })
+  expect(still.svg.includes('data-folder="far"')).toBe(false)
 })
