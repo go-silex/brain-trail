@@ -341,9 +341,10 @@ export async function captureBrowserScene(
     ),
   )
   let shell
-  if (candidate) {
+  try {
     shell = await readFile(path.join(dist, 'index.html'))
-  } else {
+  } catch (error) {
+    if (candidate || error.code !== 'ENOENT') throw error
     // The historical relay serves its Go raw-string page directly at the
     // session root; use that revision's source, not a reconstructed shell.
     const relay = await readFile(path.join(root, 'hosts/relay/main.go'), 'utf8')

@@ -20,6 +20,19 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Resolve release tag baseline
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/brain-trail/v[0-9]*) ;;
+            *) exit 0 ;;
+          esac
+          if ! previous_tag="$(git describe --tags --first-parent --abbrev=0 --match 'brain-trail/v[0-9]*' HEAD^1)"; then
+            echo "::error::No previous Brain Trail release tag found on first-parent ancestry"
+            exit 1
+          fi
+          base="$(git rev-parse --verify "${previous_tag}^{commit}")"
+          printf 'RELEASE_BASE=%s\n' "$base" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.22.0

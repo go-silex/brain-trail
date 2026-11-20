@@ -30,7 +30,7 @@ For manual Desktop stdio registration, an explicitly chosen `brain-trail` key is
 
 Install the optional local Lefthook checks with `bun run prepare`. The guarded installer never changes `core.hooksPath`. Git worktrees share their canonical hooks directory; existing hooks are accepted only when their exact bytes match this project's installation receipt. Unowned or modified hooks are left untouched.
 
-Runtime source changes require a newer plugin version and a matching marketplace entry. With an OMP manifest, the root package version must match them. Changes to root `omp`, `files`, `exports`, `dependencies`, `optionalDependencies`, `peerDependencies` or `engines` count as runtime changes; scripts and dev dependencies alone do not. The baseline is `VIEW_BASE`, then `RELEASE_BASE`, then `origin/main`. CI supplies the event's baseline; an all-zero default-branch baseline is refused rather than compared to the candidate itself.
+Runtime source changes require a newer plugin version and a matching marketplace entry. With an OMP manifest, the root package version must match them. Changes to root `omp`, `files`, `exports`, `dependencies`, `optionalDependencies`, `peerDependencies` or `engines` count as runtime changes; scripts and dev dependencies alone do not. The baseline is `VIEW_BASE`, then `RELEASE_BASE`, then `origin/main`. CI supplies the event's baseline; an all-zero default-branch baseline is refused rather than compared to the candidate itself. For Brain Trail release-tag pushes, CI uses the commit SHA of the previous `brain-trail/v[0-9]*` tag on first-parent ancestry starting at `HEAD^1`, excluding tags on the candidate commit; it fails if no such predecessor exists.
 
 The quality workflow validates and tests an archived source copy without `.git` or `node_modules`. Its production relay matrix runs Go tests and an archived-package SDK fixture across six hosted OS/architecture targets and Claude CLI 2.1.321/2.1.322. The production proof must exercise the no-runtime distribution path and real cross-account isolation on hosted Linux, macOS and Windows. Windows archive extraction uses `SystemRoot`'s `System32/tar.exe` and retains failure diagnostics; the cross-account process proof uses native PID, exact-image and liveness checks rather than WMI, and service cleanup waits for that process to exit. Require a fresh matrix for the candidate rather than inferring success from a rebuild. The fixture is not real Desktop native-policy proof.
 
@@ -45,6 +45,8 @@ Launch tests use controlled child processes and exercise receipts and eventual e
 ## View parity
 
 `bun run check:views` compares the working source with the baseline through the pinned native runner and browser execution. The migration removes native dashboard rendering; preserve meaningful checks for capture, band and command entry, and for the browser's tabs, 2D/3D scenes, actions and states across themes and languages.
+
+For browser 3D captures, use **Copy link** on either revision that exposes it; only a historical baseline may use the native pane. Playback uses each revision's own shipped browser page or historical relay shell.
 
 The receipt at `.artifacts/view-parity/receipt.json` identifies the baseline, candidate and fixture evidence. Review intentional differences against the migration; missing artifacts and capture, decode, network, console or browser execution failures are not visual approvals. Raster comparisons are diagnostic rather than proof of interaction or real Desktop rendering.
 
