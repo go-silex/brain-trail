@@ -1233,29 +1233,34 @@ export const captureView = async (
 ) => {
   const host = installHost(on, scenario, semantic)
   const actions: string[] = []
-  const mounted =
-    candidate && scenario.browser3d
-      ? { ...scenario, component: 'AbovePrompt' as const }
-      : scenario
-  const ui = await $.ui.mount(mountTarget(mounted))
-  await layoutChrome(mounted, ui)
-  const launcher = candidate && scenario.component === 'Pane'
+  const mounted = scenario.browser3d
+    ? { ...scenario, component: 'AbovePrompt' as const }
+    : scenario
+  let ui = await $.ui.mount(mountTarget(mounted))
+  const launcher =
+    scenario.browser3d &&
+    Boolean(await ui.find({ type: 'Button', key: 'copy-browser-link' }))
+  if (scenario.browser3d && !launcher) {
+    if (candidate)
+      throw new Error(`${scenario.id}: browser launcher is missing`)
+    await ui.unmount()
+    ui = await $.ui.mount(mountTarget(scenario))
+  }
+  if (!launcher) await layoutChrome(scenario, ui)
   if (host.copyCalls.length !== 0)
     throw new Error(
       `${scenario.id}: mounting copied without an explicit action`,
     )
   if (launcher) {
-    if (scenario.browser3d) {
-      await ui.press({ key: 'copy-browser-link' })
-      actions.push('copy-browser-link')
-      await host.browserReady
-      const copied = host.copyCalls.slice()
-      if (copied.length !== 1 || copied[0]?.surface !== scenario.surface)
-        throw new Error(
-          `${scenario.id}: explicit copy did not target the pressed surface`,
-        )
-      await ui.redraw()
-    }
+    await ui.press({ key: 'copy-browser-link' })
+    actions.push('copy-browser-link')
+    await host.browserReady
+    const copied = host.copyCalls.slice()
+    if (copied.length !== 1 || copied[0]?.surface !== scenario.surface)
+      throw new Error(
+        `${scenario.id}: explicit copy did not target the pressed surface`,
+      )
+    await ui.redraw()
     const tree = await ui.drawn()
     if (JSON.stringify(tree).includes('/launch/'))
       throw new Error(`${scenario.id}: launcher rendered a capability URL`)

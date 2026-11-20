@@ -852,6 +852,11 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
   const candidateCapture = structuredClone(capture)
   candidateCapture.fixture.actions = ['copy-browser-link']
   assert.equal(fixtureInputProblem(scenario, capture, candidateCapture), null)
+  const webBaseline = structuredClone(candidateCapture)
+  assert.equal(
+    fixtureInputProblem(scenario, webBaseline, candidateCapture),
+    null,
+  )
   const changed = structuredClone(candidateCapture)
   changed.fixture.input.state.events.value[0].p = 'notes/other.md'
   assert.match(fixtureInputProblem(scenario, capture, changed), /inputs differ/)
@@ -860,6 +865,10 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
   assert.match(
     fixtureInputProblem(scenario, capture, omitted),
     /expected actions/,
+  )
+  assert.match(
+    fixtureInputProblem(scenario, omitted, candidateCapture),
+    /baseline fixture did not complete the expected actions/,
   )
   const missing = structuredClone(candidateCapture)
   delete missing.fixture.input.state.meter

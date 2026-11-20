@@ -34,10 +34,13 @@ export function fixtureInputProblem(scenario, baseline, candidate) {
     const input = fixture?.input
     if (!record(fixture) || !record(input) || !Array.isArray(fixture.actions))
       return `${side} fixture input/action transcript is missing`
-    if (
-      stable(fixture.actions) !==
-      stable(side === 'baseline' ? baselineActions : candidateActions)
-    )
+    const actions = stable(fixture.actions)
+    const expected = side === 'baseline' ? baselineActions : candidateActions
+    const webBaseline =
+      side === 'baseline' &&
+      candidateActions.length > 0 &&
+      actions === stable(candidateActions)
+    if (actions !== stable(expected) && !webBaseline)
       return `${side} fixture did not complete the expected actions`
     if (
       stable(input.scenario) !== stable(scenario) ||
