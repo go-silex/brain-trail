@@ -454,6 +454,22 @@ func (a *appBridge) host(w http.ResponseWriter, r *http.Request, b []byte) {
 				appErr(w, "invalid")
 				return
 			}
+			// The native clear acknowledgement must also revoke a pending browser
+			// launch before the later generation feed arrives. Existing browser
+			// sessions retain their session token.
+			if a.ownerGeneration != t.Generation || a.owner == t.Owner {
+				a.relay.mu.Lock()
+				if a.relay.generation <= t.Generation {
+					a.relay.generation = t.Generation
+					a.relay.generationEnded = true
+					a.relay.revision = 0
+					a.relay.layout = nil
+					a.relay.snapshot = nil
+					a.relay.ready = false
+					a.relay.clearLaunchLocked()
+				}
+				a.relay.mu.Unlock()
+			}
 			for _, p := range a.approvals {
 				if p.owner == t.Owner && p.generation == t.Generation {
 					p.state = "revoked"

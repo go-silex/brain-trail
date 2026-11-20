@@ -65,16 +65,17 @@ CI configures its disposable runner; local checks do not change the OS timezone.
 Rendered times remain part of the exact proof. Browser scenes use UTC.
 
 To land intentional view changes, add `tests/fixtures/view-changes.json` with
-the full baseline commit SHA, a non-empty reason, and per-case exact proof
-fingerprints, for example:
+the full baseline commit SHA, or a nonempty array of distinct full SHAs when
+the same proofs have been reviewed against each baseline, a non-empty reason,
+and per-case exact proof fingerprints, for example:
 `{"baseline":"<40-hex SHA>","reason":"...","cases":{"case-name":{"tree":"<64-hex SHA>","svg:1:source":"<64-hex SHA>"}}}`.
 Only `tree`, `svg:<index>:source`, and `svg:<index>:viewport` are authorizable.
 Review the failed receipt's `observedDifferences` alongside the raw and normalized
 tree and SVG artifacts before copying each fingerprint into the declaration.
 Fingerprints bind both baseline and candidate: the canonical tree pair, the SVG
 source SHA-256 pair, or the complete viewport pair respectively. Unused or
-mismatched approvals fail. Declarations apply only to their exact baseline;
-browser execution failures and operational failures cannot be approved.
+mismatched approvals fail. Declarations apply only to an exactly listed
+baseline; browser execution failures and operational failures cannot be approved.
 
 These checks do not capture Claude Desktop's own pixels on Linux. Real Desktop acceptance must visibly open the native pane and observe a session-driven map update, independently exercise Chat App pairing and browser handoff; an isolated web or MCP protocol proof is not Desktop evidence.
 

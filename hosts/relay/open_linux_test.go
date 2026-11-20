@@ -5,9 +5,11 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,10 +59,59 @@ func TestLinuxOpenerUsesPrivatePATH(t *testing.T) {
 	}
 }
 
+func TestBrowserCommandUsesRegisteredBrowserAndPrivateFile(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"xdg-settings": "#!/bin/sh\nprintf '%s\\n' 'browser.desktop'\n",
+		"gtk-launch": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	path := filepath.Join(dir, "open é #1.html")
+	cmd, err := browserCommand(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != filepath.Join(dir, "gtk-launch") || len(cmd.Args) != 3 || cmd.Args[1] != "browser.desktop" {
+		t.Fatalf("unexpected browser command: %q %q", cmd.Path, cmd.Args)
+	}
+	uri, err := url.Parse(cmd.Args[2])
+	if err != nil || uri.Scheme != "file" || uri.Host != "" || uri.Path != path || uri.RawQuery != "" || uri.Fragment != "" || !strings.Contains(cmd.Args[2], "open%20%C3%A9%20%231.html") {
+		t.Fatalf("invalid private file URI %q: %v", cmd.Args[2], err)
+	}
+	if _, err := browserCommand("relative.html"); err == nil {
+		t.Fatal("accepted relative handoff path")
+	}
+}
+
+func TestBrowserCommandRejectsInvalidAssociation(t *testing.T) {
+	for _, id := range []string{"", "-option.desktop", "../browser.desktop", "browser\nother.desktop"} {
+		t.Run(id, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "xdg-settings"), []byte("#!/bin/sh\nprintf '%s' \"$BROWSER_ID\"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			t.Setenv("BROWSER_ID", id)
+			if _, err := browserCommand(filepath.Join(dir, "open.html")); err == nil {
+				t.Fatalf("accepted invalid association %q", id)
+			}
+		})
+	}
+}
+
 func TestExplicitBrowserBootstrapGenerationLifecycle(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "xdg-open"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-		t.Fatal(err)
+	for name, script := range map[string]string{
+		"xdg-settings": "#!/bin/sh\nprintf '%s\\n' 'browser.desktop'\n",
+		"gtk-launch": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", dir)
 	for _, tc := range []struct {

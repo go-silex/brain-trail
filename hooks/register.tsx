@@ -600,8 +600,11 @@ const executeCommand = async ($: EngineInterface, expected: number, command: Hos
         return { ok: true, text }
       }
       case 'settings': {
-        const allowed = await installedApps($)
-        if (![command.patch.openMd, command.patch.openOther].every(app => app === undefined || app === 'default' || app === 'preview' || allowed.includes(app))) return { ok: false, error: 'forbidden' }
+        const named = [command.patch.openMd, command.patch.openOther].filter((app): app is string => app !== undefined && app !== 'default' && app !== 'preview')
+        if (named.length) {
+          const allowed = await installedApps($)
+          if (!named.every(app => allowed.includes(app))) return { ok: false, error: 'forbidden' }
+        }
         await serial(async () => {
           await guard()
           const next = applySettingsPatch(await read($, settingsA), command.patch)
@@ -1072,6 +1075,7 @@ const nativeActions = ($: EngineInterface, drawing: NativePane): ViewActions<UiP
 
 const nativeSnapshot = async ($: EngineInterface, drawing: NativePane, columns: number, now: number, lang: Lang): Promise<ViewSnapshot> => {
   const { tab, open } = drawing.view
+  if (tab === 'map') await getBreakdown($, now)
   const fold = { index: I, linked, connected }
   const [list, m, P] = await Promise.all([read($, events), read($, meter), palette($, now)])
   let body: TabSnapshot

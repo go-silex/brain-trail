@@ -232,6 +232,7 @@ export type Host = {
   forget: () => void
   seed: (key: string, value: unknown) => void
   setMemoryFiles: (paths: string[]) => void
+  setMcpTools: (names: string[]) => void
   setAppCatalog: (apps: string[] | null) => void
   waitForAppRequests: (count: number) => Promise<void>
   store: Map<string, unknown>
@@ -1044,6 +1045,14 @@ export const installHost = (
         path,
         type: 'Project' as const,
         tokens: 900,
+      }))
+    },
+    setMcpTools: (names) => {
+      usage.value.context.breakdown.mcpTools = names.map((name) => ({
+        name,
+        serverName: name.split('__')[1] ?? '',
+        tokens: 40,
+        isLoaded: true,
       }))
     },
     setAppCatalog: (apps) => {

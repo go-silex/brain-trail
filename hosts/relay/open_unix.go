@@ -3,6 +3,8 @@
 package main
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +62,44 @@ func openCommand(path, app string) (*exec.Cmd, error) {
 		return exec.Command("/usr/bin/open", "-a", executable, "--", path), nil
 	}
 	return exec.Command(executable, path), nil
+}
+
+// browserCommand selects the system's web browser, not the handler for HTML
+// documents. Only the private handoff filename is passed to the browser.
+func browserCommand(path string) (*exec.Cmd, error) {
+	if runtime.GOOS == "darwin" {
+		const script = `ObjC.import('AppKit'); var u = $.NSURL.URLWithString('https://example.invalid/'); var app = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL(u); app ? ObjC.unwrap(app.path) : ''`
+		out, err := exec.Command("/usr/bin/osascript", "-l", "JavaScript", "-e", script).Output()
+		if err != nil {
+			return nil, err
+		}
+		app := strings.TrimSpace(string(out))
+		if app == "" || !filepath.IsAbs(app) {
+			return nil, fmt.Errorf("no default web browser")
+		}
+		return exec.Command("/usr/bin/open", "-a", app, "--", path), nil
+	}
+	out, err := exec.Command("xdg-settings", "get", "default-web-browser").Output()
+	if err != nil {
+		return nil, err
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" || strings.HasPrefix(id, "-") || strings.ContainsAny(id, "/\\\x00\r\n") || !strings.HasSuffix(id, ".desktop") {
+		return nil, fmt.Errorf("invalid default web browser desktop ID")
+	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("browser handoff path must be absolute")
+	}
+	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
+	return exec.Command("gtk-launch", id, fileURL), nil
+}
+
+func (s *relay) openBrowser(path, id string, generation int64, launchCode string) (string, error) {
+	command, err := browserCommand(path)
+	if err != nil {
+		return "", err
+	}
+	return s.startLaunchForCode(command, id, generation, launchCode)
 }
 
 func (s *relay) openPath(path, app, id string, generation int64, launchCode string, scopes ...*Guard) (string, error) {

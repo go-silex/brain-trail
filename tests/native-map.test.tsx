@@ -1,6 +1,17 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import { LOGOS } from '../hooks/logos'
+import {
+  createMapRenderer,
+  DARK,
+  kindColors,
+  LIGHT,
+  packFiles,
+  type Layout,
+} from '../hooks/map'
+import { brain, CAM0 } from '../hooks/scene3d'
+import { drawSpin, pickSpin } from '../hooks/spin'
+import type { Trail } from '../types/model'
 import { mountCommandOutput } from './fixtures/mounted'
 import { CWD, mountReady, type ViewCase } from './fixtures/views'
 
@@ -187,3 +198,108 @@ for (const isPlaced of [true, false]) {
     },
   )
 }
+
+test('native map SVG keeps neutral and seen files above folder fills in both themes', async () => {
+  const layout = packFiles(['notes/a.md', 'notes/b.md', 'notes/c.md'], 'notes')
+  const trail: Trail = {
+    state: new Map([
+      [1, { k: 'hit', count: 1 }],
+      [2, { k: 'link', count: 1 }],
+    ]),
+    moves: [],
+    calls: [],
+    perSvc: new Map(),
+  }
+  for (const palette of [DARK, LIGHT]) {
+    const { svg } = createMapRenderer().draw(layout, trail, palette, {
+      zoomed: false,
+      widthPx: 800,
+      now: 0,
+      outside: 0,
+      filesWord: 'files',
+      services: [],
+    })
+    const colors = kindColors(palette)
+    const folder = svg.lastIndexOf('<ellipse class="e')
+    expect(folder).toBeGreaterThanOrEqual(0)
+    for (const color of [colors.node, colors.hit, colors.link]) {
+      expect(svg.indexOf(`stroke="${color}"`)).toBeGreaterThan(folder)
+    }
+  }
+})
+
+test('native 3D preserves category colors and depth in still and spinning SVG', async () => {
+  const layout = packFiles(['notes/a.md', 'notes/b.md', 'notes/c.md'], 'notes')
+  const trail: Trail = {
+    state: new Map([
+      [1, { k: 'hit', count: 1 }],
+      [2, { k: 'link', count: 1 }],
+    ]),
+    moves: [],
+    calls: [],
+    perSvc: new Map(),
+  }
+  for (const palette of [DARK, LIGHT]) {
+    for (const spin of [false, true]) {
+      const { svg } = drawSpin(layout, trail, palette, {
+        widthPx: 800,
+        now: 0,
+        cam: { ...CAM0, spin },
+        follow: false,
+        filesWord: 'files',
+        outside: 0,
+        dark: palette === DARK,
+      })
+      expect(svg).toContain('<path class="hit"')
+      expect(svg).toContain('<path class="link"')
+      expect(svg).toContain(`.hit{stroke:${kindColors(palette).hit}`)
+      if (spin) expect(svg).toContain('<animateMotion calcMode="linear"')
+      else expect(svg).toMatch(/<path class="d1" style="stroke-opacity:/)
+      expect(svg.length).toBeLessThanOrEqual(131_072)
+    }
+  }
+})
+
+test('3D picking excludes unsampled files without a visible highlight', async () => {
+  const files: Layout['files'] = Array.from({ length: 9001 }, (_, i) => [
+    `${i}.md`,
+    i === 1 ? 1700 : 900,
+    i === 1 ? 1700 : 900,
+  ])
+  const layout: Layout = {
+    size: 1800,
+    dot: 2,
+    files,
+    groups: [],
+    title: 'sample',
+  }
+  const trail: Trail = {
+    state: new Map(),
+    moves: [],
+    calls: [],
+    perSvc: new Map(),
+  }
+  const { view } = drawSpin(layout, trail, DARK, {
+    widthPx: 800,
+    now: 0,
+    cam: { ...CAM0, spin: false },
+    follow: false,
+    filesWord: 'files',
+    outside: 0,
+    dark: true,
+  })
+  const b = brain(layout)
+  const phi = b.a[1]! + view.yaw
+  const x = b.u[1]! * Math.cos(phi)
+  const y = -b.v[1]! * view.ce - b.u[1]! * Math.sin(phi) * view.se
+  expect(
+    pickSpin(
+      layout,
+      view,
+      0,
+      (x - view.vx) / view.vw,
+      (y - view.vy) / view.vh,
+      new Set([1]),
+    ),
+  ).toBeUndefined()
+})

@@ -1,5 +1,8 @@
 {
-  "baseline": "ea5dd04526c1ae02a4e51aafa3f837c5e241b6af",
+  "baseline": [
+    "ea5dd04526c1ae02a4e51aafa3f837c5e241b6af",
+    "85769f82035a269fba5159f75cf37af2b305346d"
+  ],
   "reason": "Only the Desktop widget's Copy link button changes: its action key becomes open-browser and the visible label is the globe itself in both languages. Its position and the other controls are unchanged. No terminal, SVG, gauge, or browser difference is approved.",
   "cases": {
     "band-desktop-dark-en": {

@@ -174,7 +174,17 @@ func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int6
 	s.mu.Unlock()
 	unlock, err := s.lockLaunchScope(scopes...)
 	if err == nil {
-		err = command.Start()
+		if launchCode != "" {
+			s.mu.Lock()
+			if s.launch != launchCode || (s.launchBound && s.launchGeneration != generation) || s.generation != generation || s.generationEnded || !time.Now().Before(s.launchExpiry) {
+				err = os.ErrPermission
+			} else {
+				err = command.Start()
+			}
+			s.mu.Unlock()
+		} else {
+			err = command.Start()
+		}
 		unlock()
 	}
 	if err != nil {
@@ -448,7 +458,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		s.launchMu.Lock()
 		defer s.launchMu.Unlock()
 		s.mu.Lock()
-		if bound && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+		if (!bound && s.generationEnded) || (bound && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded))) {
 			s.mu.Unlock()
 			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
 			return
@@ -465,7 +475,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
-		if bound && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+		if (!bound && s.generationEnded) || (bound && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded))) {
 			s.mu.Unlock()
 			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
 			return
@@ -505,9 +515,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		f, err := os.OpenFile(p, flags, 0600)
 		if err == nil {
-			if q.Open {
-				s.launchFile = p
-			}
+			s.launchFile = p
 			_, err = f.Write(data)
 			if closeErr := f.Close(); err == nil {
 				err = closeErr
@@ -530,7 +538,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		if q.Open {
-			status, err := s.openPath(p, "", q.ID, *q.Generation, code)
+			status, err := s.openBrowser(p, q.ID, *q.Generation, code)
 			if err != nil {
 				s.mu.Lock()
 				if s.launch == code {

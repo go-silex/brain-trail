@@ -34,8 +34,8 @@ export const EMBER = '#e8875b', GAP = '#e5484d'
 export const PEACH = '#f6e8dc', MIST = '#cddce2', INK = '#0b0e10'
 // the four ways a file enters the context, in the first Brain Trail's colours, and the dot of a file left aside
 export type KindColors = Record<Kind, string> & { gap: string; node: string }
-const KDARK: KindColors = { read: '#3b82f6', write: '#f59e0b', hit: '#a78bfa', link: '#2dd4bf', gap: '#f43f5e', node: '#52525b' }
-const KLIGHT: KindColors = { read: '#2563eb', write: '#d97706', hit: '#8b5cf6', link: '#0d9488', gap: '#e11d48', node: '#a1a1aa' }
+const KDARK: KindColors = { read: '#3b82f6', write: '#f59e0b', hit: '#a78bfa', link: '#2dd4bf', gap: '#f43f5e', node: '#9696a0' }
+const KLIGHT: KindColors = { read: '#2563eb', write: '#d97706', hit: '#8b5cf6', link: '#0d9488', gap: '#e11d48', node: '#62626b' }
 export const kindColors = (P: Palette): KindColors => (P.bg === DARK.bg ? KDARK : KLIGHT)
 
 // dots as one path of zero-length strokes, each point relative to the last (shorter), one per cell of `cell` map units
@@ -310,7 +310,7 @@ export const createMapRenderer = () => {
   for (let n = 0; n < L.files.length; n++) { const p = xy(n); if (inView(p[0], p[1]) && !T.state.has(n)) visible.push(p) }
   let cell = Math.max(1, px * 0.9), dots = dotPath(visible, cell)
   while (dots.length > 60000 && cell < px * 8) { cell *= 1.5; dots = dotPath(visible, cell) }
-  if (dots !== '') out.push(`<path d="${dots}" fill="none" stroke="${K.node}" stroke-opacity="${dark ? '.85' : '.75'}" stroke-linecap="round" stroke-width="${f(dotW)}"/>`)
+  if (dots !== '') out.push(`<path d="${dots}" fill="none" stroke="${K.node}" stroke-linecap="round" stroke-width="${f(dotW)}"/>`)
   // an arc that draws itself from its start; a redraw while it runs resumes it where it was
   const arc = (ax: number, ay: number, bx: number, by: number, col: string, opacity: number, width: number, dashed: boolean, at: number | undefined, ms: number) => {
     const qx = (ax + bx) / 2 - (by - ay) * 0.18, qy = (ay + by) / 2 + (bx - ax) * 0.18

@@ -96,3 +96,77 @@ test(
     }
   },
 )
+
+test(
+  'native display and built-in app settings work when app discovery fails',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.setAppCatalog(null)
+    const pane = await $.ui.mount({
+      plugin: 'brain-trail-v2',
+      component: 'Pane',
+      requestId: 'brain-trail-live-map',
+      surface: 'desktop',
+      props: {
+        title: 'Brain Trail',
+        isFocused: false,
+        bodyColumns: 60,
+        placement: 'dock',
+        scroll: { offset: 0, bodyRows: 22 },
+        view: {},
+      },
+    })
+    try {
+      await pane.press({ key: 'settings' })
+      await pane.press({ key: 'band-off' })
+      await pane.press({ key: 'hover-off' })
+      await pane.press({ key: 'openMd-preview' })
+      expect(host.store.get('settings')).toEqual({
+        openMd: 'preview',
+        openOther: 'default',
+        hover: false,
+        band: false,
+      })
+    } finally {
+      host.disconnectRelay()
+      await pane.unmount()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
+  'named app choices are checked against the installed catalog',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    host.setAppCatalog(['Editor'])
+    try {
+      await ui.press({ key: 'open-browser' })
+      await host.browserReady
+      const generation = latestSnapshot(host.browserEvents)!.generation
+      expect(
+        await host.command(generation, {
+          kind: 'settings',
+          patch: { openMd: 'Unknown', hover: false },
+        }),
+      ).toEqual({ ok: false, error: 'forbidden' })
+      expect(host.store.get('settings')).toEqual({
+        openMd: 'default',
+        openOther: 'default',
+        hover: true,
+        band: true,
+      })
+      expect(
+        await host.command(generation, {
+          kind: 'settings',
+          patch: { openMd: 'Editor' },
+        }),
+      ).toEqual({ ok: true })
+    } finally {
+      host.disconnectRelay()
+      await ui.unmount()
+    }
+  },
+)

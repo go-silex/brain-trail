@@ -33,7 +33,7 @@ const nearness = (phi: number) => (1 - Math.sin(phi)) / 2
 export type SpinView = {
   vx: number; vy: number; vw: number; vh: number; px: number; yaw: number; ce: number; se: number; t: number; spinning: boolean
   zoom: number; pan: { x: number; y: number }; focus: { x: number; y: number }; follow: boolean
-  widthPx: number; aspect?: number; serviceLabelWidth: number
+  widthPx: number; aspect?: number; serviceLabelWidth: number; highlights?: Set<number>
 }
 
 // How a drawing of L frames a camera (`cur`: the note Claude is on): the turn, the tilt and the box
@@ -159,15 +159,16 @@ export const drawSpin = (
   const kf: string[] = []
   for (let k = 0; k <= KF; k++) {
     const phi = (TAU * k) / KF
-    kf.push(`${f((100 * k) / KF)}%{transform:${frame(phi)};opacity:${f(0.18 + 0.82 * nearness(phi) ** 1.4)}}`)
+    kf.push(`${f((100 * k) / KF)}%{transform:${frame(phi)};opacity:${f(0.7 + 0.3 * nearness(phi) ** 1.4)}}`)
   }
   const dotW = 2.5 * px, ink = P.fg
   const K = kindColors(P), EMBER = K.read, GAP = K.gap
   out.push(`<style>`
     + (spinning ? `@keyframes s{${kf.join('')}}.b{animation:s ${SPIN_MS}ms linear infinite;transform-origin:0 0;transform-box:view-box}` : '')
-    + `.d0,.d1,.tr,.tg{fill:none;stroke-linecap:round}`
-    + `.d0{stroke:${ink};stroke-opacity:${o.dark ? '.34' : '.4'};stroke-width:${f(dotW)}}`
-    + `.d1{stroke:${ink};stroke-opacity:${o.dark ? '.72' : '.75'};stroke-width:${f(dotW * 1.2)}}`
+    + `.d0,.d1,.hit,.link,.read,.write,.tr,.tg{fill:none;stroke-linecap:round}`
+    + `.d0{stroke:${K.node};stroke-opacity:1;stroke-width:${f(dotW)}}`
+    + `.d1{stroke:${K.node};stroke-opacity:1;stroke-width:${f(dotW * 1.2)}}`
+    + (['hit', 'link', 'read', 'write'] as const).map(k => `.${k}{stroke:${K[k]};stroke-width:${f(dotW * 1.4)}}`).join('')
     + `.tr{stroke:${EMBER};stroke-width:${f(dotW * 1.25)}}.tg{stroke:${GAP};stroke-width:${f(dotW)}}`
     + `.lb{font-family:ui-monospace,monospace;fill:${ink};fill-opacity:.62;stroke:${P.bg};stroke-width:${f(3 * px)};paint-order:stroke;stroke-linejoin:round}`
     + `.pt{fill:${ink};font-size:${f(12.5 * px)}px;font-weight:500}`
@@ -203,31 +204,31 @@ export const drawSpin = (
   if (spinning) {
     // slice by slice: each slice is a flat plane the keyframes turn
     const slices: string[][] = Array.from({ length: NB }, () => [])
-    const buf: { d0: string[]; d1: string[]; tr: string[]; tg: string[] }[] = Array.from({ length: NB }, () => ({ d0: [], d1: [], tr: [], tg: [] }))
-    for (let i = 0; i < N; i += thin) buf[B.b[i]!]![B.v[i]! > lit ? 'd1' : 'd0'].push(`M${Math.round(B.u[i]!)} ${Math.round(B.v[i]!)}h0`)
+    const buf = Array.from({ length: NB }, () => ({ d0: [] as string[], d1: [] as string[], hit: [] as string[], link: [] as string[], read: [] as string[], write: [] as string[], tr: [] as string[], tg: [] as string[] }))
+    for (let i = 0; i < N; i += thin) buf[B.b[i]!]![T.state.get(i)?.k ?? (B.v[i]! > lit ? 'd1' : 'd0')].push(`M${Math.round(B.u[i]!)} ${Math.round(B.v[i]!)}h0`)
     for (const e of beads) buf[e.b]![e.gap ? 'tg' : 'tr'].push(`M${Math.round(e.u)} ${Math.round(e.v)}h0`)
     for (let s = 0; s < NB; s++) {
       const p = buf[s]!
-      if (p.d0.length + p.d1.length + p.tr.length + p.tg.length === 0) continue
+      if (Object.values(p).every(points => points.length === 0)) continue
       const phi = sliceAngle(s) + yaw
       const delay = Math.round(SPIN_MS * ((((phi / TAU) % 1) + 1) % 1))
-      slices[s]!.push(`<g class="b" style="animation-delay:-${delay}ms" transform="${frame(phi, '')}" opacity="${f(0.18 + 0.82 * nearness(phi) ** 1.4)}">`)
-      for (const k of ['d0', 'd1', 'tg', 'tr'] as const) if (p[k].length > 0) slices[s]!.push(`<path class="${k}" d="${p[k].join('')}"/>`)
+      slices[s]!.push(`<g class="b" style="animation-delay:-${delay}ms" transform="${frame(phi, '')}" opacity="${f(0.7 + 0.3 * nearness(phi) ** 1.4)}">`)
+      for (const k of ['d0', 'd1', 'link', 'hit', 'read', 'write', 'tg', 'tr'] as const) if (p[k].length > 0) slices[s]!.push(`<path class="${k}" d="${p[k].join('')}"/>`)
       slices[s]!.push('</g>')
     }
-    out.push(slices.flat().join(''))
+    out.push(slices.map((parts, s) => ({ parts, depth: nearness(sliceAngle(s) + yaw) })).sort((a, b) => a.depth - b.depth).flatMap(s => s.parts).join(''))
   } else {
     // still: every note at its exact place, in four depth levels
-    const lv: string[][] = [[], [], [], []], tr: string[] = [], tg: string[] = []
+    const lv = Array.from({ length: 4 }, () => ({ d1: [] as string[], hit: [] as string[], link: [] as string[], read: [] as string[], write: [] as string[] })), tr: string[] = [], tg: string[] = []
     const dot = (x: number, y: number) => `M${f(x)} ${f(y)}h0`
     for (let i = 0; i < N; i += thin) {
       const phi = B.a[i]! + yaw
       const [x, y] = at(B.u[i]!, B.v[i]!, phi, ce, se)
       const k = Math.min(3, Math.floor(nearness(phi) ** 1.5 * 3.4 + (B.v[i]! > lit ? 0.45 : 0)))
-      lv[k]!.push(dot(x, y))
+      lv[k]![T.state.get(i)?.k ?? 'd1'].push(dot(x, y))
     }
     for (const e of beads) { const [x, y] = at(e.u, e.v, e.a + yaw, ce, se); (e.gap ? tg : tr).push(dot(x, y)) }
-    lv.forEach((d, k) => { if (d.length > 0) out.push(`<path class="d1" stroke-opacity="${[0.12, 0.26, 0.5, 0.86][k]}" stroke-width="${f(dotW * [0.85, 1, 1.15, 1.3][k]!)}" d="${d.join('')}"/>`) })
+    lv.forEach((level, k) => { for (const [kind, d] of Object.entries(level)) if (d.length > 0) out.push(`<path class="${kind}" style="stroke-opacity:${[0.7, 0.8, 0.9, 1][k]};stroke-width:${f(dotW * [0.85, 1, 1.15, 1.3][k]!)}" d="${d.join('')}"/>`) })
     if (tg.length > 0) out.push(`<path class="tg" d="${tg.join('')}"/>`)
     if (tr.length > 0) out.push(`<path class="tr" d="${tr.join('')}"/>`)
   }
@@ -260,19 +261,19 @@ export const drawSpin = (
     const [x0, y0] = at(u, v, phi0, ce, se)
     const position = `transform="translate(${f(x0)},${f(y0)})"`
     if (!spinning) {
-      return { open: `<g ${position}${fade ? ` opacity="${f(0.25 + 0.75 * nearness(phi0))}"` : ''}>`, close: '</g>' }
+      return { open: `<g ${position}${fade ? ` opacity="${f(0.7 + 0.3 * nearness(phi0))}"` : ''}>`, close: '</g>' }
     }
     const pts: string[] = [], ops: string[] = []
     for (let k = 0; k <= KF; k++) {
       const phi = phi0 + (TAU * k) / KF
       const [x, y] = at(u, v, phi, ce, se)
       pts.push(`${f(x - x0)},${f(y - y0)}`)
-      ops.push(`${f(0.2 + 0.8 * nearness(phi) ** 1.3)}`)
+      ops.push(`${f(0.7 + 0.3 * nearness(phi) ** 1.3)}`)
     }
     return {
       // Image rendering may delay or skip SMIL. The outer position is already
       // correct for this live frame; the animation adds a relative displacement.
-      open: `<g ${position}><g><animateMotion dur="${SPIN_MS}ms" repeatCount="indefinite" values="${pts.join(';')}"/>`
+      open: `<g ${position}><g><animateMotion calcMode="linear" dur="${SPIN_MS}ms" repeatCount="indefinite" values="${pts.join(';')}"/>`
         + (fade ? `<animate attributeName="opacity" dur="${SPIN_MS}ms" repeatCount="indefinite" values="${ops.join(';')}"/>` : ''),
       close: '</g></g>',
     }
@@ -302,6 +303,7 @@ export const drawSpin = (
   // the notes Claude read or wrote: an ember glow that breathes, a ring on a write
   const touched = [...T.state.entries()].filter(([, s]) => s.k === 'read' || s.k === 'write')
   const order = [...new Set([...recent.map(m => m.n).reverse(), ...touched.map(([n]) => n)])].filter(n => T.state.has(n)).slice(0, 48)
+  view.highlights = new Set(order.filter(n => { const kind = T.state.get(n)?.k; return kind === 'read' || kind === 'write' }))
   for (const n of order) {
     const s = T.state.get(n)!
     if (s.k !== 'read' && s.k !== 'write') continue
@@ -368,9 +370,10 @@ export const pickSpin = (L: Layout, view: SpinView, now: number, fx: number, fy:
     const d = Math.hypot(x - X, y - Y) / view.px
     if (d < reach && d < bd) { bd = d; best = n }
   }
-  for (const n of touched) scan(n, 14)
+  const thin = L.files.length > 9000 ? Math.ceil(L.files.length / 9000) : 1
+  for (const n of touched) if (n >= 0 && n < L.files.length && (n % thin === 0 || view.highlights?.has(n))) scan(n, 14)
   if (best !== undefined) return best
-  for (let n = 0; n < L.files.length; n++) scan(n, 6)
+  for (let n = 0; n < L.files.length; n += thin) scan(n, 6)
   return best
 }
 
