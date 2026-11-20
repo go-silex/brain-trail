@@ -9,7 +9,7 @@ import { fileName, fitTitle, fitted, kindColors, type Layout, type Palette } fro
 import { svcColor } from './mcp'
 import { LOGOS } from './logos'
 import { fitFrame } from './pointer'
-import { brain, sliceAngle, sliceOf, SPIN_MS, PITCH_MIN, PITCH_MAX, ZOOM_MIN, ZOOM_MAX, yawAt, type Cam } from './scene3d'
+import { brain, sliceAngle, sliceOf, SPIN_MS, PITCH_MIN, PITCH_MAX, ZOOM_MIN, ZOOM_MAX, yawAt, type Brain, type Cam } from './scene3d'
 
 const NB = 72
 const KF = 36
@@ -27,6 +27,41 @@ const at = (u: number, v: number, phi: number, ce: number, se: number): [number,
 // how near the viewer it is: 1 in front, 0 at the back
 const nearness = (phi: number) => (1 - Math.sin(phi)) / 2
 
+// Native SVG uses the packed folder map as a shallow terraced surface. WebGL
+// retains its own scene; picking, trails and framing all use this same cache.
+const nativeCache = new WeakMap<Layout, Brain>()
+const folderHeight = (depth: number) => Math.min(depth, 6) * 10
+export const nativeBrain = (L: Layout): Brain => {
+  if (!L.groups.length) return brain(L)
+  const cached = nativeCache.get(L)
+  if (cached) return cached
+  const N = L.files.length, C = L.size / 2
+  const X = new Float32Array(N), Y = new Float32Array(N), Z = new Float32Array(N)
+  const u = new Float32Array(N), v = new Float32Array(N), a = new Float32Array(N), b = new Int16Array(N)
+  const groups = new Map(L.groups.map(g => [g.path, g]))
+  let rMax = 1, yMax = 1
+  L.files.forEach(([path, x, y], i) => {
+    const slash = path.lastIndexOf('/')
+    const folder = groups.get(slash < 0 ? '·' : path.slice(0, slash))
+    X[i] = x - C
+    Z[i] = (y - C) * 1.18
+    Y[i] = folderHeight(folder?.depth ?? 0) + (i % 3) * 1.5
+    u[i] = Math.hypot(X[i]!, Z[i]!)
+    v[i] = Y[i]!
+    a[i] = Math.atan2(Z[i]!, X[i]!)
+    b[i] = sliceOf(a[i]!)
+    rMax = Math.max(rMax, u[i]!)
+    yMax = Math.max(yMax, v[i]!)
+  })
+  for (const g of L.groups) {
+    rMax = Math.max(rMax, Math.hypot(g.x - C, (g.y - C) * 1.18) + g.r * 1.18)
+    yMax = Math.max(yMax, folderHeight(g.depth))
+  }
+  const result = { X, Y, Z, u, v, a, b, rMax, yMax, labels: [] }
+  nativeCache.set(L, result)
+  return result
+}
+
 // What a drawing shows, so a gesture continues from it: `zoom` and `pan` as drawn (a followed note's
 // framing included), `focus`, the point a change of zoom alone keeps in place, and the width and
 // box aspect it was drawn for, so another camera can be framed the same way.
@@ -43,7 +78,7 @@ const frameSpin = (
   L: Layout, cur: number | undefined,
   o: { widthPx: number; now: number; cam: Cam; follow: boolean; aspect?: number; serviceLabelWidth: number },
 ) => {
-  const B = brain(L)
+  const B = nativeBrain(L)
   const { widthPx, now, cam, serviceLabelWidth } = o
   // following Claude: the note it is on turns to the front and the camera comes close
   const follow = o.follow && cur !== undefined
@@ -178,6 +213,27 @@ export const drawSpin = (
   // a soft halo under the brain, so it does not float on nothing
   out.push(`<ellipse cx="0" cy="${f(-B.yMax * ce * 0.35)}" rx="${f(B.rMax * 1.05)}" ry="${f(B.rMax * Math.max(0.3, se) * 0.9 + B.yMax * ce * 0.5)}" fill="url(#h3)"/>`)
 
+  // Each contour and its direct files share a shallow folder terrace.
+  const folders = L.groups.filter(g => g.depth > 0 && g.r > 0 && Number.isFinite(g.r))
+    .sort((a, b) => a.depth - b.depth || b.r - a.r || a.path.localeCompare(b.path))
+    .slice(0, 40)
+  if (folders.length) {
+    const C = L.size / 2
+    const degrees = yaw * 180 / Math.PI
+    const motion = spinning ? `<animateTransform attributeName="transform" type="rotate" from="${n3(degrees)}" to="${n3(degrees + 360)}" dur="${SPIN_MS}ms" repeatCount="indefinite"/>` : ''
+    const colors = o.dark ? ['#7aafbd', '#b199c4', '#b99e7e', '#85b5a0'] : ['#477684', '#756287', '#806a50', '#4e7d69']
+    for (let depth = 1; depth <= 6; depth++) {
+      const contours = folders.filter(g => Math.min(g.depth, 6) === depth).map(g => {
+        const branch = g.path.split('/')[2] ?? g.path
+        let hash = 0
+        for (const ch of branch) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+        const color = colors[hash % colors.length]
+        return `<ellipse data-folder="${esc(g.path)}" cx="${f(g.x - C)}" cy="${f((g.y - C) * 1.18)}" rx="${f(g.r)}" ry="${f(g.r * 1.18)}" stroke="${color}" fill="${color}" fill-opacity=".035" stroke-opacity=".58"/>`
+      }).join('')
+      if (contours) out.push(`<g transform="translate(0 ${f(-folderHeight(depth) * ce)})"><g transform="matrix(1 0 0 ${n3(-se)} 0 0)" stroke-width="${f(1.2 * px)}"><g transform="rotate(${n3(degrees)})">${motion}${contours}</g></g></g>`)
+    }
+  }
+
   // the trail, as beads along arcs lifted between the notes (in 3D, so it turns with the brain)
   const recent = T.moves.slice(-28)
   const beads: { u: number; v: number; a: number; b: number; gap: boolean; fresh: boolean }[] = []
@@ -203,8 +259,9 @@ export const drawSpin = (
   // Reserve the bounded point budget for activity first, then distribute the
   // remaining neutral points across the folder rather than dropping odd IDs.
   const painted = new Set<number>()
-  for (const n of T.state.keys()) if (n >= 0 && n < N && painted.size < 9000) painted.add(n)
-  const slots = Math.min(9000 - painted.size, N - painted.size)
+  const pointLimit = folders.length ? 7600 : 9000
+  for (const n of T.state.keys()) if (n >= 0 && n < N && painted.size < pointLimit) painted.add(n)
+  const slots = Math.min(pointLimit - painted.size, N - painted.size)
   const neutralCount = N - painted.size
   let accumulated = 0
   for (let i = 0; i < N && slots > 0; i++) {
@@ -291,11 +348,41 @@ export const drawSpin = (
     }
   }
 
-  // the folders' names, above their lobe, faded when the lobe is at the back
-  for (const l of B.labels) {
-    const fs = Math.max(9.5, Math.min(12, 9 + l.size / 90)) * px
-    const w = follows(l.u, l.v, spinning ? sliceAngle(l.b) : l.a, true)
-    out.push(`${w.open}<text class="lb" font-size="${f(fs)}" text-anchor="middle">${esc(l.name)}</text>${w.close}`)
+  // Co-located single-child wrappers describe one region, so label them as a
+  // breadcrumb rather than stacking names at the same location.
+  const children = new Map<string, typeof folders>()
+  for (const g of folders) {
+    const parent = g.path.slice(0, Math.max(0, g.path.lastIndexOf('/')))
+    const list = children.get(parent) ?? []
+    list.push(g)
+    children.set(parent, list)
+  }
+  const used = new Set<string>()
+  const occupied: { x: number; y: number; half: number }[] = []
+  for (const initial of folders) {
+    if (used.has(initial.path) || occupied.length >= 16 || initial.r < 12 * px) continue
+    let g = initial
+    const names = [g.name]
+    used.add(g.path)
+    while (true) {
+      const next = children.get(g.path)
+      if (next?.length !== 1) break
+      const child = next[0]!
+      if (child.r < g.r * 0.4 || Math.hypot(child.x - g.x, child.y - g.y) > g.r * 0.6) break
+      names.push(child.name)
+      used.add(child.path)
+      g = child
+    }
+    const full = names.join(' / ')
+    const name = full.length > 32 ? `${full.slice(0, 31)}…` : full
+    const x = initial.x - L.size / 2, z = (initial.y - L.size / 2 - initial.r * 0.6) * 1.18
+    const u = Math.hypot(x, z), a = Math.atan2(z, x), v = folderHeight(initial.depth)
+    const [sx, sy] = at(u, v, a + yaw, ce, se)
+    const half = (name.length * 3.3 + 4) * px
+    if (occupied.some(p => Math.abs(p.x - sx) < p.half + half && Math.abs(p.y - sy) < 13 * px)) continue
+    occupied.push({ x: sx, y: sy, half })
+    const w = follows(u, v, a, true)
+    out.push(`${w.open}<text class="lb" font-size="${f(10 * px)}" text-anchor="middle"><title>${esc(g.path)}</title>${esc(name)}</text>${w.close}`)
   }
 
   // Reserve the complete scene before spending its remaining native SVG budget on icons.
@@ -373,7 +460,7 @@ export const panSpin = (view: SpinView, dx: number, dy: number) => ({ x: view.pa
 
 // the note under the pointer at a given moment (the brain keeps turning), touched notes first
 export const pickSpin = (L: Layout, view: SpinView, now: number, fx: number, fy: number, touched: Set<number>) => {
-  const B = brain(L)
+  const B = nativeBrain(L)
   const yaw = yawOf(view, now)
   const X = view.vx + fx * view.vw, Y = view.vy + fy * view.vh
   let best: number | undefined, bd = Infinity

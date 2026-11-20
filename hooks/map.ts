@@ -66,13 +66,13 @@ export const LIGHT: Palette = { bg: '#eef2f4', fg: '#0b0e10', dot: 'rgba(11,14,1
 
 type Tree = { key: string; kids: Map<string | number, Tree> } | { key: string; file: number }
 
-// Folders, then sub-folders, then files: two folder levels at most.
+// Keep every directory: packed circles follow the actual path, including wrapper folders.
 export const packFiles = (list: string[], title: string): Layout => {
   const tree: Tree = { key: '', kids: new Map() }
   list.forEach((p, n) => {
     const parts = p.split('/')
     let cur: Tree = tree
-    for (const d of [parts.length > 1 ? parts[0]! : '·', ...parts.slice(1, -1).slice(0, 1)]) {
+    for (const d of parts.length > 1 ? parts.slice(0, -1) : ['·']) {
       if (!('kids' in cur)) break
       if (!cur.kids.has(d)) cur.kids.set(d, { key: d, kids: new Map() })
       cur = cur.kids.get(d)!
@@ -81,19 +81,20 @@ export const packFiles = (list: string[], title: string): Layout => {
   })
   const h = hierarchy<Tree>(tree, t => ('kids' in t ? [...t.kids.values()] : undefined))
     .sum(t => ('file' in t ? 1 : 0)).sort((a, b) => (b.value ?? 0) - (a.value ?? 0))
-  pack().size([SIZE, SIZE]).padding(d => (d.depth === 0 ? 22 : d.depth === 1 ? 7 : 2))(h)
+  pack().size([SIZE, SIZE]).padding(d => d.children?.length === 1 ? 0 : d.depth === 0 ? 22 : d.depth === 1 ? 7 : 2)(h)
   const files: [string, number, number][] = list.map(p => [p, 0, 0])
   for (const l of h.leaves()) if ('file' in l.data) files[l.data.file] = [l.data.key, l.x, l.y]
-  // the folder's path from the root, by its parents' keys
-  const folderPath = (d: { data: Tree; parent: unknown }) => {
-    const keys: string[] = []
-    let cur = d as { data: Tree; parent: unknown } | null
-    while (cur !== null && cur.parent !== null && cur.parent !== undefined) { keys.unshift(cur.data.key); cur = cur.parent as { data: Tree; parent: unknown } }
-    return keys.join('/')
-  }
+  const paths = new Map<object, string>([[h, '']])
   const pretty = (t: string) => (t === '·' ? 'root files' : t.replace(/^\d+[_ -]+/, '').replace(/_/g, ' '))
-  const groups = h.descendants().filter(d => d.children && (d.depth === 1 || (d.value ?? 0) >= 4))
-    .map(d => ({ depth: d.depth, name: pretty(d.data.key || title), path: folderPath(d as unknown as { data: Tree; parent: unknown }), x: d.x, y: d.y, r: d.r, n: d.value ?? 0 }))
+  const groups: Group[] = []
+  for (const node of h.descendants()) {
+    if (!node.children) continue
+    const d = node as typeof node & { parent: typeof node | null }
+    const parent = d.parent ? paths.get(d.parent)! : ''
+    const path = parent ? `${parent}/${d.data.key}` : d.data.key
+    paths.set(d, path)
+    groups.push({ depth: d.depth, name: pretty(d.data.key || title), path, x: d.x, y: d.y, r: d.r, n: d.value ?? 0 })
+  }
   return { size: SIZE, dot: Math.min(2.2, (h.leaves()[0]?.r ?? 4) * 0.55), leaf: h.leaves()[0]?.r ?? 4, files, groups, title }
 }
 
@@ -114,58 +115,30 @@ const f = (v: number) => Math.round(v * 10) / 10
 
 const shortTool = (t: string) => t.replace(/^(slack_|notion-)/, '')
 
-// ---- the brain: the folders lie flat on a slightly tilted table; the notes rise above them in lobes ----
-export const TILT = 1  // how much of the table's depth shows (1: seen from straight above, the flat map)
-const RISE = Math.sqrt(1 - TILT * TILT)  // how much of a height shows at that angle
+// The folder map is viewed directly from above.
+export const TILT = 1
 export type Tilted = { files: [number, number][]; z: number[]; light: number[]; zMax: number; top: number; groups: (Group & { tx: number; ty: number; ry: number })[]; cy: number; R: number }
 const tiltCache = new WeakMap<Layout, Tilted>()
 const dome = (d: number, r: number) => Math.sqrt(Math.max(0, 1 - (d / r) ** 2))
-// where each note and folder lands: a note rises in a dome over its folder (a lobe), a smaller one over its sub-folder
+// Resolve lighting lobes by path without testing every file against every directory.
 export const tilt = (L: Layout): Tilted => {
   const hit = tiltCache.get(L)
   if (hit !== undefined) return hit
   const disc = L.groups.find(g => g.depth === 0)
   const cy = disc?.y ?? L.size / 2, R = disc?.r ?? L.size / 2
-  const g1 = L.groups.filter(g => g.depth === 1), g2 = L.groups.filter(g => g.depth === 2)
-  // each note: its height, and how much light it catches (lit from the top left, like the rest of the brand's spheres)
-  const LX = -0.45, LY = -0.55, LZ = 0.7
-  const light: number[] = []
-  // how high each sub-folder sits on its folder's lobe, kept low enough for its circle to stay inside the folder's
-  const lift = new Map<Group, number>()
-  for (const b of g2) {
-    const a = g1.find(g => Math.hypot(g.x - b.x, g.y - b.y) <= g.r)
-    if (!a) continue
-    const dx = b.x - a.x, dy = b.y - a.y
-    const half = a.r * TILT * Math.sqrt(Math.max(0, 1 - (dx / a.r) ** 2))
-    const room = (dy * TILT - b.r * TILT + half - 2) / RISE
-    lift.set(b, Math.max(0, Math.min(a.r * 0.32 * dome(Math.hypot(dx, dy), a.r), room)))
-  }
-  const z = L.files.map(([, x, y]) => {
-    const a = g1.find(g => Math.hypot(g.x - x, g.y - y) <= g.r), b = g2.find(g => Math.hypot(g.x - x, g.y - y) <= g.r)
-    let nx = 0, ny = 0, nz = 1, h = 0
-    if (a) { const ha = dome(Math.hypot(a.x - x, a.y - y), a.r); h += b ? lift.get(b) ?? 0 : 0; nx = (x - a.x) / a.r; ny = (y - a.y) / a.r; nz = ha }
-    if (b) { const hb = dome(Math.hypot(b.x - x, b.y - y), b.r); nx += 0.7 * (x - b.x) / b.r; ny += 0.7 * (y - b.y) / b.r; nz += 0.7 * hb }
-    const len = Math.hypot(nx, ny, nz) || 1
-    light.push(Math.max(0, (nx * LX + ny * LY + nz * LZ) / len))
-    return h
+  const byPath = new Map(L.groups.map(g => [g.path, g]))
+  const light = L.files.map(([path, x, y]) => {
+    const parts = path.split('/')
+    const a = byPath.get(parts.length > 1 ? parts[0]! : '·')
+    const b = parts.length > 2 ? byPath.get(`${parts[0]}/${parts[1]}`) : undefined
+    let nx = 0, ny = 0, nz = 1
+    if (a && a.r > 0) { nx = (x - a.x) / a.r; ny = (y - a.y) / a.r; nz = dome(Math.hypot(x - a.x, y - a.y), a.r) }
+    if (b && b.r > 0) { nx += 0.7 * (x - b.x) / b.r; ny += 0.7 * (y - b.y) / b.r; nz += 0.7 * dome(Math.hypot(x - b.x, y - b.y), b.r) }
+    return Math.max(0, (nx * -0.45 + ny * -0.55 + nz * 0.7) / (Math.hypot(nx, ny, nz) || 1))
   })
-  // a note rises over its lobe but never out of a circle it belongs to: near a circle's top edge it stays low
-  const margin = L.dot * 1.6 + 1.5
-  L.files.forEach(([, x, y], n) => {
-    let room = Infinity
-    for (const g of L.groups) {
-      const dx = x - g.x, dy = y - g.y
-      if (Math.hypot(dx, dy) > g.r) continue
-      // how far the dot can go up on screen before it leaves the flat ellipse drawn for this circle
-      const half = g.r * TILT * Math.sqrt(Math.max(0, 1 - (dx / g.r) ** 2))
-      room = Math.min(room, dy * TILT + half - margin + (lift.get(g) ?? 0) * RISE)
-    }
-    if (room !== Infinity) z[n] = Math.max(0, Math.min(z[n]!, room / RISE))
-  })
-  const files = L.files.map(([, x, y], n): [number, number] => [x, cy + (y - cy) * TILT - z[n]! * RISE])
-  const groups = L.groups.map(g => ({ ...g, tx: g.x, ty: cy + (g.y - cy) * TILT - (lift.get(g) ?? 0) * RISE, ry: g.r * TILT }))
-  const top = Math.min(cy - R * TILT, ...files.map(f => f[1]))
-  const t = { files, z, light, zMax: Math.max(1, ...z), top, groups, cy, R }
+  const files = L.files.map(([, x, y]): [number, number] => [x, y])
+  const groups = L.groups.map(g => ({ ...g, tx: g.x, ty: g.y, ry: g.r }))
+  const t = { files, z: L.files.map(() => 0), light, zMax: 1, top: cy - R, groups, cy, R }
   tiltCache.set(L, t)
   return t
 }
@@ -252,18 +225,37 @@ export const createMapRenderer = () => {
   const inView = (x: number, y: number) => x >= vx && x <= vx + vw && y >= vy && y <= vy + vh
   const xs: string[] = []  // what is drawn under the dots: the links between the notes the session met
   out.push(`<style>.e0{fill:${P.ring};fill-opacity:${dark ? '.03' : '.035'};stroke:${P.ring};stroke-opacity:.4}.e1{fill:${P.ring};fill-opacity:${dark ? '.055' : '.07'};stroke:${P.ring};stroke-opacity:.26}.e2{fill:none;stroke:${P.ring};stroke-opacity:.14}`
-    + `.l{fill:${P.dim};font-family:ui-monospace,monospace;letter-spacing:.04em}.fn{stroke:${P.bg};stroke-opacity:.6;stroke-width:${f(3 * px)};stroke-linejoin:round;paint-order:stroke}`
+    + `.l{fill:${P.dim};font-family:ui-monospace,monospace;letter-spacing:.04em}.fn{fill:${P.fg};fill-opacity:.88;stroke:${P.bg};stroke-opacity:.85;stroke-width:${f(3 * px)};stroke-linejoin:round;paint-order:stroke}`
     + `.t{fill:${P.fg};font-size:${f(11 * px)}px;font-weight:500;stroke:${P.bg};stroke-width:${f(px * 3)};paint-order:stroke;stroke-linejoin:round}`
     + `.k{font-family:ui-monospace,monospace;font-size:${f(10 * px)}px;letter-spacing:.06em;font-weight:500}</style>`)
   out.push(`<defs>${(['read', 'write'] as const).map(k => `<radialGradient id="g${k}"><stop offset="0" stop-color="${K[k]}" stop-opacity=".5"/><stop offset=".45" stop-color="${K[k]}" stop-opacity=".16"/><stop offset="1" stop-color="${K[k]}" stop-opacity="0"/></radialGradient>`).join('')}</defs>`)
-  // the brain: the disc, its folders and sub-folders as flat circles, as the first Brain Trail drew them
-  for (const g of TL.groups) {
+  // Bound native SVG size and omit circles too small to read at the current zoom.
+  // Sort shallow-first so a long wrapper chain cannot hide sibling branches.
+  const folderGroups = TL.groups.filter(g => g.depth === 0 || (g.r / px >= 18
+    && g.tx + g.r >= vx && g.tx - g.r <= vx + vw && g.ty + g.ry >= vy && g.ty - g.ry <= vy + vh))
+    .sort((a, b) => a.depth - b.depth || b.n - a.n).slice(0, 256)
+  const circles = new Set<string>()
+  for (const g of folderGroups) {
+    const key = `${f(g.tx)},${f(g.ty)},${f(g.r)},${f(g.ry)}`
+    if (circles.has(key)) continue
+    circles.add(key)
     out.push(`<ellipse class="e${Math.min(2, g.depth)}" cx="${f(g.tx)}" cy="${f(g.ty)}" rx="${f(g.r)}" ry="${f(g.ry)}" stroke-width="${g.depth === 0 ? 1.4 : 1}" vector-effect="non-scaling-stroke"/>`)
   }
   // folder names go over the dots, and the files' names keep clear of them
   const folderLabels: string[] = []
   const placed: { x: number; y: number; w: number; h: number }[] = []
-  for (const g of TL.groups) {
+  // Coincident wrapper circles represent one footprint. Name the chain once
+  // rather than implying separate areas or stacking labels over the files.
+  const chains = new Map<string, { first: string; last: string; count: number }>()
+  for (const g of folderGroups) {
+    if (g.depth === 0) continue
+    const key = `${f(g.tx)},${f(g.ty)},${f(g.r)},${f(g.ry)}`
+    const name = g.depth === 1 ? g.name.toUpperCase() : g.name
+    const chain = chains.get(key)
+    if (chain) { chain.last = name; chain.count++ }
+    else chains.set(key, { first: name, last: name, count: 1 })
+  }
+  for (const g of folderGroups) {
     if (g.depth === 0) {
       // a narrow pane keeps the title short, so it never runs under the buttons
       const more = opts.outside > 0 ? ` · +${opts.outside} outside` : ''
@@ -272,16 +264,26 @@ export const createMapRenderer = () => {
       if (whole) out.push(`<text class="l" x="${f(naturalX + 12 * px)}" y="${f(bandTop + 24 * px)}" font-size="${f(11 * px)}">${title}</text>`)
       continue
     }
-    const name = g.depth === 1 ? g.name.toUpperCase() : g.name
-    // a folder name shrinks to fit its circle, and is left out below 8 px
+    const key = `${f(g.tx)},${f(g.ty)},${f(g.r)},${f(g.ry)}`
+    const chain = chains.get(key)
+    if (!chain) continue
+    chains.delete(key)
+    const first = chain.first.length > 24 ? `${chain.first.slice(0, 23)}…` : chain.first
+    const last = chain.last.length > 24 ? `${chain.last.slice(0, 23)}…` : chain.last
+    const name = chain.count === 1 ? first : chain.count === 2 ? `${first} / ${last}` : `${first} / … / ${last}`
     const fs = Math.min((g.depth === 1 ? 10.5 : 9.5) * px, (g.r * 1.5) / (name.length * 0.62))
-    if ((g.depth === 1 && fs >= 8 * px) || (g.depth === 2 && g.r / px > 46 && fs >= 8 * px)) {
-      const y = g.ty - g.ry + fs * 1.5, w = name.length * fs * 0.62
+    if (fs < 8 * px || (g.depth > 1 && g.r / px <= 46)) continue
+    const w = name.length * fs * 0.62
+    // Move labels down only as needed to avoid other folder labels.
+    for (let row = 0; row < 16; row++) {
+      const y = g.ty - g.ry + fs * (1.5 + row * 1.5)
       const box = { x: g.tx - w / 2, y: y - fs, w, h: fs * 1.3 }
-      // a sub-folder's name never runs over its folder's (folders come first)
+      const dy = Math.max(Math.abs(box.y - g.ty), Math.abs(box.y + box.h - g.ty))
+      if ((w / (2 * g.r)) ** 2 + (dy / g.ry) ** 2 > 0.9) continue
       if (placed.some(o => box.x < o.x + o.w && o.x < box.x + box.w && box.y < o.y + o.h && o.y < box.y + box.h)) continue
       placed.push(box)
-      folderLabels.push(`<text class="l fn" x="${f(g.tx)}" y="${f(y)}" font-size="${f(fs)}" text-anchor="middle"${g.depth === 2 ? ' fill-opacity=".7"' : ''}>${esc(name)}</text>`)
+      folderLabels.push(`<text class="l fn" x="${f(g.tx)}" y="${f(y)}" font-size="${f(fs)}" text-anchor="middle">${esc(name)}</text>`)
+      break
     }
   }
   const linksAt = out.length

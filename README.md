@@ -96,7 +96,7 @@ ChatGPT is not supported yet.
 
 ## What the map shows
 
-Your folder as one disc: one circle per folder, one dot per file. Every file that entered the context lights up.
+In 2D, nested circles show which folder contains each file. A dot represents a file; its colour shows how it entered the context. The native 3D map projects folder outlines beneath the file clusters. Small or overlapping folder names may be omitted at the current zoom.
 
 | Colour | Means |
 | --- | --- |

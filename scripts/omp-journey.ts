@@ -4,6 +4,7 @@ import {
   access,
   mkdir,
   rename,
+  realpath,
   writeFile,
   symlink,
   unlink,
@@ -31,6 +32,7 @@ import { registerCapture } from '../hosts/omp/capture'
 import { startDashboardServer, type DashboardServer } from '../hosts/omp/server'
 import { nameServer } from '../hooks/mcp.ts'
 import { brain } from '../hooks/scene3d.ts'
+import { hash } from '../hooks/workspace'
 import type { DashboardFeed, FactsWire, ServerEvent } from '../types/browser.ts'
 import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
 import {
@@ -79,6 +81,38 @@ async function until<T>(
   await mkdir(cwd, { recursive: true })
   await writeFile(join(cwd, 'root.txt'), 'root fixture')
   await writeFile(join(cwd, 'child.txt'), 'child fixture')
+  await mkdir(join(cwd, 'nested', 'branch', 'leaf'), { recursive: true })
+  await writeFile(
+    join(cwd, 'nested', 'branch', 'leaf', 'file.txt'),
+    'nested fixture',
+  )
+  const canonical = await realpath(cwd)
+  const cacheDir = join(agentDir, 'brain-trail')
+  await mkdir(cacheDir, { recursive: true })
+  await writeFile(
+    join(cacheDir, `layout-${hash(canonical)}.json`),
+    JSON.stringify({
+      root: canonical,
+      paths: ['child.txt', 'nested/branch/leaf/file.txt', 'root.txt'],
+      layout: {
+        size: 100,
+        dot: 1,
+        title: 'workspace',
+        files: [],
+        groups: [
+          {
+            depth: 1,
+            name: 'stale',
+            path: 'stale-flat-marker',
+            x: 0,
+            y: 0,
+            r: 1,
+            n: 1,
+          },
+        ],
+      },
+    }),
+  )
   await writeFile(outside, 'outside secret')
   await writeFile(canary, canaryText)
   await symlink(outside, join(cwd, 'escape.txt'))
@@ -532,7 +566,14 @@ async function until<T>(
       changed,
     )
     if (inventory.kind !== 'layout') throw new Error('workspace layout missing')
-    assert.deepEqual(inventory.layout.paths, ['child.txt', 'root.txt'])
+    assert.deepEqual(inventory.layout.paths, [
+      'child.txt',
+      'nested/branch/leaf/file.txt',
+      'root.txt',
+    ])
+    const groupPaths = inventory.layout.layout.groups.map((group) => group.path)
+    assert.ok(groupPaths.includes('nested/branch/leaf'))
+    assert.ok(!groupPaths.includes('stale-flat-marker'))
     await session.prompt(
       'Read root.txt, then delegate the child file to a task agent.',
     )

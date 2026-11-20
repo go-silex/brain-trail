@@ -1380,7 +1380,7 @@ export const register: Register = (on, options) => {
       retireNative()
       liveMap = {
         owner: generation, stop: new AbortController(), renderer: createNativeMapRenderer(),
-        sizing: createNativeLayout(), view: { ...VIEW_STATE0 }, frames: { d2: undefined },
+        sizing: createNativeLayout(), view: { ...VIEW_STATE0, cam3d: { ...VIEW_STATE0.cam3d, pitch: 0.7 } }, frames: { d2: undefined },
         navigation: 0, hitKey: `map-hit-${++hitInstance}`, mapPainted: false, gesture: GESTURE0, tip: null,
       }
     }

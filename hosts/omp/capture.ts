@@ -365,23 +365,29 @@ export function registerCapture(
       const paths = pickFiles(raw, isVault, canonical)
       const cacheDir = join(getAgentDir(), 'brain-trail'),
         cache = join(cacheDir, `layout-${hash(canonical)}.json`)
-      let packed = packFiles(paths, canonical.split('/').pop() || canonical)
+      // Older caches flattened every directory below the second level.
+      const layoutFormat = 2
+      let cachedLayout: ReturnType<typeof packFiles> | undefined
       await assertLoad()
       try {
         const cached: unknown = JSON.parse(await readFile(cache, 'utf8'))
         if (
           object(cached) &&
+          cached.format === layoutFormat &&
           cached.root === canonical &&
           Array.isArray(cached.paths) &&
           cached.paths.length === paths.length &&
           cached.paths.every((p, i) => p === paths[i]) &&
           object(cached.layout)
         )
-          packed = cached.layout as typeof packed
+          cachedLayout = cached.layout as ReturnType<typeof packFiles>
       } catch {
         /* cache is optional */
       }
       await assertLoad()
+      const packed =
+        cachedLayout ??
+        packFiles(paths, canonical.split('/').pop() || canonical)
       root = canonical
       const saved = store?.read('settings')
       if (isVault && (!object(saved) || saved.openMd === undefined))
@@ -406,7 +412,12 @@ export function registerCapture(
         await assertLoad()
         await writeFile(
           cache,
-          JSON.stringify({ root: canonical, paths, layout: packed }),
+          JSON.stringify({
+            format: layoutFormat,
+            root: canonical,
+            paths,
+            layout: packed,
+          }),
         )
       })
       cacheWrites = cacheWrite.catch(() => {})
