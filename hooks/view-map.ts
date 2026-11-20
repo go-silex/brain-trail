@@ -42,7 +42,7 @@ export const renderMap = <N, Press>(
       node: h(Text, { dimColor: true }, S.packing(b.seconds)),
       drawn: undefined,
     }
-  if (!R.Svg && !R.Scene3d)
+  if (!R.Svg && !R.Scene3d && !R.NativeScene3d)
     return {
       node: h(Text, { dimColor: true }, S.mapOnlyDesktop),
       drawn: undefined,
@@ -82,6 +82,27 @@ export const renderMap = <N, Press>(
     svg = result.svg
     drawn = { kind: '2d', frame: { view: result.view, layout: L, touched } }
   }
+  const native =
+    in3d && !scene && R.NativeScene3d
+      ? R.NativeScene3d({
+          key: 'map',
+          layout: L,
+          semantics,
+          trail: T,
+          palette: P,
+          state: b.state,
+          now: s.now,
+          lang: s.lang,
+          filesWord: vault ? S.notes : S.files,
+          outside: folded.outside,
+          onIntent: act.intent,
+          onOpen: act.openFile,
+          widthPx: s.widthPx,
+          ...(fill !== undefined && { aspect: fill.mapAspect }),
+        })
+      : undefined
+  if (native) drawn = { kind: '3d', frame: native.frame }
+  const open3d = act.open3d
   const whole = camera === null && !isTrail
   const following = isTrail && (in3d || camera === null)
   const group = (key: string, children: N[]) =>
@@ -259,14 +280,13 @@ export const renderMap = <N, Press>(
       label: in3d ? '2D' : '3D',
       onPress: () => act.intent({ kind: 'toggle-3d' }),
     }),
-    ...(in3d
+    ...(in3d && open3d
       ? [
           h(Button, {
             key: 'open-3d',
             label: S.open3dBig,
             onPress: () =>
-              act
-                .open3d()
+              open3d()
                 .catch(() => false)
                 .then((ok) => {
                   if (!ok) act.toast(S.open3dFailed)
@@ -364,7 +384,9 @@ export const renderMap = <N, Press>(
               onIntent: act.intent,
               onOpen: act.openFile,
             })
-          : R.Svg &&
+          : native
+            ? native.node
+            : R.Svg &&
               h(R.Svg, {
                 key: 'map',
                 source: svg,

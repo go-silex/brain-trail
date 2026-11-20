@@ -26,7 +26,7 @@ test(
     )
     host.holdFork()
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       const first = host.command(generation, { kind: 'coach-analyse' })
@@ -60,7 +60,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(await host.command(generation, { kind: 'coach-analyse' })).toEqual(
@@ -108,7 +108,7 @@ test(
           value.value.busy === want,
       )
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       host.appCoach(generation)
@@ -154,7 +154,7 @@ test(
           value.value.busy === want,
       )
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       let generation = latestSnapshot(host.browserEvents)!.generation
       for (let index = 0; index < 16; index++) {

@@ -3,6 +3,7 @@ import type { Layout, Palette } from '../hooks/map'
 import type { MapFrame, PointerButton } from '../hooks/pointer'
 import type { FigureId } from '../hooks/readout'
 import type { Cam, SceneSemantics } from '../hooks/scene3d'
+import type { SpinView, spinMath } from '../hooks/spin'
 import type {
   Camera,
   Coach,
@@ -135,6 +136,21 @@ export type ViewSnapshot = {
   fill?: {
     rows: number
     mapAspect: number
+    body?: {
+      stamp: string
+      offset: number
+      viewport: number
+      content: number
+      reach: number
+    }
+    chrome?: {
+      stamp: string
+      header: number
+      footer: number
+      headerReach: number
+      footerReach: number
+      notice: boolean
+    }
   }
 }
 
@@ -231,6 +247,18 @@ export type ViewRuntime<N, Press> = {
   Code: ViewTag<ViewCodeProps, N> | undefined
   MapHit: ViewTag<Keyed, N> | undefined
   Scene3d?: ViewTag<Scene3dProps, N>
+  NativeScene3d?: (
+    props: Scene3dProps & { widthPx: number; aspect?: number },
+  ) => { node: N; frame: Drawn3d }
+  Measure?: ViewTag<
+    Keyed & {
+      stamp: string
+      expectedRows: number
+      reach: number
+      kind: 'viewport' | 'content' | 'header' | 'footer'
+    },
+    N
+  >
 }
 
 export type ViewIntent =
@@ -270,6 +298,7 @@ export type CompactOutcome =
   | { kind: 'skipped'; reason: string }
   | { kind: 'failed' }
 export type ViewActions<Press> = {
+  scrollBody?: (to: 'first' | 'previous' | 'next' | 'last') => void
   intent: (i: ViewIntent) => Promise<void>
   openFile: (ref: PreviewRef) => Promise<void>
   openIn: (ref: PreviewRef, app: string) => Promise<void>
@@ -281,7 +310,7 @@ export type ViewActions<Press> = {
   setLang: (lang: Lang) => Promise<void>
   clearTrail: () => Promise<void>
   retryLayout: () => void
-  open3d: () => Promise<boolean>
+  open3d?: () => Promise<boolean>
   analyseCoach: (lang: Lang, file: InstructionFile) => Promise<void>
   applyCoach: (file: InstructionFile, patch: string) => Promise<boolean>
 }
@@ -302,8 +331,16 @@ export type MapGesture =
   | { kind: 'dragend' }
 export type MapTip = { text: string; x: number; y: number }
 export type Drawn2d = { view: MapFrame; layout: Layout; touched: Set<number> }
-export type DrawnMap = { kind: '2d'; frame: Drawn2d }
-export type DrawnFrames = { d2: Drawn2d | undefined }
+export type Drawn3d = {
+  view: SpinView
+  layout: Layout
+  touched: Set<number>
+  math: typeof spinMath
+}
+export type DrawnMap =
+  | { kind: '2d'; frame: Drawn2d }
+  | { kind: '3d'; frame: Drawn3d }
+export type DrawnFrames = { d2: Drawn2d | undefined; d3?: Drawn3d | undefined }
 export type MapPoint = { fx: number; fy: number }
 // A press in progress goes on in stretches: the frame its current stretch started from, where the
 // pointer was then (`from`) and where it was last seen (`at`). A wheel turned during the press
@@ -315,9 +352,22 @@ export type Drag2d = {
   from: MapPoint
   at: MapPoint
 }
+export type Drag3d = {
+  press: number
+  button: PointerButton
+  yaw: number
+  pitch: number
+  view: SpinView
+  layout: Layout
+  math: typeof spinMath
+  from: MapPoint
+  at: MapPoint
+}
 export type GestureMemory = {
   hover: MapPoint | undefined
   drag2d: Drag2d | undefined
+  drag3d?: Drag3d | undefined
+  leftFollow?: SpinView | undefined
 }
 export type GestureResult = {
   memory: GestureMemory

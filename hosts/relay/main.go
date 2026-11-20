@@ -31,6 +31,9 @@ type relay struct {
 	launchMu                            sync.Mutex
 	hostToken, token, host, assets, dir string
 	launch                              string
+	launchFile                          string
+	launchTimer                         *time.Timer
+	launchSequence                      uint64
 	launchExpiry                        time.Time
 	launchGeneration                    int64
 	launchBound, generationEnded        bool
@@ -146,6 +149,20 @@ func (s *relay) lockLaunchScope(scopes ...*Guard) (func(), error) {
 	return s.app.mu.Unlock, nil
 }
 
+// clearLaunchLocked revokes the capability and removes its private handoff file.
+func (s *relay) clearLaunchLocked() {
+	s.launch = ""
+	s.launchBound = false
+	if s.launchTimer != nil {
+		s.launchTimer.Stop()
+		s.launchTimer = nil
+	}
+	if s.launchFile != "" {
+		_ = os.Remove(s.launchFile)
+		s.launchFile = ""
+	}
+}
+
 // startLaunchForCode owns the only Wait call for each successfully started child.
 func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int64, launchCode string, scopes ...*Guard) (string, error) {
 	s.mu.Lock()
@@ -183,7 +200,7 @@ func (s *relay) startLaunchForCode(command *exec.Cmd, id string, generation int6
 		}
 		s.mu.Lock()
 		if code != 0 && launchCode != "" && s.launch == launchCode {
-			s.launch = ""
+			s.clearLaunchLocked()
 		}
 		s.observers--
 		s.mu.Unlock()
@@ -298,8 +315,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			s.ready = false
 			s.generationEnded = false
 			if s.launchBound {
-				s.launch = ""
-				s.launchBound = false
+				s.clearLaunchLocked()
 			}
 		}
 		if *q.Generation == s.generation && q.Ended {
@@ -307,8 +323,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			s.layout = nil
 			s.snapshot = nil
 			s.ready = false
-			s.launch = ""
-			s.launchBound = false
+			s.clearLaunchLocked()
 		}
 		s.mu.Unlock()
 		if s.app != nil {
@@ -343,8 +358,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if ev.Generation > s.generation {
 			if s.launchBound {
-				s.launch = ""
-				s.launchBound = false
+				s.clearLaunchLocked()
 			}
 			s.generationEnded = false
 			s.generation = ev.Generation
@@ -361,8 +375,7 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			s.snapshot = append([]byte(nil), b...)
 			s.ready = !s.initializing
 		case "ended":
-			s.launch = ""
-			s.launchBound = false
+			s.clearLaunchLocked()
 			s.generationEnded = true
 			s.layout = nil
 			s.snapshot = nil
@@ -431,10 +444,11 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
+		bound := q.Link || q.Open
 		s.launchMu.Lock()
 		defer s.launchMu.Unlock()
 		s.mu.Lock()
-		if q.Link && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+		if bound && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
 			s.mu.Unlock()
 			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
 			return
@@ -451,12 +465,12 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
-		if q.Link && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
+		if bound && (*q.Generation < s.generation || (*q.Generation == s.generation && s.generationEnded)) {
 			s.mu.Unlock()
 			jsonOut(w, map[string]any{"ok": false, "error": "stale-generation"})
 			return
 		}
-		if q.Link && *q.Generation > s.generation {
+		if bound && *q.Generation > s.generation {
 			s.generation = *q.Generation
 			s.generationEnded = false
 			s.revision = 0
@@ -464,36 +478,63 @@ func (s *relay) hostHandler(w http.ResponseWriter, r *http.Request) {
 			s.snapshot = nil
 			s.ready = false
 		}
+		s.clearLaunchLocked()
 		s.launch = code
 		s.launchExpiry = time.Now().Add(120 * time.Second)
-		s.launchBound = q.Link
-		if q.Link {
+		s.launchBound = bound
+		if bound {
 			s.launchGeneration = *q.Generation
 		}
 		expiry := s.launchExpiry
-		s.mu.Unlock()
-		u := "http://" + s.host + "/launch/" + code
 		if q.Link {
+			s.mu.Unlock()
+			u := "http://" + s.host + "/launch/" + code
 			jsonOut(w, map[string]any{"ok": true, "url": u, "expiresAt": expiry.UnixMilli()})
 			return
 		}
-		data := []byte(`<!doctype html><meta http-equiv="refresh" content="0;url=` + u + `"><title>Opening Brain Trail</title>`)
+		u := "http://" + s.host + "/launch/" + code
 		p := filepath.Join(s.dir, "open.html")
-		if err = os.WriteFile(p, data, 0600); err != nil {
-			s.mu.Lock()
-			if s.launch == code {
-				s.launch = ""
+		if q.Open {
+			s.launchSequence++
+			p = filepath.Join(s.dir, fmt.Sprintf("open-%d.html", s.launchSequence))
+		}
+		data := []byte(`<!doctype html><meta http-equiv="refresh" content="0;url=` + u + `"><title>Opening Brain Trail</title>`)
+		flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		if q.Open {
+			flags = os.O_WRONLY | os.O_CREATE | os.O_EXCL
+		}
+		f, err := os.OpenFile(p, flags, 0600)
+		if err == nil {
+			if q.Open {
+				s.launchFile = p
 			}
+			_, err = f.Write(data)
+			if closeErr := f.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			s.clearLaunchLocked()
 			s.mu.Unlock()
 			w.WriteHeader(500)
 			return
 		}
 		if q.Open {
+			s.launchTimer = time.AfterFunc(time.Until(expiry), func() {
+				s.mu.Lock()
+				if s.launch == code {
+					s.clearLaunchLocked()
+				}
+				s.mu.Unlock()
+			})
+		}
+		s.mu.Unlock()
+		if q.Open {
 			status, err := s.openPath(p, "", q.ID, *q.Generation, code)
 			if err != nil {
 				s.mu.Lock()
 				if s.launch == code {
-					s.launch = ""
+					s.clearLaunchLocked()
 				}
 				s.mu.Unlock()
 				jsonOut(w, map[string]any{"ok": false, "error": "launch-failed"})
@@ -605,9 +646,12 @@ func (s *relay) browserHandler(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/launch/") && r.Method == "GET" {
 		code := strings.TrimPrefix(r.URL.Path, "/launch/")
 		s.mu.Lock()
+		if s.launch != "" && !time.Now().Before(s.launchExpiry) {
+			s.clearLaunchLocked()
+		}
 		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && (!s.launchBound || (s.launchGeneration == s.generation && !s.generationEnded)) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
 		if ok {
-			s.launch = ""
+			s.clearLaunchLocked()
 		}
 		s.mu.Unlock()
 		if !ok {

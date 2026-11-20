@@ -22,7 +22,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(
@@ -55,7 +55,7 @@ test(
       expect(current.facts.settings.band).toBe(false)
       expect(current.facts.settings.hover).toBe(false)
       await ui.redraw()
-      expect(await ui.find({ key: 'copy-browser-link' })).toBeUndefined()
+      expect(await ui.find({ key: 'open-browser' })).toBeUndefined()
     } finally {
       host.disconnectRelay()
       await ui.unmount()
@@ -69,7 +69,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(

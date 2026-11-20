@@ -87,7 +87,7 @@ export function relayIO(
           ? 'Session data exceeds the browser relay limit.'
           : `Browser relay failed (${error.code}).`
       void $.ui.toast(
-        `Brain Trail: ${detail} Copy the link again from the prompt band or use /brain-trail-v2.`,
+        `Brain Trail: ${detail} Use /brain-trail-v2 to copy a link.`,
       )
     },
     randomToken() {

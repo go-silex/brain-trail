@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { latestSnapshot } from './fixtures/mounted'
+import { latestSnapshot, mountCommandOutput } from './fixtures/mounted'
 import { CWD, mountReady, NOTE_BODY, type ViewCase } from './fixtures/views'
 
 const scenario: ViewCase = {
@@ -39,12 +39,59 @@ test(
 )
 
 test(
+  'pairing blocks conflicting actions until its clipboard copy completes',
+  { timeoutMs: 20_000 },
+  async ($, on: On) => {
+    const { ui, host } = await mountReady($, on, scenario)
+    const command = await mountCommandOutput($)
+    host.holdCopy()
+    try {
+      const pairing = ui.press({ key: 'pair-chat' })
+      await host.copyStarted
+      await ui.redraw()
+      await command.redraw()
+      for (const key of ['open-brain-trail', 'pair-chat', 'open-browser']) {
+        expect(await ui.find({ key })).toBeUndefined()
+      }
+      for (const key of [
+        'open-brain-trail',
+        'pair-chat',
+        'copy-browser-link',
+      ]) {
+        expect(await command.find({ key })).toBeUndefined()
+      }
+      expect(host.openRequests).toEqual([])
+      expect(host.uiOpened).toEqual([])
+      expect(host.copyCalls.length).toBe(1)
+      expect(host.appRevocations).toEqual([])
+      host.releaseCopy()
+      await pairing
+      await ui.redraw()
+      expect(
+        await ui.find({ type: 'Text', text: /pairing copied/i }),
+      ).toBeDefined()
+      expect(JSON.parse(host.copyCalls[0]!.text).kind).toBe('chat')
+      expect(host.appRevocations).toEqual([])
+      await ui.press({ key: 'open-browser' })
+      expect(host.openRequests.length).toBe(1)
+      expect(host.copyCalls.length).toBe(1)
+      expect(host.appRevocations).toEqual([])
+    } finally {
+      host.releaseCopy()
+      host.disconnectRelay()
+      await command.unmount()
+      await ui.unmount()
+    }
+  },
+)
+
+test(
   'known files can be previewed but unknown and stale references are refused',
   { timeoutMs: 20_000 },
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const initial = latestSnapshot(host.browserEvents)!
       expect(initial).toBeDefined()
@@ -92,7 +139,7 @@ test(
     const { ui, host } = await mountReady($, on, scenario)
     host.holdFork()
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const initial = latestSnapshot(host.browserEvents)!
       const coach = host.command(initial.generation, { kind: 'coach-analyse' })
@@ -137,7 +184,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const initial = latestSnapshot(host.browserEvents)!
       expect(
@@ -185,11 +232,11 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       host.holdPreviewRead()
-      const reopening = ui.press({ key: 'copy-browser-link' })
+      const reopening = ui.press({ key: 'open-browser' })
       await host.previewReadBlocked
       const change = host.command(generation, { kind: 'lang', lang: 'fr' })
       await host.langStored
@@ -232,7 +279,7 @@ test(
     const { ui, host } = await mountReady($, on, scenario)
     host.setAppCatalog(null)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(latestSnapshot(host.browserEvents)?.facts.apps).toEqual([])
@@ -250,7 +297,7 @@ test(
         surface: 'desktop',
         isInteractive: true,
       })
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.clock.settle()
       expect(latestSnapshot(host.browserEvents)?.facts.apps).toEqual(['Editor'])
     } finally {
@@ -274,7 +321,7 @@ test(
         surface: 'desktop',
         isInteractive: true,
       })
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(
@@ -304,7 +351,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(
@@ -329,7 +376,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const facts = latestSnapshot(host.browserEvents)!.facts
       expect(

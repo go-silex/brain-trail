@@ -23,7 +23,7 @@ for (const action of ['replay-pause', 'replay-live'] as const) {
     async ($, on: On) => {
       const { ui, host } = await mountReady($, on, scenario)
       try {
-        await ui.press({ key: 'copy-browser-link' })
+        await ui.press({ key: 'open-browser' })
         await host.browserReady
         const generation = latestSnapshot(host.browserEvents)!.generation
         expect(
@@ -66,7 +66,7 @@ test(
   async ($, on: On) => {
     const { ui, host } = await mountReady($, on, scenario)
     try {
-      await ui.press({ key: 'copy-browser-link' })
+      await ui.press({ key: 'open-browser' })
       await host.browserReady
       const generation = latestSnapshot(host.browserEvents)!.generation
       expect(

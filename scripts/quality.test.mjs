@@ -850,9 +850,10 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
     },
   }
   const candidateCapture = structuredClone(capture)
-  candidateCapture.fixture.actions = ['copy-browser-link']
+  candidateCapture.fixture.actions = ['open-browser']
   assert.equal(fixtureInputProblem(scenario, capture, candidateCapture), null)
   const webBaseline = structuredClone(candidateCapture)
+  webBaseline.fixture.actions = ['copy-browser-link']
   assert.equal(
     fixtureInputProblem(scenario, webBaseline, candidateCapture),
     null,

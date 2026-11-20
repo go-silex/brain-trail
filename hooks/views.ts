@@ -210,6 +210,65 @@ export function renderPane<N, Press>(
       ),
       drawn,
     }
+  const window = R.Measure ? fill.body : undefined
+  const navigation =
+    window !== undefined && act.scrollBody !== undefined
+      ? R.h(
+          R.Box,
+          { key: 'body-navigation', flexDirection: 'column' },
+          R.h(
+            R.Box,
+            {
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              columnGap: 'xs',
+            },
+            ...(['first', 'previous', 'next', 'last'] as const).map((to) =>
+              R.h(R.Button, {
+                key: `body-${to}`,
+                label: S.bodyPages[to],
+                onPress: () => act.scrollBody?.(to),
+              }),
+            ),
+          ),
+          R.h(
+            R.Box,
+            { height: 1, overflow: 'hidden' },
+            R.h(
+              R.Text,
+              { size: 'caption', tabular: true, wrap: 'truncate-end' },
+              `${Math.min(window.offset + 1, window.content)}–${Math.min(window.offset + window.viewport, window.content)} / ${window.content}`,
+            ),
+          ),
+        )
+      : undefined
+  const probe = (
+    kind: 'viewport' | 'content' | 'header' | 'footer',
+    stamp: string,
+    expectedRows: number,
+    reach: number,
+  ) =>
+    R.Measure &&
+    R.h(
+      R.Box,
+      {
+        key: `${kind}-probe-holder`,
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: 0,
+        height: '100%',
+      },
+      R.h(R.Measure, {
+        key: `${kind}-probe`,
+        kind,
+        stamp,
+        expectedRows,
+        reach,
+      }),
+    )
+  const chrome = R.Measure ? fill.chrome : undefined
   const paneHeader = R.h(
     R.Box,
     {
@@ -222,6 +281,7 @@ export function renderPane<N, Press>(
     header,
     tabs,
     mapHeader,
+    chrome && probe('header', chrome.stamp, chrome.header, chrome.headerReach),
   )
   const paneFooter = R.h(
     R.Box,
@@ -232,8 +292,43 @@ export function renderPane<N, Press>(
       flexShrink: 0,
       gap: 'xs',
     },
+    navigation,
     footer,
+    chrome && probe('footer', chrome.stamp, chrome.footer, chrome.footerReach),
   )
+  if (chrome?.notice)
+    return {
+      node: R.h(
+        R.Box,
+        { position: 'relative', height: fill.rows, overflow: 'hidden' },
+        R.h(R.Text, { wrap: 'wrap' }, S.enlargePane),
+        R.h(
+          R.Box,
+          {
+            key: 'chrome-measuring',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 0,
+            overflow: 'hidden',
+          },
+          R.h(
+            R.Box,
+            {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              flexDirection: 'column',
+            },
+            paneHeader,
+            paneFooter,
+          ),
+        ),
+      ),
+      drawn: undefined,
+    }
   return {
     node: R.h(
       R.Box,
@@ -255,7 +350,24 @@ export function renderPane<N, Press>(
           flexGrow: 1,
           overflow: 'hidden',
         },
-        body,
+        window === undefined
+          ? body
+          : [
+              probe('viewport', window.stamp, window.viewport, fill.rows),
+              R.h(
+                R.Box,
+                {
+                  key: 'body-content',
+                  position: 'absolute',
+                  top: -window.offset,
+                  left: 0,
+                  right: 0,
+                  flexDirection: 'column',
+                },
+                body,
+                probe('content', window.stamp, window.content, window.reach),
+              ),
+            ],
       ),
       paneFooter,
     ),
