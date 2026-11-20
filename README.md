@@ -4,7 +4,7 @@
 
 # Brain Trail
 
-A shared web dashboard for your native Claude Code or Oh My Pi session, available in a browser or a Desktop MCP App. It shows the files the session read and wrote, the ones it only saw in a search or through a link, and the tools it called. Chat can view an explicitly paired native session; it is not automatically traced.
+Brain Trail shows what your native Claude Code or Oh My Pi session has seen: files it read or wrote, names found in searches or links, and tools it called. Open the dashboard in the Claude Desktop mod or a browser. The Chat MCP App views an explicitly paired native session; it does not automatically trace Chat.
 
 You see why Claude answers the way it does, what it never looked at, and when its context starts to work against you.
 
@@ -66,17 +66,17 @@ Had an earlier copy in `~/.claude/mods/`? Remove it to avoid loading the plugin 
 
 ### 2. Choose a dashboard surface
 
-With the [Desktop MCP server](#desktop-mcp-app) registered, use **Open Brain Trail** in the Desktop prompt band. If the band is disabled or collapsed, type `/brain-trail-v2` for the same explicit controls. The native control calls the discovered opener directly; it does not send a model prompt. Actual Desktop rendering and routing remain release-acceptance checks.
+Use **Open Brain Trail** in the Desktop prompt band to open the mod: the live 2D and 3D maps, Goal, Context, Files, Coach and Settings. Use the pane’s expand control to make more room. Opening the pane does not submit a model prompt, call MCP Browser or require the relay or a registered Desktop MCP server.
 
-For a browser, choose **Copy link**, then paste into the address bar of a live Claude Browser tab or an external browser—not into the conversation. Copying does not open a tab automatically. The private link expires shortly and works once; issue a new one if it expires, and treat it like a password.
+Press the **globe** in the widget to open the dashboard in the system’s default browser. The line below the buttons confirms when the opening request is handed off. For a different browser or a live Claude Browser tab, use **`/brain-trail-v2` → Copy link** and paste into its address bar, not the conversation. The private link expires shortly and works once; treat it like a password.
 
-The native plugin captures activity and owns session state, permissions, files and the relay. The App and browser render the same dashboard; there is no second native graph engine.
+The native plugin captures activity and owns session state, permissions and files. The native pane shares the dashboard’s controls with the browser, and uses the packaged relay when needed for file preview, application discovery or external opening. The separately registered MCP App is for explicit Chat pairing.
 
 ### Desktop MCP App
 
-The separate Desktop MCP server uses the matching shipped Go executable and App assets; it does not require end users to install Node, Bun or Go. For manual stdio configuration, register it under the key `brain-trail`, with the absolute executable path as command and `mcp` followed by the absolute App-assets directory as arguments. MCPB installation may assign a host-generated server name; that name and native Code binding to it are not established. Do not add a second server registration to the native plugin.
+The separate Desktop MCP server is only needed for the paired Chat App, not the native pane or browser handoff. It uses the matching shipped Go executable and App assets; it does not require end users to install Node, Bun or Go. For manual stdio configuration, register it under the key `brain-trail`, with the absolute executable path as command and `mcp` followed by the absolute App-assets directory as arguments. MCPB installation may assign a host-generated server name. Do not add a second server registration to the native plugin.
 
-The App is a viewer/controller for a deliberately paired native Code or OMP session, not automatic tracing of a Chat conversation. The six binary targets cover Linux, macOS and Windows on x64 and arm64; target availability is not proof of host installation or sandbox compatibility. Actual host tool forwarding, pairing and model-free opening require separate verification. Existing browser and OMP launch instructions remain independent of this registration.
+The Chat App shows the Code or OMP session you choose to pair. It cannot show the current Claude Chat conversation or observe calls that Chat makes to other MCP servers: the host sends the App its own tool call, not a conversation-wide event stream. See the [MCP Apps specification](https://modelcontextprotocol.github.io/ext-apps/api/). The six binary targets cover Linux, macOS and Windows on x64 and arm64; target availability is not proof of host installation or sandbox compatibility.
 
 To view a native session in Chat, choose **Pair with Chat** in that session's native controls or browser dashboard. Paste the one-use envelope into the Brain Trail App's pairing field, not into the chat prompt. Detach before choosing another session. A restored view with missing private state remains detached; **Reset view** creates a fresh unpaired view, never automatic reconnection.
 
@@ -96,7 +96,7 @@ ChatGPT is not supported yet.
 
 ## What the map shows
 
-Your folder as one disc: one circle per folder, one dot per file. Every file that entered the context lights up.
+In 2D, nested circles show which folder contains each file. In the native 3D map, files sit on a coloured region for their folder. Zoom into `hosts`, for example, to distinguish `browser` from `relay`. A dot's colour shows how its file entered the context, not which folder it belongs to. Small or overlapping folder names may be omitted at the current zoom.
 
 | Colour | Means |
 | --- | --- |
@@ -106,9 +106,9 @@ Your folder as one disc: one circle per folder, one dot per file. Every file tha
 | 🟢 Teal | Seen through a link in a note Claude read. Claude can follow it. |
 | 🔴 Dashed red | A jump between two notes that no link joins. Adding the link helps the next session. |
 
-The services Claude calls (Gmail, Slack, your CRM, Notion…) sit above the disc with their logo and their call count. The legend under the map counts each colour; click it to list the files.
+The MCP services Claude calls (Gmail, Slack, your CRM, Notion…) appear on the map with their call counts. In the native 3D view, arcs connect activity to service badges. A badge shows the service’s logo when available and its initial otherwise. The legend under the map counts each colour; click it to list the files.
 
-Follow the session as it works and replay it step by step. The **3D** button switches between the browser's 2D SVG and 3D Three.js views. Replay, selected preview and follow/zoom state belong to the host session; camera, active tab and other presentation state remain local to each browser surface.
+Follow the session as it works and replay it step by step. **3D** switches from the 2D map to an interactive 3D projection (SVG in the native mod, Three.js in the browser and paired App). Replay, selected preview and follow/zoom state belong to the host session; camera and active tab remain local to each view.
 
 3D requires WebGL in the browser hosting the dashboard. If WebGL is unavailable, a notice preserves access to the rest of the dashboard: choose **2D** or use a browser with WebGL. Where supported, check the host's graphics acceleration settings.
 
@@ -125,7 +125,7 @@ Only a left click opens a note; pressing several mouse buttons together never op
 
 Browser 3D adapts to the theme: dark mode uses restrained ambient connections and activity glows; light mode retains its point rendering without bloom.
 
-Copying a link does not open the dashboard; paste it into a browser address bar. OMP browser launches and file launches report that an opener was spawned or dispatched, not that the application opened it. A later opener-process error can be reported to the current session; it does not prove whether the document opened. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
+The globe and file-open actions report that an opener was spawned or dispatched, not that an application opened. A later opener-process error can be reported to the current session. Copying a link never opens it. Brain Trail previews known session paths and opens them in allowed applications without an additional confirmation, including known paths outside the workspace.
 
 The browser dashboard adapts to its available space. Resizing and fit behavior should be checked in the actual browser surface used with the host.
 

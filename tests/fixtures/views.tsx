@@ -193,9 +193,15 @@ export type Host = {
   filePrepared: Promise<void>
   command: (generation: number, command: HostCommand) => Promise<unknown>
   appCoach: (generation: number, index?: number) => void
+  appRevocations: unknown[]
   cancelAppCoach: (generation: number, index?: number) => void
   setForkResult: (text: string | null) => void
   promptFills: string[]
+  openRequests: unknown[]
+  setOpenResponse: (response: unknown) => void
+  holdOpen: () => void
+  openStarted: Promise<void>
+  releaseOpen: () => void
   copyCalls: UiCopyArgs[]
   setCopySuccess: (success: boolean) => void
   holdCopy: () => void
@@ -226,6 +232,7 @@ export type Host = {
   forget: () => void
   seed: (key: string, value: unknown) => void
   setMemoryFiles: (paths: string[]) => void
+  setMcpTools: (names: string[]) => void
   setAppCatalog: (apps: string[] | null) => void
   waitForAppRequests: (count: number) => Promise<void>
   store: Map<string, unknown>
@@ -340,11 +347,23 @@ export const installHost = (
   const browserEvents: unknown[] = []
   let appCatalog: string[] | null = []
   let appRequests = 0
+  const appRevocations: unknown[] = []
   const appWaiters: { count: number; resolve: () => void }[] = []
   let relayStarted = false
   let resolveBrowserReady = () => {}
   const browserReady = new Promise<void>((resolve) => {
     resolveBrowserReady = resolve
+  })
+  const openRequests: unknown[] = []
+  let openResponse: unknown = { ok: true, status: 'dispatched' }
+  let openHeld = false
+  let resolveOpenStarted = () => {}
+  let releaseOpen = () => {}
+  const openStarted = new Promise<void>((resolve) => {
+    resolveOpenStarted = resolve
+  })
+  const openGate = new Promise<void>((resolve) => {
+    releaseOpen = resolve
   })
   const frames: string[] = []
   let wakeRelay = () => {}
@@ -686,6 +705,7 @@ export const installHost = (
       }
     }
     if (e.url.endsWith('/h/app/revoke')) {
+      appRevocations.push(request)
       const body = request as unknown as {
         v?: unknown
         target?: {
@@ -716,8 +736,12 @@ export const installHost = (
         throw new Error('Unexpected fixture app revoke request')
       response = { v: 1, ok: true, value: null }
     }
-    if (e.url.endsWith('/launch') && request.open === true)
-      response = { ok: true, status: 'dispatched' }
+    if (e.url.endsWith('/launch') && request.open === true) {
+      openRequests.push(request)
+      resolveOpenStarted()
+      if (openHeld) await openGate
+      response = openResponse
+    }
     if (e.url.endsWith('/launch') && request.link === true) {
       resolveLinkStarted()
       if (linkHeld) await linkGate
@@ -919,6 +943,16 @@ export const installHost = (
       invalidIndexCache = enabled
     },
     browserReady,
+    openRequests,
+    appRevocations,
+    setOpenResponse: (response) => {
+      openResponse = response
+    },
+    holdOpen: () => {
+      openHeld = true
+    },
+    openStarted,
+    releaseOpen,
     relayStarted: () => relayStarted,
     preparedFiles,
     attemptedFiles,
@@ -1011,6 +1045,14 @@ export const installHost = (
         path,
         type: 'Project' as const,
         tokens: 900,
+      }))
+    },
+    setMcpTools: (names) => {
+      usage.value.context.breakdown.mcpTools = names.map((name) => ({
+        name,
+        serverName: name.split('__')[1] ?? '',
+        tokens: 40,
+        isLoaded: true,
       }))
     },
     setAppCatalog: (apps) => {
@@ -1237,9 +1279,16 @@ export const captureView = async (
     ? { ...scenario, component: 'AbovePrompt' as const }
     : scenario
   let ui = await $.ui.mount(mountTarget(mounted))
-  const launcher =
-    scenario.browser3d &&
-    Boolean(await ui.find({ type: 'Button', key: 'copy-browser-link' }))
+  let launcher: 'open-browser' | 'copy-browser-link' | undefined
+  if (scenario.browser3d) {
+    if (await ui.find({ type: 'Button', key: 'open-browser' }))
+      launcher = 'open-browser'
+    else if (
+      !candidate &&
+      (await ui.find({ type: 'Button', key: 'copy-browser-link' }))
+    )
+      launcher = 'copy-browser-link'
+  }
   if (scenario.browser3d && !launcher) {
     if (candidate)
       throw new Error(`${scenario.id}: browser launcher is missing`)
@@ -1247,19 +1296,26 @@ export const captureView = async (
     ui = await $.ui.mount(mountTarget(scenario))
   }
   if (!launcher) await layoutChrome(scenario, ui)
-  if (host.copyCalls.length !== 0)
+  if (host.copyCalls.length !== 0 || host.openRequests.length !== 0)
     throw new Error(
-      `${scenario.id}: mounting copied without an explicit action`,
+      `${scenario.id}: mounting launched or copied without an explicit action`,
     )
   if (launcher) {
-    await ui.press({ key: 'copy-browser-link' })
-    actions.push('copy-browser-link')
+    await ui.press({ key: launcher })
+    actions.push(launcher)
     await host.browserReady
-    const copied = host.copyCalls.slice()
-    if (copied.length !== 1 || copied[0]?.surface !== scenario.surface)
-      throw new Error(
-        `${scenario.id}: explicit copy did not target the pressed surface`,
-      )
+    if (launcher === 'open-browser') {
+      if (Number(host.openRequests.length) !== 1 || host.copyCalls.length)
+        throw new Error(
+          `${scenario.id}: explicit press did not dispatch the browser`,
+        )
+    } else {
+      const copied = host.copyCalls.slice()
+      if (copied.length !== 1 || copied[0]?.surface !== scenario.surface)
+        throw new Error(
+          `${scenario.id}: explicit copy did not target the pressed surface`,
+        )
+    }
     await ui.redraw()
     const tree = await ui.drawn()
     if (JSON.stringify(tree).includes('/launch/'))

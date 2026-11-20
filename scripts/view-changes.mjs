@@ -83,10 +83,19 @@ export function decideViewChanges({
   const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   const validKey = (key) =>
     key === 'tree' || /^svg:(0|[1-9]\d*):(source|viewport)$/.test(key)
+  const baselines = Array.isArray(value?.baseline)
+    ? value.baseline
+    : [value?.baseline]
+  const validBaselines =
+    baselines.length > 0 &&
+    baselines.every(
+      (entry) => typeof entry === 'string' && /^[0-9a-f]{40}$/i.test(entry),
+    ) &&
+    new Set(baselines.map((entry) => entry.toLowerCase())).size ===
+      baselines.length
   if (
     !object(value) ||
-    typeof value.baseline !== 'string' ||
-    !/^[0-9a-f]{40}$/i.test(value.baseline) ||
+    !validBaselines ||
     typeof value.reason !== 'string' ||
     !value.reason.trim() ||
     !object(value.cases) ||
@@ -110,7 +119,9 @@ export function decideViewChanges({
     baseline: value.baseline,
     reason: value.reason,
     cases: value.cases,
-    applied: value.baseline.toLowerCase() === baseline.toLowerCase(),
+    applied: baselines.some(
+      (entry) => entry.toLowerCase() === baseline.toLowerCase(),
+    ),
   }
   if (intended.applied && names) {
     const known = new Set(names)

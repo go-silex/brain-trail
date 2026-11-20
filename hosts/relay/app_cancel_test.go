@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,5 +134,142 @@ func TestCancelQueueFailureFailsClosedAndUnadmittedDoesNotNotify(t *testing.T) {
 	case <-a.relay.outputFailure:
 	default:
 		t.Fatal("cancel queue failure not fatal")
+	}
+}
+
+func TestGenerationRevokeInvalidatesPendingBrowserLaunch(t *testing.T) {
+	a, g, o := cancelFixture(t)
+	s := a.relay
+	s.app = a
+	s.host = "localhost"
+	s.token = "existing-browser-session"
+	s.assets = t.TempDir()
+	if err := os.WriteFile(filepath.Join(s.assets, "app.js"), []byte("session"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.launch = "unredeemed"
+	s.launchBound = true
+	s.launchGeneration = 1
+	s.launchExpiry = time.Now().Add(time.Minute)
+	s.launchFile = filepath.Join(t.TempDir(), "open.html")
+	if err := os.WriteFile(s.launchFile, []byte("handoff"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := s.launchFile
+	a.approvals["claimed"] = g.approval
+	a.owner, a.ownerGeneration = g.approval.owner, 1
+	revoke := []byte(`{"v":1,"target":{"kind":"generation","owner":{"host":"code","sessionId":"session"},"generation":1},"reason":"generation-ended"}`)
+	w := httptest.NewRecorder()
+	a.host(w, httptest.NewRequest("POST", "/h/app/revoke", nil), revoke)
+	if !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("revocation not acknowledged: %s", w.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("handoff still exists: %v", err)
+	}
+	w = httptest.NewRecorder()
+	s.browserHandler(w, httptest.NewRequest("GET", "http://localhost/launch/unredeemed", nil))
+	if w.Code != 404 {
+		t.Fatalf("revoked launch returned %d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	s.browserHandler(w, httptest.NewRequest("GET", "http://localhost/s/existing-browser-session/app.js", nil))
+	if w.Code != 200 || w.Body.String() != "session" {
+		t.Fatalf("redeemed session no longer works: %d %q", w.Code, w.Body.String())
+	}
+	select {
+	case <-o.done:
+	default:
+		t.Fatal("grant operation was not retired")
+	}
+	if a.current(1) {
+		t.Fatal("revoked generation remains current")
+	}
+	s.hostToken = "host-secret"
+	req := httptest.NewRequest("POST", "/h/launch", strings.NewReader(`{"link":true,"generation":1}`))
+	req.Header.Set("Authorization", "Bearer host-secret")
+	w = httptest.NewRecorder()
+	s.hostHandler(w, req)
+	if !strings.Contains(w.Body.String(), `"error":"stale-generation"`) {
+		t.Fatalf("revoked generation accepted another launch: %s", w.Body.String())
+	}
+}
+
+func TestGenerationRevokeBeforePublicationAndScope(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation int64
+		owner      Owner
+		revoked    bool
+	}{
+		{"before-publication", 0, Owner{}, true},
+		{"newer-generation", 2, Owner{}, false},
+		{"different-owner", 1, Owner{Host: "code", SessionID: "other"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, _ := cancelFixture(t)
+			a.relay.generation = tc.generation
+			if tc.owner != (Owner{}) {
+				a.owner, a.ownerGeneration = tc.owner, 1
+			}
+			a.relay.launch = "pending"
+			a.relay.launchExpiry = time.Now().Add(time.Minute)
+			w := httptest.NewRecorder()
+			a.host(w, httptest.NewRequest("POST", "/h/app/revoke", nil), []byte(`{"v":1,"target":{"kind":"generation","owner":{"host":"code","sessionId":"session"},"generation":1},"reason":"generation-ended"}`))
+			if !strings.Contains(w.Body.String(), `"ok":true`) {
+				t.Fatal(w.Body.String())
+			}
+			if got := a.relay.launch == ""; got != tc.revoked {
+				t.Fatalf("launch invalidated = %v, want %v", got, tc.revoked)
+			}
+		})
+	}
+}
+
+func TestGenerationRevokeStopsLegacyHandoffAndDispatch(t *testing.T) {
+	a, _, _ := cancelFixture(t)
+	s := a.relay
+	s.app = a
+	s.hostToken = "host-secret"
+	s.host = "localhost"
+	s.dir = t.TempDir()
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer host-secret")
+		w := httptest.NewRecorder()
+		s.hostHandler(w, req)
+		return w
+	}
+	if w := post("/h/launch", `{}`); !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("legacy launch: %s", w.Body.String())
+	}
+	code, path := s.launch, s.launchFile
+	if path == "" {
+		t.Fatal("legacy handoff was not tracked")
+	}
+	revoke := `{"v":1,"target":{"kind":"generation","owner":{"host":"code","sessionId":"session"},"generation":1},"reason":"generation-ended"}`
+	if w := post("/h/app/revoke", revoke); !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("revoke: %s", w.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy handoff still exists: %v", err)
+	}
+	if w := post("/h/launch", `{}`); !strings.Contains(w.Body.String(), `"error":"stale-generation"`) {
+		t.Fatalf("legacy launch after revoke: %s", w.Body.String())
+	}
+	marker := filepath.Join(t.TempDir(), "started")
+	command := launchFixture("marker")
+	command.Env = append(command.Env, "BRAIN_RELAY_LAUNCH_MARKER="+marker)
+	if _, err := s.startLaunchForCode(command, "late", 1, code); err == nil {
+		t.Fatal("revoked launch dispatched")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("revoked launch started a process: %v", err)
+	}
+	if w := post("/h/generation", `{"generation":2}`); w.Code != 200 {
+		t.Fatalf("next generation: %d %s", w.Code, w.Body.String())
+	}
+	if w := post("/h/launch", `{}`); !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("next generation launch: %s", w.Body.String())
 	}
 }

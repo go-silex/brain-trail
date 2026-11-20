@@ -724,6 +724,41 @@ test('view approvals bind exact proof units and never hide unrelated failures', 
   )
 })
 
+test('view approvals apply only to listed exact baselines with the same proofs', () => {
+  const first = 'a'.repeat(40)
+  const second = 'b'.repeat(40)
+  const tree = proofFingerprint('before', 'after')
+  const declaration = JSON.stringify({
+    baseline: [first, second.toUpperCase()],
+    reason: 'Same reviewed difference',
+    cases: { one: { tree } },
+  })
+  const difference = { kind: 'difference', key: 'tree', fingerprint: tree }
+  const decide = (baseline, errors = [difference], names = ['one']) =>
+    decideViewChanges({
+      declaration,
+      baseline,
+      names,
+      result: { name: 'one', errors },
+    })
+
+  for (const baseline of [first.toUpperCase(), second]) {
+    const accepted = decide(baseline)
+    assert.equal(accepted.intended.applied, true)
+    assert.deepEqual(accepted.result.errors, [])
+    assert.throws(() => decide(baseline, [], []), /unknown cases: one/)
+    assert.match(decide(baseline, []).result.errors[0].message, /unused/)
+    const changed = { ...difference, fingerprint: 'c'.repeat(64) }
+    const rejected = decide(baseline, [changed]).result.errors
+    assert.ok(rejected.includes(changed))
+    assert.match(rejected.at(-1).message, /unused or mismatched/)
+  }
+  const unlisted = decide('c'.repeat(40))
+  assert.equal(unlisted.intended.applied, false)
+  assert.deepEqual(unlisted.result.errors, [difference])
+  assert.deepEqual(unlisted.intended.baseline, [first, second.toUpperCase()])
+})
+
 test('canonical tree proof retains structure and normalizes moved native clients independently', () => {
   const baseline = {
     children: [
@@ -781,6 +816,11 @@ test('view change declarations reject malformed and blanket approvals', () => {
     '{',
     'null',
     JSON.stringify({ ...good, baseline: 'abc' }),
+    JSON.stringify({ ...good, baseline: [] }),
+    JSON.stringify({ ...good, baseline: [baseline, baseline.toUpperCase()] }),
+    JSON.stringify({ ...good, baseline: [baseline, 'abc'] }),
+    JSON.stringify({ ...good, baseline: [baseline, null] }),
+    JSON.stringify({ ...good, baseline: { sha: baseline } }),
     JSON.stringify({ ...good, reason: '  ' }),
     JSON.stringify({ ...good, reason: 1 }),
     JSON.stringify({ ...good, cases: ['one'] }),
@@ -850,9 +890,10 @@ test('view fixture contract rejects divergent inputs and unperformed actions', (
     },
   }
   const candidateCapture = structuredClone(capture)
-  candidateCapture.fixture.actions = ['copy-browser-link']
+  candidateCapture.fixture.actions = ['open-browser']
   assert.equal(fixtureInputProblem(scenario, capture, candidateCapture), null)
   const webBaseline = structuredClone(candidateCapture)
+  webBaseline.fixture.actions = ['copy-browser-link']
   assert.equal(
     fixtureInputProblem(scenario, webBaseline, candidateCapture),
     null,

@@ -87,6 +87,8 @@ export const brain = (L: Layout): Brain => {
   const R = root?.r ?? C
   const g1 = L.groups.filter((g) => g.depth === 1),
     g2 = L.groups.filter((g) => g.depth === 2)
+  const first = new Map(g1.map((g) => [g.path, g]))
+  const second = new Map(g2.map((g) => [g.path, g]))
   const N = L.files.length
   const X = new Float32Array(N),
     Y = new Float32Array(N),
@@ -96,9 +98,11 @@ export const brain = (L: Layout): Brain => {
     A = new Float32Array(N),
     b = new Int16Array(N)
   const top = new Map<(typeof g1)[number], number>()
-  L.files.forEach(([, x, y], i) => {
-    const a = g1.find((g) => Math.hypot(g.x - x, g.y - y) <= g.r),
-      s = g2.find((g) => Math.hypot(g.x - x, g.y - y) <= g.r)
+  L.files.forEach(([path, x, y], i) => {
+    const parts = path.split('/')
+    const a = first.get(parts.length > 1 ? parts[0]! : '·')
+    const s =
+      parts.length > 2 ? second.get(`${parts[0]}/${parts[1]}`) : undefined
     let px = x - C,
       pz = (y - C) * 1.18
     px += Math.sign(px) * 46 // the two hemispheres

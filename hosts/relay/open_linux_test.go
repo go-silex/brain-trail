@@ -3,9 +3,15 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The private xdg-open is a copy of this test binary, not a GUI application.
@@ -50,5 +56,186 @@ func TestLinuxOpenerUsesPrivatePATH(t *testing.T) {
 	invoked, err := os.ReadFile(marker)
 	if err != nil || string(invoked) != target {
 		t.Fatalf("fixture argument = %q, error = %v", invoked, err)
+	}
+}
+
+func TestBrowserCommandUsesRegisteredBrowserAndPrivateFile(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"xdg-settings": "#!/bin/sh\nprintf '%s\\n' 'browser.desktop'\n",
+		"gtk-launch": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	path := filepath.Join(dir, "open é #1.html")
+	cmd, err := browserCommand(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != filepath.Join(dir, "gtk-launch") || len(cmd.Args) != 3 || cmd.Args[1] != "browser.desktop" {
+		t.Fatalf("unexpected browser command: %q %q", cmd.Path, cmd.Args)
+	}
+	uri, err := url.Parse(cmd.Args[2])
+	if err != nil || uri.Scheme != "file" || uri.Host != "" || uri.Path != path || uri.RawQuery != "" || uri.Fragment != "" || !strings.Contains(cmd.Args[2], "open%20%C3%A9%20%231.html") {
+		t.Fatalf("invalid private file URI %q: %v", cmd.Args[2], err)
+	}
+	if _, err := browserCommand("relative.html"); err == nil {
+		t.Fatal("accepted relative handoff path")
+	}
+}
+
+func TestBrowserCommandRejectsInvalidAssociation(t *testing.T) {
+	for _, id := range []string{"", "-option.desktop", "../browser.desktop", "browser\nother.desktop"} {
+		t.Run(id, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "xdg-settings"), []byte("#!/bin/sh\nprintf '%s' \"$BROWSER_ID\"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			t.Setenv("BROWSER_ID", id)
+			if _, err := browserCommand(filepath.Join(dir, "open.html")); err == nil {
+				t.Fatalf("accepted invalid association %q", id)
+			}
+		})
+	}
+}
+
+func TestBrowserCommandWithoutGtkLaunch(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"xdg-settings": "#!/bin/sh\nprintf '%s\\n' 'browser.desktop'\n",
+		"xdg-mime": "#!/bin/sh\n[ \"$1 $2 $3\" = 'query default text/html' ] || exit 1\nprintf '%s\\n' \"$HTML_HANDLER\"\n",
+		"xdg-open": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	path := filepath.Join(dir, "handoff with spaces.html")
+	t.Setenv("HTML_HANDLER", "browser.desktop")
+	cmd, err := browserCommand(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != filepath.Join(dir, "xdg-open") || len(cmd.Args) != 2 || cmd.Args[1] != path {
+		t.Fatalf("unexpected fallback: %q %q", cmd.Path, cmd.Args)
+	}
+	for _, handler := range []string{"editor.desktop", "", "../browser.desktop"} {
+		t.Setenv("HTML_HANDLER", handler)
+		if _, err := browserCommand(path); err == nil {
+			t.Fatalf("accepted HTML association %q", handler)
+		}
+	}
+}
+
+func TestExplicitBrowserBootstrapGenerationLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"xdg-settings": "#!/bin/sh\nprintf '%s\\n' 'browser.desktop'\n",
+		"gtk-launch": "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	for _, tc := range []struct {
+		name, route, body string
+		expire            bool
+		want              int
+	}{
+		{"first publication", "/h/generation", `{"generation":5,"ended":false}`, false, http.StatusSeeOther},
+		{"first layout", "/h/event", `{"v":1,"kind":"layout","generation":5}`, false, http.StatusSeeOther},
+		{"new generation", "/h/generation", `{"generation":6,"ended":false}`, false, http.StatusNotFound},
+		{"new layout", "/h/event", `{"v":1,"kind":"layout","generation":6}`, false, http.StatusNotFound},
+		{"generation ended", "/h/generation", `{"generation":5,"ended":true}`, false, http.StatusNotFound},
+		{"event ended", "/h/event", `{"v":1,"kind":"ended","generation":5}`, false, http.StatusNotFound},
+		{"expired", "", "", true, http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRelayHarness(t)
+			id, err := secret()
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(map[string]any{"open": true, "id": id, "generation": 5})
+			if err != nil {
+				t.Fatal(err)
+			}
+			open := func() map[string]any {
+				t.Helper()
+				res := request(t, h.private, "POST", "http://localhost/h/launch", "host-secret", "", "", body)
+				defer res.Body.Close()
+				var result map[string]any
+				if err := json.NewDecoder(res.Body).Decode(&result); err != nil || res.StatusCode != http.StatusOK {
+					t.Fatalf("open response: status=%d result=%v error=%v", res.StatusCode, result, err)
+				}
+				return result
+			}
+			if result := open(); result["ok"] != true {
+				t.Fatalf("initial open rejected: %v", result)
+			}
+			if result := open(); result["error"] != "busy" {
+				t.Fatalf("pending bootstrap was not busy: %v", result)
+			}
+			h.relay.mu.Lock()
+			path := h.relay.launchFile
+			h.relay.mu.Unlock()
+			if filepath.Base(path) != "open-1.html" {
+				t.Fatalf("unexpected handoff filename: %q", path)
+			}
+			bootstrap, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			match := regexp.MustCompile(`url=(http://[^"]+)`).FindSubmatch(bootstrap)
+			if len(match) != 2 {
+				t.Fatal("missing bootstrap URL")
+			}
+			if tc.route != "" {
+				status(t, request(t, h.private, "POST", "http://localhost"+tc.route, "host-secret", "", "", []byte(tc.body)), http.StatusOK)
+			}
+			if tc.expire {
+				h.relay.mu.Lock()
+				h.relay.launchExpiry = time.Now().Add(-time.Second)
+				h.relay.mu.Unlock()
+			}
+			public := *h.public
+			public.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+			status(t, request(t, &public, "GET", string(match[1]), "", "", "", nil), tc.want)
+			status(t, request(t, &public, "GET", string(match[1]), "", "", "", nil), http.StatusNotFound)
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("revoked handoff file remains: %q, %v", path, err)
+			}
+			h.relay.mu.Lock()
+			timer := h.relay.launchTimer
+			h.relay.mu.Unlock()
+			if timer != nil {
+				t.Fatal("revoked handoff retained its expiry timer")
+			}
+			if tc.want == http.StatusSeeOther {
+				if result := open(); result["ok"] != true {
+					t.Fatalf("next open rejected: %v", result)
+				}
+				h.relay.mu.Lock()
+				nextPath := h.relay.launchFile
+				h.relay.mu.Unlock()
+				if filepath.Base(nextPath) != "open-2.html" {
+					t.Fatalf("unexpected next handoff filename: first=%q next=%q", path, nextPath)
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("old handoff file recreated: %q, %v", path, err)
+				}
+			}
+			if tc.want == http.StatusNotFound && !tc.expire {
+				if result := open(); result["error"] != "stale-generation" {
+					t.Fatalf("stale or ended generation accepted: %v", result)
+				}
+			}
+		})
 	}
 }

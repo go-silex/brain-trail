@@ -383,10 +383,8 @@ func TestLaunchFailureClearsOnlyMatchingReservation(t *testing.T) {
 func TestFirstBrowserLaunchAcceptsHostGenerationBeforePublication(t *testing.T) {
 	h := newRelayHarness(t)
 	// Make bootstrap creation fail before any OS opener can be invoked.
-	path := filepath.Join(h.relay.dir, "open.html")
-	if err := os.Mkdir(path, 0700); err != nil {
-		t.Fatal(err)
-	}
+	dir := h.relay.dir
+	h.relay.dir = filepath.Join(dir, "missing")
 	id, err := secret()
 	if err != nil {
 		t.Fatal(err)
@@ -397,9 +395,7 @@ func TestFirstBrowserLaunchAcceptsHostGenerationBeforePublication(t *testing.T) 
 	}
 	response := request(t, h.private, "POST", "http://localhost/h/launch", "host-secret", "", "", body)
 	status(t, response, http.StatusInternalServerError)
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
+	h.relay.dir = dir
 	response = request(t, h.private, "POST", "http://localhost/h/launch", "host-secret", "", "", []byte(`{}`))
 	defer response.Body.Close()
 	var result map[string]any

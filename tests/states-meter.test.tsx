@@ -15,17 +15,15 @@ const scenario: ViewCase = {
   transition: 'none',
 }
 
-test('desktop Copy remains available before the first context measurement', async ($, on: On) => {
+test('desktop browser opening remains available before the first context measurement', async ($, on: On) => {
   const { ui, host } = await mountReady($, on, scenario)
   try {
     expect(await ui.findAll({ type: 'Svg' })).toEqual([])
-    expect(
-      await ui.find({ type: 'Button', key: 'copy-browser-link' }),
-    ).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'open-browser' })).toBeDefined()
     expect(host.copyCalls).toEqual([])
-    await ui.press({ key: 'copy-browser-link' })
+    await ui.press({ key: 'open-browser' })
     await host.browserReady
-    expect(host.copyCalls.length).toBe(1)
+    expect(host.copyCalls).toEqual([])
   } finally {
     host.disconnectRelay()
     await ui.unmount()

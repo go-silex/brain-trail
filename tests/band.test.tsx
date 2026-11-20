@@ -84,14 +84,12 @@ for (const surface of ['desktop', 'terminal'] as const) {
   })
 }
 
-test('the high-context band retains its meter and offers explicit Copy without opening a pane', async ($, on) => {
+test('the high-context band retains its meter and offers explicit browser opening without opening a pane', async ($, on) => {
   const opened: string[] = []
   engine(on, 82, opened)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /⛈️ Contexte 82 %/ })).toBeDefined()
-  expect(
-    await ui.find({ type: 'Button', key: 'copy-browser-link' }),
-  ).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'open-browser' })).toBeDefined()
   expect(opened).toEqual([])
   await ui.unmount()
 })

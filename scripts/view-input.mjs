@@ -23,9 +23,7 @@ export function fixtureInputProblem(scenario, baseline, candidate) {
           ...(scenario.phase === 'coach-error' ? ['coach-run'] : []),
         ]
   const candidateActions =
-    scenario.phase !== 'loading' && scenario.browser3d
-      ? ['copy-browser-link']
-      : []
+    scenario.phase !== 'loading' && scenario.browser3d ? ['open-browser'] : []
   for (const [side, capture] of [
     ['baseline', baseline],
     ['candidate', candidate],
@@ -39,7 +37,8 @@ export function fixtureInputProblem(scenario, baseline, candidate) {
     const webBaseline =
       side === 'baseline' &&
       candidateActions.length > 0 &&
-      actions === stable(candidateActions)
+      (actions === stable(candidateActions) ||
+        actions === stable(['copy-browser-link']))
     if (actions !== stable(expected) && !webBaseline)
       return `${side} fixture did not complete the expected actions`
     if (

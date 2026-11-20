@@ -7,6 +7,8 @@ const few = (x: string[]) => (x.length <= 3 ? x.map(q).join(', ') : `${x.slice(0
 const en = {
   webglUnavailable: '3D is unavailable in this browser because WebGL could not initialize. Use 2D here, or open the dashboard in a browser where WebGL is available.',
   brand: 'Unkillable Companies',
+  enlargePane: 'Enlarge the pane to show Brain Trail.',
+  bodyPages: { first: 'First page', previous: 'Previous page', next: 'Next page', last: 'Last page' },
   tagline: 'AI works better with the right context.', site: 'unkillablecompanies.com', madeBy: 'Made by',
   zoneLabel: { ok: 'Room to spare', warn: 'Compact soon', bad: 'Change session' },
   tabs: { map: 'Map', goal: 'Goal', coach: 'Coach', files: 'Files', context: 'Context', handoff: 'Hand-off' },
@@ -163,6 +165,8 @@ type Strings = typeof en
 const fr: Strings = {
   webglUnavailable: "La 3D est indisponible dans ce navigateur car WebGL n'a pas pu démarrer. Utilise la 2D ici ou ouvre le tableau de bord dans un navigateur où WebGL est disponible.",
   brand: 'Unkillable Companies',
+  enlargePane: 'Agrandissez le panneau pour afficher Brain Trail.',
+  bodyPages: { first: 'Première page', previous: 'Page précédente', next: 'Page suivante', last: 'Dernière page' },
   tagline: 'AI works better with the right context.', site: 'unkillablecompanies.com', madeBy: 'Une création',
   zoneLabel: { ok: 'De la marge', warn: 'Compacter bientôt', bad: 'Changer de session' },
   tabs: { map: 'Carte', goal: 'Objectif', coach: 'Coach', files: 'Fichiers', context: 'Contexte', handoff: 'Passation' },

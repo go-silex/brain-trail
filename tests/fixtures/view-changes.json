@@ -1,33 +1,24 @@
 {
-  "baseline": "68b45cf54508e4cfde7a44572fa751a69fcda085",
-  "reason": "Independent exact-proof review approves these nine band tree changes: Desktop Open/Pair/Copy controls, removal of terminal pane buttons, and Desktop controls before meter availability. The five Desktop fingerprints were reviewed from receipt input b356584de78a8035bae002368d5935f38aaa10c96a935426e61a814844fd7838; terminal approvals remain unchanged. No retired native pane, browser failure or gauge SVG difference is approved.",
+  "baseline": [
+    "ea5dd04526c1ae02a4e51aafa3f837c5e241b6af",
+    "85769f82035a269fba5159f75cf37af2b305346d"
+  ],
+  "reason": "Only the Desktop widget's Copy link button changes: its action key becomes open-browser and the visible label is the globe itself in both languages. Its position and the other controls are unchanged. No terminal, SVG, gauge, or browser difference is approved.",
   "cases": {
     "band-desktop-dark-en": {
-      "tree": "0848fcbd67812cca2bff07f560d3e797fd88e65f0fe75e21c1f4452d0cec2efc"
+      "tree": "431a3873f101f236a4e1da6da2f05831619eaf1a90452d235f105f8a9120f504"
     },
     "band-desktop-light-en": {
-      "tree": "0848fcbd67812cca2bff07f560d3e797fd88e65f0fe75e21c1f4452d0cec2efc"
+      "tree": "431a3873f101f236a4e1da6da2f05831619eaf1a90452d235f105f8a9120f504"
     },
     "band-desktop-dark-fr": {
-      "tree": "7491722b2d1e7beafb2921c390701661da4349a31055403c205e6446d109a567"
+      "tree": "c6599c2326a6985d82ef16adc75f55b3bf3fbd76e9918beddf780cf7395adee6"
     },
     "band-desktop-light-fr": {
-      "tree": "7491722b2d1e7beafb2921c390701661da4349a31055403c205e6446d109a567"
-    },
-    "band-terminal-dark-en": {
-      "tree": "430e369eb90fa7cddf29d769f5dca0389355678f9e7616952a8bc8b5a96cc783"
-    },
-    "band-terminal-light-en": {
-      "tree": "430e369eb90fa7cddf29d769f5dca0389355678f9e7616952a8bc8b5a96cc783"
-    },
-    "band-terminal-dark-fr": {
-      "tree": "7b4b4bc5dcc8e11ffa39ea70dd9a38f76eed7254dd988c4384b3da83eddd6294"
-    },
-    "band-terminal-light-fr": {
-      "tree": "7b4b4bc5dcc8e11ffa39ea70dd9a38f76eed7254dd988c4384b3da83eddd6294"
+      "tree": "c6599c2326a6985d82ef16adc75f55b3bf3fbd76e9918beddf780cf7395adee6"
     },
     "band-meter-unavailable-desktop-dark-en": {
-      "tree": "39f2f77e66258b225aed8d651283ce8bb7983c96255bf08700367d55b7581f25"
+      "tree": "90fdf277e0aa7c34b7d63bb09be3bebbc2a01cfd70f7cada4aa7c3f4cb3873a3"
     }
   }
 }

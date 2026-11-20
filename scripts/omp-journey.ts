@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import { Database } from 'bun:sqlite'
-import { mkdir, rename, writeFile, symlink, unlink } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  rename,
+  realpath,
+  writeFile,
+  symlink,
+  unlink,
+} from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { chromium, type Browser } from 'playwright'
@@ -24,6 +32,7 @@ import { registerCapture } from '../hosts/omp/capture'
 import { startDashboardServer, type DashboardServer } from '../hosts/omp/server'
 import { nameServer } from '../hooks/mcp.ts'
 import { brain } from '../hooks/scene3d.ts'
+import { hash } from '../hooks/workspace'
 import type { DashboardFeed, FactsWire, ServerEvent } from '../types/browser.ts'
 import { findScenePoint, svgFilePoint } from './scene-picking.mjs'
 import {
@@ -72,6 +81,38 @@ async function until<T>(
   await mkdir(cwd, { recursive: true })
   await writeFile(join(cwd, 'root.txt'), 'root fixture')
   await writeFile(join(cwd, 'child.txt'), 'child fixture')
+  await mkdir(join(cwd, 'nested', 'branch', 'leaf'), { recursive: true })
+  await writeFile(
+    join(cwd, 'nested', 'branch', 'leaf', 'file.txt'),
+    'nested fixture',
+  )
+  const canonical = await realpath(cwd)
+  const cacheDir = join(agentDir, 'brain-trail')
+  await mkdir(cacheDir, { recursive: true })
+  await writeFile(
+    join(cacheDir, `layout-${hash(canonical)}.json`),
+    JSON.stringify({
+      root: canonical,
+      paths: ['child.txt', 'nested/branch/leaf/file.txt', 'root.txt'],
+      layout: {
+        size: 100,
+        dot: 1,
+        title: 'workspace',
+        files: [],
+        groups: [
+          {
+            depth: 1,
+            name: 'stale',
+            path: 'stale-flat-marker',
+            x: 0,
+            y: 0,
+            r: 1,
+            n: 1,
+          },
+        ],
+      },
+    }),
+  )
   await writeFile(outside, 'outside secret')
   await writeFile(canary, canaryText)
   await symlink(outside, join(cwd, 'escape.txt'))
@@ -393,6 +434,16 @@ async function until<T>(
       args: ['--enable-unsafe-swiftshader'],
     })
     const page = await browser.newPage()
+    let launchUrl: string | undefined
+    page.on('request', (request) => {
+      const target = new URL(request.url())
+      if (
+        target.protocol === 'http:' &&
+        target.hostname === '127.0.0.1' &&
+        target.pathname.startsWith('/launch/')
+      )
+        launchUrl = request.url()
+    })
     const browserErrors: string[] = []
     page.on('pageerror', (error) => browserErrors.push(error.message))
     page.on('console', (message) => {
@@ -415,17 +466,15 @@ async function until<T>(
       browserErrors.push('browser requested an external resource')
       return route.abort()
     })
+    phase = 'one-use browser launch'
     await page.goto(pathToFileURL(launchFile).href)
     await page.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/s\/[^/]+\/$/)
     const url = page.url()
     const origin = new URL(url).origin
-    const reuse = await browser.newPage()
-    const refusedLaunch = reuse.waitForResponse((response) =>
-      new URL(response.url()).pathname.startsWith('/launch/'),
-    )
-    await reuse.goto(pathToFileURL(launchFile).href)
-    assert.equal((await refusedLaunch).status(), 404)
-    await reuse.close()
+    await assert.rejects(access(launchFile), { code: 'ENOENT' })
+    assert.ok(launchUrl, 'initial navigation must request the launch URL')
+    assert.equal((await fetch(launchUrl, { redirect: 'manual' })).status, 404)
+    phase = 'OMP browser journey'
     const response = await fetch(new URL('events', url))
     assert.equal(response.status, 200)
     assert.ok(response.body)
@@ -517,7 +566,14 @@ async function until<T>(
       changed,
     )
     if (inventory.kind !== 'layout') throw new Error('workspace layout missing')
-    assert.deepEqual(inventory.layout.paths, ['child.txt', 'root.txt'])
+    assert.deepEqual(inventory.layout.paths, [
+      'child.txt',
+      'nested/branch/leaf/file.txt',
+      'root.txt',
+    ])
+    const groupPaths = inventory.layout.layout.groups.map((group) => group.path)
+    assert.ok(groupPaths.includes('nested/branch/leaf'))
+    assert.ok(!groupPaths.includes('stale-flat-marker'))
     await session.prompt(
       'Read root.txt, then delegate the child file to a task agent.',
     )
