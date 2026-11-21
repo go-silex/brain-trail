@@ -70,36 +70,48 @@ export function renderPane<N, Press>(
       R.h(
         R.Box,
         { flexDirection: 'row', columnGap: 'sm', alignItems: 'center' },
-        R.h(
-          R.Text,
-          {
-            size: 'title',
-            weight: 'regular',
-            dimColor: m.percent === undefined,
-            tabular: true,
-          },
-          m.percent !== undefined ? `${m.estimated ? '≈ ' : ''}${pct} %` : '–',
-        ),
-        R.h(
-          R.Box,
-          { flexDirection: 'column' },
-          compact && m.percent !== undefined
-            ? R.h(
-                R.Text,
-                { size: 'caption', dimColor: true },
-                S.window,
-                ` · ${weather(pct)}`,
-              )
-            : R.h(R.Text, { size: 'caption', dimColor: true }, S.window),
-          !compact &&
-            m.percent !== undefined &&
-            R.h(R.Text, null, weather(pct)),
-        ),
+        s.cowork
+          ? R.h(
+              R.Text,
+              { size: 'caption', dimColor: true },
+              s.lang === 'fr'
+                ? 'Contexte indisponible pour Cowork'
+                : 'Context unavailable for Cowork',
+            )
+          : R.h(
+              R.Text,
+              {
+                size: 'title',
+                weight: 'regular',
+                dimColor: m.percent === undefined,
+                tabular: true,
+              },
+              m.percent !== undefined
+                ? `${m.estimated ? '≈ ' : ''}${pct} %`
+                : '–',
+            ),
+        !s.cowork &&
+          R.h(
+            R.Box,
+            { flexDirection: 'column' },
+            compact && m.percent !== undefined
+              ? R.h(
+                  R.Text,
+                  { size: 'caption', dimColor: true },
+                  S.window,
+                  ` · ${weather(pct)}`,
+                )
+              : R.h(R.Text, { size: 'caption', dimColor: true }, S.window),
+            !compact &&
+              m.percent !== undefined &&
+              R.h(R.Text, null, weather(pct)),
+          ),
       ),
       R.h(
         R.Box,
         { flexDirection: 'row', columnGap: 'xs', alignItems: 'center' },
-        m.percent !== undefined &&
+        !s.cowork &&
+          m.percent !== undefined &&
           zone !== 'ok' &&
           R.h(R.Button, {
             key: 'hdr-compact',
@@ -133,7 +145,9 @@ export function renderPane<N, Press>(
   const tabs = R.h(
     R.Box,
     { flexDirection: 'row', flexWrap: 'wrap', gap: 'xs' },
-    TABS.map((t) =>
+    TABS.filter(
+      (t) => !s.cowork || (t !== 'context' && t !== 'coach' && t !== 'goal'),
+    ).map((t) =>
       R.h(R.Button, {
         key: `t-${t}`,
         label: S.tabs[t].toUpperCase(),

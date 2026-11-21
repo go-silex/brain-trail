@@ -19,7 +19,12 @@ import type {
 } from './view'
 
 export type FactsWire = {
-  ownerHost: 'code' | 'omp'
+  ownerHost: 'code' | 'omp' | 'cowork'
+  coworkCoverage?: {
+    truncated: boolean
+    partialInventory: boolean
+    status?: 'reconnecting' | 'unavailable' | 'closed'
+  }
   assistant: string
   lang: Lang
   meter: Meter

@@ -124,6 +124,7 @@ export type ViewSnapshot = {
   widthPx: number
   lang: Lang
   assistant: string
+  cowork?: boolean
   costInfoCommand: string
   palette: Palette
   meter: Meter

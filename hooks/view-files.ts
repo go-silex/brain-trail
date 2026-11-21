@@ -108,10 +108,14 @@ export const renderFiles = <N, Press>(
     agent: { label: S.gAgent, why: S.gAgentWhy },
     missing: { label: S.missing, why: S.missingWhy },
   }
-  const figures = fileFigures(entries, gaps.length).map((fg) => ({
-    ...fg,
-    ...copy[fg.id],
-  }))
+  const figures = fileFigures(entries, gaps.length)
+    .filter(
+      (fg) => !s.cowork || !['start', 'linked', 'missing'].includes(fg.id),
+    )
+    .map((fg) => ({
+      ...fg,
+      ...copy[fg.id],
+    }))
   const chosen = figures.find((fg) => isOpen(`kpi:${fg.id}`))
   const kpis = R.h(
     R.Box,

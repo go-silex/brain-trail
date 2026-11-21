@@ -23,7 +23,12 @@ export const renderMap = <N, Press>(
 ): { node: N; drawn: DrawnMap | undefined; header?: N; footer?: N } => {
   const S = strings(s.lang, s.assistant)
   const { h, Box, Text, Button } = R
-  if (b.kind === 'failed')
+  if (b.kind === 'failed') {
+    if (s.cowork)
+      return {
+        node: h(Text, { dimColor: true, wrap: 'wrap' }, b.message),
+        drawn: undefined,
+      }
     return {
       node: h(
         Box,
@@ -37,6 +42,7 @@ export const renderMap = <N, Press>(
       ),
       drawn: undefined,
     }
+  }
   if (b.kind === 'loading')
     return {
       node: h(Text, { dimColor: true }, S.packing(b.seconds)),
@@ -235,8 +241,22 @@ export const renderMap = <N, Press>(
       { id: 'read', col: K.read, n: folded.stats.read, label: S.lgRead },
       { id: 'written', col: K.write, n: folded.stats.write, label: S.lgWrite },
       { id: 'found', col: K.hit, n: folded.stats.hit, label: S.lgFound },
-      { id: 'linked', col: K.link, n: folded.stats.link, label: S.lgLinked },
-      { id: 'missing', col: K.gap, n: folded.stats.gap, label: S.lgGap },
+      ...(!s.cowork
+        ? [
+            {
+              id: 'linked' as const,
+              col: K.link,
+              n: folded.stats.link,
+              label: S.lgLinked,
+            },
+            {
+              id: 'missing' as const,
+              col: K.gap,
+              n: folded.stats.gap,
+              label: S.lgGap,
+            },
+          ]
+        : []),
     ]
   const legend = h(
     Box,

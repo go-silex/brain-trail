@@ -154,3 +154,24 @@ export const brain = (L: Layout): Brain => {
   cache.set(L, out)
   return out
 }
+
+// Fileless layouts have no brain extent, so give connector stations room of their own.
+// Keep the existing radius and angular arrangement for every layout with files.
+export const stationPosition = (
+  layout: Layout,
+  shape: Brain,
+  index: number,
+  count: number,
+) => {
+  const step = Math.min(0.55, (Math.PI * 1.2) / Math.max(1, count))
+  const angle = -Math.PI / 2 + (index - (count - 1) / 2) * step
+  const radius =
+    layout.files.length === 0
+      ? Math.max(layout.size * 0.3, 151 / (2 * Math.sin(step / 2)))
+      : shape.rMax
+  return {
+    x: Math.cos(angle) * radius,
+    y: shape.yMax + layout.size * 0.18,
+    z: Math.sin(angle) * radius,
+  }
+}
