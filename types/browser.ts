@@ -20,6 +20,7 @@ import type {
 
 export type FactsWire = {
   ownerHost: 'code' | 'omp' | 'cowork'
+  coworkCoverage?: { truncated: boolean; partialInventory: boolean }
   assistant: string
   lang: Lang
   meter: Meter

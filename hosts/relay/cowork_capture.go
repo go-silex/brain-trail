@@ -5,9 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"path"
+	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -39,22 +40,13 @@ type coworkReceipt struct {
 	MCP   *coworkMCP   `json:"mcp,omitempty"`
 }
 type coworkPayload struct {
-	SessionID string `json:"session_id"`
-	CWD       string `json:"cwd"`
-	Event     string `json:"hook_event_name"`
-	AgentID   string `json:"agent_id"`
-	ToolName  string `json:"tool_name"`
-	ToolUseID string `json:"tool_use_id"`
-	Input     struct {
-		FilePath     string `json:"file_path"`
-		NotebookPath string `json:"notebook_path"`
-		Path         string `json:"path"`
-	} `json:"tool_input"`
-	Response struct {
-		IsError      bool     `json:"is_error"`
-		IsErrorCamel bool     `json:"isError"`
-		Filenames    []string `json:"filenames"`
-	} `json:"-"`
+	SessionID   string          `json:"session_id"`
+	CWD         string          `json:"cwd"`
+	Event       string          `json:"hook_event_name"`
+	AgentID     string          `json:"agent_id"`
+	ToolName    string          `json:"tool_name"`
+	ToolUseID   string          `json:"tool_use_id"`
+	RawInput    json.RawMessage `json:"tool_input"`
 	RawResponse json.RawMessage `json:"tool_response"`
 	MCPServer   struct {
 		Name   string `json:"name"`
@@ -62,15 +54,57 @@ type coworkPayload struct {
 	} `json:"mcp_server"`
 }
 
-func coworkTask(cwd string) string {
-	parts := strings.Split(path.Clean(strings.ReplaceAll(cwd, `\`, "/")), "/")
-	found := false
-	for _, part := range parts {
-		if found && strings.HasPrefix(part, "local_") && len(part) > len("local_") {
-			return part
+func coworkTaskAt(cwd, root string, insensitive bool) string {
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(root) {
+		return ""
+	}
+	cwd, root = filepath.Clean(cwd), filepath.Clean(root)
+	match := func(a, b string) bool {
+		if insensitive {
+			return strings.EqualFold(a, b)
 		}
-		if part == "local-agent-mode-sessions" {
-			found = true
+		return a == b
+	}
+	cwdParts := strings.Split(cwd, string(filepath.Separator))
+	rootParts := strings.Split(root, string(filepath.Separator))
+	if len(cwdParts) < len(rootParts) {
+		return ""
+	}
+	for i, part := range rootParts {
+		if !match(part, cwdParts[i]) {
+			return ""
+		}
+	}
+	parts := cwdParts[len(rootParts):]
+	if len(parts) < 4 || !match(parts[0], "local-agent-mode-sessions") || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	i := 3
+	if match(parts[i], "agent") {
+		i++
+	}
+	if i >= len(parts) || len(parts[i]) <= len("local_") || !match(parts[i][:len("local_")], "local_") {
+		return ""
+	}
+	return parts[i]
+}
+
+func coworkTask(cwd string) string {
+	config, err := os.UserConfigDir()
+	if err == nil {
+		if task := coworkTaskAt(cwd, filepath.Join(config, "Claude"), runtime.GOOS == "windows" || runtime.GOOS == "darwin"); task != "" {
+			return task
+		}
+	}
+	if runtime.GOOS == "windows" {
+		base := os.Getenv("LOCALAPPDATA")
+		packages := filepath.Join(base, "Packages")
+		rel, err := filepath.Rel(packages, cwd)
+		if err == nil {
+			parts := strings.Split(rel, string(filepath.Separator))
+			if len(parts) >= 5 && parts[0] != "" && parts[0] != ".." && strings.EqualFold(parts[1], "LocalCache") && strings.EqualFold(parts[2], "Roaming") && strings.EqualFold(parts[3], "Claude") {
+				return coworkTaskAt(cwd, filepath.Join(packages, parts[0], "LocalCache", "Roaming", "Claude"), true)
+			}
 		}
 	}
 	return ""
@@ -88,6 +122,39 @@ func coworkPrintable(s string) bool {
 	return true
 }
 func coworkAbsolute(s string) bool { return filepath.IsAbs(s) }
+func coworkPathText(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return utf8.ValidString(s)
+}
+
+func coworkJSONStringSize(s string) int {
+	n := 2
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		switch {
+		case r == utf8.RuneError && size == 1:
+			n += 6
+		case r == '"' || r == '\\':
+			n += 2
+		case r < 0x20 || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029':
+			n += 6
+		default:
+			n += size
+		}
+		s = s[size:]
+	}
+	return n
+}
+
+func coworkStringField(m map[string]json.RawMessage, field string) string {
+	var s string
+	_ = json.Unmarshal(m[field], &s)
+	return s
+}
 func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 	r := coworkReceipt{V: 1, At: at, Agent: p.AgentID != ""}
 	var key string
@@ -107,10 +174,12 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 		r.Ev = "tool"
 		r.Tool = p.ToolName
 		r.Ok = p.Event == "PostToolUse"
-		if len(p.RawResponse) > 0 {
-			_ = json.Unmarshal(p.RawResponse, &p.Response)
-		}
-		if p.Response.IsError || p.Response.IsErrorCamel {
+		var response map[string]json.RawMessage
+		_ = json.Unmarshal(p.RawResponse, &response)
+		var isError, isErrorCamel bool
+		_ = json.Unmarshal(response["is_error"], &isError)
+		_ = json.Unmarshal(response["isError"], &isErrorCamel)
+		if isError || isErrorCamel {
 			r.Ok = false
 		}
 		key = "tool:" + p.ToolUseID
@@ -133,6 +202,15 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 			r.MCP = &coworkMCP{Server: server, Tool: tool, Source: p.MCPServer.Source}
 		}
 		if r.Ok {
+			budget := 8192 - 256 - coworkJSONStringSize(r.Tool)
+			if r.MCP != nil {
+				budget -= coworkJSONStringSize(r.MCP.Server) + coworkJSONStringSize(r.MCP.Tool) + coworkJSONStringSize(r.MCP.Source)
+			}
+			var input map[string]json.RawMessage
+			switch p.ToolName {
+			case "Read", "NotebookRead", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep":
+				_ = json.Unmarshal(p.RawInput, &input)
+			}
 			kind := ""
 			switch p.ToolName {
 			case "Read", "NotebookRead":
@@ -141,22 +219,28 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 				kind = "write"
 			}
 			if kind != "" {
-				f := p.Input.FilePath
+				f := coworkStringField(input, "file_path")
 				if f == "" {
-					f = p.Input.NotebookPath
+					f = coworkStringField(input, "notebook_path")
 				}
-				if len(f) <= 4096 && coworkAbsolute(f) {
-					r.Files = []coworkFile{{P: filepath.Clean(f), K: kind}}
+				if len(f) <= 4096 && coworkAbsolute(f) && coworkPathText(f) {
+					f = filepath.Clean(f)
+					if coworkJSONStringSize(f)+32 <= budget {
+						r.Files = []coworkFile{{P: f, K: kind}}
+					}
 				}
 			}
 			if p.ToolName == "Glob" || p.ToolName == "Grep" {
-				base := p.Input.Path
+				base := coworkStringField(input, "path")
 				if !coworkAbsolute(base) {
 					base = p.CWD
 				}
 				seen := map[string]bool{}
-				for _, f := range p.Response.Filenames {
-					if f == "" {
+				var filenames []json.RawMessage
+				_ = json.Unmarshal(response["filenames"], &filenames)
+				for _, raw := range filenames {
+					var f string
+					if json.Unmarshal(raw, &f) != nil || f == "" || !coworkPathText(f) {
 						continue
 					}
 					if !coworkAbsolute(f) {
@@ -166,9 +250,14 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 						f = filepath.Join(base, f)
 					}
 					f = filepath.Clean(f)
-					if len(f) > 4096 || seen[f] {
+					if len(f) > 4096 || seen[f] || !coworkPathText(f) {
 						continue
 					}
+					size := coworkJSONStringSize(f) + 1
+					if size > budget {
+						continue
+					}
+					budget -= size
 					seen[f] = true
 					r.Seen = append(r.Seen, f)
 					if len(r.Seen) == 200 {
@@ -184,7 +273,25 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 	return r, hex.EncodeToString(sum[:16]), true
 }
 func captureCowork(in io.Reader, root string, now time.Time) {
-	data, err := io.ReadAll(io.LimitReader(in, coworkInputLimit+1))
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	result := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(in, coworkInputLimit+1))
+		result <- readResult{data, err}
+	}()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	var data []byte
+	var err error
+	select {
+	case got := <-result:
+		data, err = got.data, got.err
+	case <-timer.C:
+		return
+	}
 	if err != nil || len(data) > coworkInputLimit {
 		return
 	}
@@ -197,10 +304,7 @@ func captureCowork(in io.Reader, root string, now time.Time) {
 		return
 	}
 	encoded, err := json.Marshal(r)
-	for err == nil && len(encoded) > 8192 && len(r.Seen) > 0 {
-		r.Seen = r.Seen[:len(r.Seen)-1]
-		encoded, err = json.Marshal(r)
-	}
+	// Paths were admitted against the encoded byte budget above.
 	if err != nil || len(encoded) > 8192 {
 		return
 	}

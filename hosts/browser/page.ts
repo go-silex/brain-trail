@@ -533,6 +533,18 @@ export function startPage(
     if (event.kind === 'snapshot' && event.revision > revision) {
       revision = event.revision
       facts = event.facts
+      if (facts.ownerHost === 'cowork') {
+        const notices: string[] = []
+        if (facts.coworkCoverage?.truncated)
+          notices.push(
+            facts.lang === 'fr' ? 'Historique plafonné' : 'History capped',
+          )
+        if (facts.coworkCoverage?.partialInventory)
+          notices.push(
+            facts.lang === 'fr' ? 'Inventaire partiel' : 'Partial inventory',
+          )
+        status.textContent = notices.join(' · ')
+      }
       const previousPreview = state.preview
       const enableFollow = !state.zoomed && event.shared.zoomed
       state = {

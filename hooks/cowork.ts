@@ -1,5 +1,6 @@
 import type { TrailEvent } from '../types/model'
 import { assembleCapture } from './acts'
+import { MAX_FILES } from './files'
 import { splitMcp } from './mcp'
 
 export type CoworkReceipt = {
@@ -111,7 +112,22 @@ const plumbing: Record<string, true> = {
   'mcp-registry': true,
   'scheduled-tasks': true,
 }
-const slash = (p: string) => p.replace(/\\/g, '/')
+const normalizePath = (path: string) => {
+  const windows = /^[A-Za-z]:[\\/]/.test(path) || /^\\\\/.test(path)
+  const p = windows ? path.replace(/\\/g, '/') : path
+  const prefix = p.startsWith('//')
+    ? '//'
+    : p.startsWith('/')
+      ? '/'
+      : p.slice(0, 3)
+  const parts: string[] = []
+  for (const part of p.slice(prefix.length).split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return prefix + parts.join('/')
+}
 const directory = (p: string) => {
   const i = p.lastIndexOf('/')
   return i === 0 ? '/' : i === 2 && p[1] === ':' ? p.slice(0, 3) : p.slice(0, i)
@@ -140,10 +156,12 @@ const relative = (p: string, root: string) =>
 // Desktop keeps a task's own folders (outputs, uploads) under its session directory: show them as one short
 // top-level folder instead of letting that deep Desktop path become the map's common root.
 const TASK_DIR =
-  /^.*\/local-agent-mode-sessions\/[^/]+\/[^/]+\/(?:agent\/)?local_[^/]+\/([^/]+)(\/.*)?$/
+  /^(.*\/local-agent-mode-sessions\/[^/]+\/[^/]+\/(?:agent\/)?(local_[^/]+)\/(outputs|uploads))(\/.*)?$/
 const taskPath = (p: string) => {
   const m = TASK_DIR.exec(p)
-  return m ? `Cowork ${m[1]}${m[2] ?? ''}` : undefined
+  return m
+    ? { folder: m[1]!, task: m[2]!, kind: m[3]!, rest: m[4] ?? '' }
+    : undefined
 }
 
 export const projectCowork = (
@@ -153,39 +171,92 @@ export const projectCowork = (
   paths: string[]
   events: TrailEvent[]
   connected: [string, string[]][]
+  partialInventory: boolean
 } => {
   const ordered = [...receipts].sort((a, b) => a.at - b.at || a.n - b.n)
-  const all = ordered.flatMap((r) =>
-    r.ev === 'tool' && r.ok
-      ? [
-          ...(r.files ?? []).map((f) => slash(f.p)),
-          ...(r.seen ?? []).map(slash),
-        ]
-      : [],
-  )
-  const root = commonRoot(all.filter((p) => taskPath(p) === undefined))
-  const place = (p: string) => {
-    const s = slash(p)
-    return taskPath(s) ?? relative(s, root)
+  const identities = new Set<string>()
+  let partialInventory = false
+  for (const r of ordered) {
+    if (r.ev !== 'tool' || !r.ok) continue
+    for (const path of [
+      ...(r.files ?? []).map((f) => f.p),
+      ...(r.seen ?? []),
+    ]) {
+      const p = normalizePath(path)
+      if (identities.has(p)) continue
+      if (identities.size === MAX_FILES) {
+        partialInventory = true
+        continue
+      }
+      identities.add(p)
+    }
   }
-  const paths = [...new Set(all.map(place))].sort()
+  const all = [...identities]
+  const root = commonRoot(all.filter((p) => taskPath(p) === undefined))
+  const occupied = new Set(
+    all
+      .filter((p) => !taskPath(p))
+      .map((p) => relative(p, root).split('/')[0]!),
+  )
+  const folders = new Map<string, { task: string; kind: string }>()
+  for (const p of all) {
+    const task = taskPath(p)
+    if (task) folders.set(task.folder, task)
+  }
+  const counts = new Map<string, number>()
+  for (const { kind } of folders.values())
+    counts.set(kind, (counts.get(kind) ?? 0) + 1)
+  const labels = new Map<string, string>()
+  for (const [folder, { task, kind }] of [...folders].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const base = `Cowork ${kind}`
+    const candidate =
+      counts.get(kind)! > 1 || occupied.has(base)
+        ? `${base} · ${task.replace(/^local_(?:ditto_)?/, '').slice(0, 8)}`
+        : base
+    let label = candidate
+    let suffix = 2
+    while (occupied.has(label)) label = `${candidate} · ${suffix++}`
+    occupied.add(label)
+    labels.set(folder, label)
+  }
+  const place = (path: string) => {
+    const p = normalizePath(path)
+    const task = taskPath(p)
+    return task ? `${labels.get(task.folder)}${task.rest}` : relative(p, root)
+  }
+  const paths = all.map(place).sort()
   const events: TrailEvent[] = []
   const connected = new Map<string, Set<string>>()
   for (const r of ordered) {
     if (r.ev !== 'tool' || !r.tool) continue
     const agent = r.agent ? { agent: true as const } : {}
     const found: TrailEvent[] = r.ok
-      ? (r.files ?? []).map((f) => ({
-          k: f.k,
-          p: place(f.p),
-          at: r.at,
-          ...agent,
-        }))
+      ? (r.files ?? [])
+          .filter((f) => identities.has(normalizePath(f.p)))
+          .map((f) => ({
+            k: f.k,
+            p: place(f.p),
+            at: r.at,
+            ...agent,
+          }))
       : []
-    const seen = r.ok ? [...new Set((r.seen ?? []).map(place))] : []
+    const seen = r.ok
+      ? [
+          ...new Set(
+            (r.seen ?? [])
+              .filter((p) => identities.has(normalizePath(p)))
+              .map(place),
+          ),
+        ]
+      : []
     if (seen.length)
       found.push({ k: 'seen', ps: seen, via: 'search', at: r.at, ...agent })
-    const input = r.files?.[0] && r.ok ? { file_path: place(r.files[0].p) } : {}
+    const input =
+      r.files?.[0] && r.ok && identities.has(normalizePath(r.files[0].p))
+        ? { file_path: place(r.files[0].p) }
+        : {}
     const capture = assembleCapture({
       tool: r.tool,
       input,
@@ -223,5 +294,6 @@ export const projectCowork = (
     paths,
     events,
     connected: [...connected].map(([server, tools]) => [server, [...tools]]),
+    partialInventory,
   }
 }

@@ -24,14 +24,18 @@ type coworkIndexedReceipt struct {
 }
 
 type coworkViewSession struct {
-	ID         string `json:"id"`
-	Task       string `json:"task"`
-	Started    int64  `json:"started"`
-	Last       int64  `json:"last"`
-	Ended      bool   `json:"ended"`
-	Tools      int    `json:"tools"`
-	Files      int    `json:"files"`
-	Connectors int    `json:"connectors"`
+	ID        string `json:"id"`
+	Started   int64  `json:"started"`
+	Last      int64  `json:"last"`
+	Ended     bool   `json:"ended"`
+	Truncated bool   `json:"truncated"`
+	Calls     int    `json:"calls"`
+}
+
+type coworkViewCache struct {
+	started  int64
+	indexed  map[string]bool
+	receipts []coworkIndexedReceipt
 }
 
 type coworkViewer struct {
@@ -39,8 +43,7 @@ type coworkViewer struct {
 	root     string
 	session  string
 	mu       sync.Mutex
-	indexed  map[string]map[string]int
-	receipts map[string][]coworkIndexedReceipt
+	cache    map[string]*coworkViewCache
 	activity chan struct{}
 }
 
@@ -61,8 +64,8 @@ func (v *coworkViewer) loadSession(id string) (coworkSession, bool) {
 	if !coworkValidID(id) {
 		return s, false
 	}
-	b, err := os.ReadFile(filepath.Join(v.root, "sessions", id, "session.json"))
-	if err != nil || len(b) > 8192 || json.Unmarshal(b, &s) != nil || s.V != 1 || s.ID != id {
+	b, err := coworkReadRegular(filepath.Join(v.root, "sessions", coworkSessionKey(id), "session.json"), 8192)
+	if err != nil || json.Unmarshal(b, &s) != nil || s.V != 1 || s.ID != id {
 		return s, false
 	}
 	return s, true
@@ -74,79 +77,91 @@ func coworkMarker(dir, name string) bool {
 }
 
 // discover assigns sequence numbers once, independent of receipt timestamps.
-func (v *coworkViewer) discover(id string) []coworkIndexedReceipt {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.indexed == nil {
-		v.indexed = make(map[string]map[string]int)
-		v.receipts = make(map[string][]coworkIndexedReceipt)
+// The caller holds v.mu until it has selected the response slice.
+func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt {
+	if v.cache == nil {
+		v.cache = make(map[string]*coworkViewCache)
 	}
-	if v.indexed[id] == nil {
-		v.indexed[id] = make(map[string]int)
+	cache := v.cache[id]
+	if cache == nil || cache.started != started {
+		cache = &coworkViewCache{started: started, indexed: make(map[string]bool)}
+		v.cache[id] = cache
 	}
-	dir := filepath.Join(v.root, "sessions", id, "r")
+	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id), "r")
 	entries, _ := os.ReadDir(dir)
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".json") || v.indexed[id][name] != 0 {
+		if strings.HasPrefix(name, ".tmp-") || !strings.HasSuffix(name, ".json") || cache.indexed[name] {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(dir, name))
+		b, err := coworkReadRegular(filepath.Join(dir, name), 8192)
 		var receipt coworkReceipt
-		if err != nil || len(b) > 8192 || json.Unmarshal(b, &receipt) != nil || receipt.V != 1 {
+		if err != nil || json.Unmarshal(b, &receipt) != nil || receipt.V != 1 {
 			continue
 		}
-		n := len(v.receipts[id]) + 1
-		v.indexed[id][name] = n
-		v.receipts[id] = append(v.receipts[id], coworkIndexedReceipt{coworkReceipt: receipt, N: n})
+		cache.indexed[name] = true
+		cache.receipts = append(cache.receipts, coworkIndexedReceipt{coworkReceipt: receipt, N: len(cache.receipts) + 1})
 	}
-	return append([]coworkIndexedReceipt(nil), v.receipts[id]...)
+	return cache.receipts
 }
 
 func (v *coworkViewer) sessions() []coworkViewSession {
-	result := make([]coworkViewSession, 0)
-	entries, _ := os.ReadDir(filepath.Join(v.root, "sessions"))
+	type candidate struct {
+		key  string
+		last int64
+	}
+	root := filepath.Join(v.root, "sessions")
+	entries, _ := os.ReadDir(root)
+	candidates := make([]candidate, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		id := entry.Name()
-		s, ok := v.loadSession(id)
-		if !ok {
+		dir := filepath.Join(root, entry.Name())
+		st, err := os.Stat(filepath.Join(dir, "active"))
+		if err != nil || !st.Mode().IsRegular() {
+			st, err = os.Stat(filepath.Join(dir, "session.json"))
+		}
+		if err == nil && st.Mode().IsRegular() {
+			candidates = append(candidates, candidate{entry.Name(), st.ModTime().UnixMilli()})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].last == candidates[j].last {
+			return candidates[i].key < candidates[j].key
+		}
+		return candidates[i].last > candidates[j].last
+	})
+	if len(candidates) > 100 {
+		candidates = candidates[:100]
+	}
+	result := make([]coworkViewSession, 0, len(candidates))
+	for _, candidate := range candidates {
+		dir := filepath.Join(root, candidate.key)
+		b, err := coworkReadRegular(filepath.Join(dir, "session.json"), 8192)
+		var s coworkSession
+		if err != nil || json.Unmarshal(b, &s) != nil || s.V != 1 || !coworkValidID(s.ID) || coworkSessionKey(s.ID) != candidate.key {
 			continue
 		}
-		item := coworkViewSession{ID: id, Task: s.Task, Started: s.Started, Last: s.Started, Ended: coworkMarker(filepath.Join(v.root, "sessions", id), "ended")}
-		files, connectors := make(map[string]bool), make(map[string]bool)
-		for _, r := range v.discover(id) {
-			if r.At > item.Last {
-				item.Last = r.At
-			}
-			if r.Ev == "tool" {
-				item.Tools++
-			}
-			for _, f := range r.Files {
-				files[f.P] = true
-			}
-			for _, p := range r.Seen {
-				files[p] = true
-			}
-			if r.MCP != nil && r.MCP.Server != "" {
-				connectors[r.MCP.Server] = true
+		item := coworkViewSession{ID: s.ID, Started: s.Started, Last: candidate.last, Ended: coworkMarker(dir, "ended"), Truncated: coworkMarker(dir, "truncated")}
+		receipts, _ := os.ReadDir(filepath.Join(dir, "r"))
+		for _, entry := range receipts {
+			if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".tmp-") && strings.HasSuffix(entry.Name(), ".json") {
+				item.Calls++
 			}
 		}
-		item.Files, item.Connectors = len(files), len(connectors)
 		result = append(result, item)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Last == result[j].Last {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].Last > result[j].Last
-	})
-	if len(result) > 100 {
-		result = result[:100]
-	}
 	return result
+}
+
+func (v *coworkViewer) noteActivity() {
+	if v.activity != nil {
+		select {
+		case v.activity <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -155,17 +170,11 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	if v.activity != nil {
-		select {
-		case v.activity <- struct{}{}:
-		default:
-		}
-	}
 	if strings.HasPrefix(r.URL.Path, "/launch/") && r.Method == http.MethodGet {
 		code := strings.TrimPrefix(r.URL.Path, "/launch/")
 		s := v.relay
 		s.mu.Lock()
-		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
+		ok := s.launch != "" && time.Now().Before(s.launchExpiry) && (!s.launchBound || (s.launchGeneration == s.generation && !s.generationEnded)) && subtle.ConstantTimeCompare([]byte(code), []byte(s.launch)) == 1
 		if ok {
 			s.clearLaunchLocked()
 		}
@@ -174,6 +183,7 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		v.noteActivity()
 		query := url.Values{"host": {"cowork"}}
 		if _, exists := v.loadSession(v.session); exists {
 			query.Set("session", v.session)
@@ -191,6 +201,7 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	v.noteActivity()
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -211,7 +222,8 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, map[string]any{"sessions": v.sessions()})
 	case "cowork/receipts":
 		id := r.URL.Query().Get("session")
-		if _, ok := v.loadSession(id); !ok {
+		session, ok := v.loadSession(id)
+		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -224,17 +236,31 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		all := v.discover(id)
-		result := make([]coworkIndexedReceipt, 0)
-		next := after
-		for _, item := range all {
-			if item.N > after && len(result) < 1000 {
-				result = append(result, item)
-				next = item.N
-			}
+		dir := filepath.Join(v.root, "sessions", coworkSessionKey(id))
+		ended, truncated := coworkMarker(dir, "ended"), coworkMarker(dir, "truncated")
+		v.mu.Lock()
+		all := v.discover(id, session.Started)
+		start := after
+		if start > len(all) {
+			start = len(all)
 		}
-		dir := filepath.Join(v.root, "sessions", id)
-		jsonOut(w, map[string]any{"session": id, "receipts": result, "next": next, "ended": coworkMarker(dir, "ended"), "truncated": coworkMarker(dir, "truncated")})
+		end, size := start, 512
+		for end < len(all) && end-start < 1000 {
+			b, err := json.Marshal(all[end])
+			if err != nil || size+len(b)+1 > 1536*1024 {
+				break
+			}
+			size += len(b) + 1
+			end++
+		}
+		result := append([]coworkIndexedReceipt{}, all[start:end]...)
+		more := end < len(all)
+		next := after
+		if end > start {
+			next = all[end-1].N
+		}
+		v.mu.Unlock()
+		jsonOut(w, map[string]any{"session": id, "receipts": result, "next": next, "ended": ended, "truncated": truncated, "more": more})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -267,7 +293,8 @@ func coworkView(assets, session, root string) error {
 	if err != nil {
 		return err
 	}
-	s := &relay{host: listener.Addr().String(), token: token, assets: assets, dir: dir, launch: code, launchExpiry: time.Now().Add(120 * time.Second), out: make(chan []byte, 64), outputFailure: make(chan struct{}, 1)}
+	// Match the generation-bound launch invariant enforced by open_windows.go.
+	s := &relay{host: listener.Addr().String(), token: token, assets: assets, dir: dir, launch: code, launchExpiry: time.Now().Add(120 * time.Second), generation: 1, launchBound: true, launchGeneration: 1, out: make(chan []byte, 64), outputFailure: make(chan struct{}, 1)}
 	defer func() { s.mu.Lock(); s.clearLaunchLocked(); s.mu.Unlock() }()
 	launchFile := filepath.Join(dir, "open.html")
 	data := []byte(`<!doctype html><meta http-equiv="refresh" content="0;url=http://` + s.host + `/launch/` + code + `"><title>Opening Brain Trail</title>`)
@@ -295,7 +322,7 @@ func coworkView(assets, session, root string) error {
 	defer server.Close()
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(&limitedListener{Listener: listener, slots: make(chan struct{}, 64)}) }()
-	if _, err = s.openBrowser(launchFile, "", 0, code); err != nil {
+	if _, err = s.openBrowser(launchFile, "", 1, code); err != nil {
 		return err
 	}
 	signals := make(chan os.Signal, 1)

@@ -118,6 +118,7 @@ test('handles empty and Windows paths without leaking lifecycle events', async (
     paths: [],
     events: [],
     connected: [],
+    partialInventory: false,
   })
   const result = projectCowork([
     receipt(1, 1, 'Read', { files: [{ p: 'C:\\work\\a.md', k: 'read' }] }),
@@ -154,4 +155,42 @@ test("a task's own Desktop folders do not drag the map root up to the home direc
   expect(result.events.filter((e) => e.k === 'write')).toEqual([
     { k: 'write', p: 'Cowork outputs/report.md', at: 2 },
   ])
+})
+
+test('preserves distinct identities across aliases and literal POSIX backslashes', async () => {
+  const base = '/home/u/.config/Claude/local-agent-mode-sessions/acct/org'
+  const result = projectCowork([
+    receipt(1, 1, 'Grep', {
+      seen: [
+        '/work/Cowork outputs/report.md',
+        '/work/a\\b.md',
+        '/work/a/b.md',
+        '/work/x/../a/b.md',
+        `${base}/local_abcdefgh1/outputs/report.md`,
+        `${base}/local_abcdefgh2/outputs/report.md`,
+      ],
+    }),
+  ])
+  expect(result.paths).toEqual([
+    'Cowork outputs · abcdefgh · 2/report.md',
+    'Cowork outputs · abcdefgh/report.md',
+    'Cowork outputs/report.md',
+    'a/b.md',
+    'a\\b.md',
+  ])
+  const seen = result.events.find((event) => event.k === 'seen')
+  expect(seen?.k === 'seen' && new Set(seen.ps).size).toBe(5)
+})
+
+test('caps displayed inventory and reports partial coverage', async () => {
+  const paths = Array.from({ length: 12001 }, (_, n) => `/work/file-${n}.md`)
+  const result = projectCowork(
+    paths.map((p, n) =>
+      receipt(n + 1, n, 'Read', { files: [{ p, k: 'read' }] }),
+    ),
+  )
+  expect(result.paths.length).toBe(12000)
+  expect(result.partialInventory).toBe(true)
+  expect(result.events.filter((event) => event.k === 'read').length).toBe(12000)
+  expect(result.paths.includes('file-12000.md')).toBe(false)
 })

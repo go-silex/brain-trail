@@ -241,8 +241,22 @@ export const renderMap = <N, Press>(
       { id: 'read', col: K.read, n: folded.stats.read, label: S.lgRead },
       { id: 'written', col: K.write, n: folded.stats.write, label: S.lgWrite },
       { id: 'found', col: K.hit, n: folded.stats.hit, label: S.lgFound },
-      { id: 'linked', col: K.link, n: folded.stats.link, label: S.lgLinked },
-      { id: 'missing', col: K.gap, n: folded.stats.gap, label: S.lgGap },
+      ...(!s.cowork
+        ? [
+            {
+              id: 'linked' as const,
+              col: K.link,
+              n: folded.stats.link,
+              label: S.lgLinked,
+            },
+            {
+              id: 'missing' as const,
+              col: K.gap,
+              n: folded.stats.gap,
+              label: S.lgGap,
+            },
+          ]
+        : []),
     ]
   const legend = h(
     Box,

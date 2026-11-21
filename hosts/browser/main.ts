@@ -46,8 +46,8 @@ if (new URL(window.location.href).searchParams.get('host') === 'cowork') {
             started: number
             last: number
             ended: boolean
-            files: number
-            connectors: number
+            truncated: boolean
+            calls: number
           }[]
         }>
       })
@@ -59,7 +59,7 @@ if (new URL(window.location.href).searchParams.get('host') === 'cowork') {
         for (const item of sessions) {
           const button = document.createElement('button')
           button.className = 'bt-button'
-          button.textContent = `${new Date(item.last).toLocaleString()} · ${item.files} files · ${item.connectors} connectors · ${item.id.slice(0, 8)}${item.ended ? ' · ended' : ''}`
+          button.textContent = `${new Date(item.last).toLocaleString()} · ${item.calls} calls · ${item.id.slice(0, 8)}${item.ended ? ' · ended' : ''}${item.truncated ? ' · history capped' : ''}`
           button.addEventListener('click', () => selectSession(item.id), {
             once: true,
           })

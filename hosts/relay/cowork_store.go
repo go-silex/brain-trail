@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,7 +25,11 @@ func coworkStoreRoot() (string, error) {
 	var base string
 	switch runtime.GOOS {
 	case "windows":
-		base = os.Getenv("LOCALAPPDATA")
+		var err error
+		base, err = coworkLocalBase()
+		if err != nil {
+			return "", err
+		}
 	case "darwin":
 		home, e := os.UserHomeDir()
 		if e != nil {
@@ -44,109 +51,207 @@ func coworkStoreRoot() (string, error) {
 	}
 	return filepath.Join(base, "brain-trail", "cowork", "v1"), nil
 }
-func coworkExclusive(path string, data []byte) error {
-	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if e != nil {
-		return e
-	}
-	n, e := f.Write(data)
-	if e == nil && n != len(data) {
-		e = errors.New("short write")
-	}
-	closeErr := f.Close()
-	if e == nil {
-		e = closeErr
-	}
-	if e != nil {
-		_ = os.Remove(path)
-	}
-	return e
+func coworkSessionKey(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:16])
 }
+
+func coworkReadRegular(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	f, err := coworkOpenRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() > limit {
+		return nil, errors.New("invalid file")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return nil, errors.New("file exceeds limit")
+	}
+	return data, nil
+}
+
+// Caller holds the session lock. Never publish a partial JSON file.
+func coworkPublish(path string, data []byte) error {
+	if _, err := os.Lstat(path); err == nil {
+		return os.ErrExist
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err = f.Chmod(0600); err == nil {
+		var n int
+		n, err = f.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func coworkTouch(path string, now time.Time) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		if err = coworkPublish(path, nil); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else if !info.Mode().IsRegular() {
+		return errors.New("invalid activity marker")
+	}
+	return os.Chtimes(path, now, now)
+}
+
 func writeCoworkReceipt(root, id, task, key string, data []byte, event string, now time.Time) error {
-	if !coworkID.MatchString(id) {
-		return errors.New("invalid session")
+	if !coworkID.MatchString(id) || len(data) > 8192 {
+		return errors.New("invalid session or receipt")
 	}
 	sessions := filepath.Join(root, "sessions")
+	if filepath.Base(root) == "v1" && filepath.Base(filepath.Dir(root)) == "cowork" {
+		if err := coworkPrivateMkdir(filepath.Dir(filepath.Dir(root))); err != nil {
+			return err
+		}
+		if err := coworkPrivateMkdir(filepath.Dir(root)); err != nil {
+			return err
+		}
+	}
+	if err := coworkPrivateMkdir(root); err != nil {
+		return err
+	}
 	if err := coworkPrivateMkdir(sessions); err != nil {
 		return err
 	}
-	dir := filepath.Join(sessions, id)
+	sessionKey := coworkSessionKey(id)
+	dir := filepath.Join(sessions, sessionKey)
 	if err := coworkPrivateMkdir(dir); err != nil {
 		return err
 	}
-	// Serialize all writers to enforce the cap across hook processes.
-	lock := filepath.Join(dir, ".lock")
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		err := os.Mkdir(lock, 0700)
-		if err == nil {
-			break
-		}
-		if !os.IsExist(err) {
-			return err
-		}
-		if st, e := os.Stat(lock); e == nil && time.Since(st.ModTime()) > time.Minute {
-			_ = os.Remove(lock)
-		}
-		if time.Now().After(deadline) {
-			return errors.New("store busy")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	defer os.Remove(lock)
-	receipts := filepath.Join(dir, "r")
-	if err := coworkPrivateMkdir(receipts); err != nil {
-		return err
-	}
-	session, _ := json.Marshal(coworkSession{V: 1, ID: id, Started: now.UnixMilli(), Task: task})
-	if err := coworkExclusive(filepath.Join(dir, "session.json"), session); err != nil && !os.IsExist(err) {
-		return err
-	}
-	target := filepath.Join(receipts, key+".json")
-	if _, err := os.Stat(target); err == nil {
-		return nil
-	}
-	entries, err := os.ReadDir(receipts)
+	unlock, err := coworkLock(filepath.Join(dir, ".lock"), true)
 	if err != nil {
 		return err
 	}
-	if len(entries) >= 5000 {
-		_ = coworkExclusive(filepath.Join(dir, "truncated"), nil)
-		if event == "end" {
-			_ = coworkExclusive(filepath.Join(dir, "ended"), nil)
+	err = func() error {
+		defer unlock()
+		receipts := filepath.Join(dir, "r")
+		if err := coworkPrivateMkdir(receipts); err != nil {
+			return err
+		}
+		metadata := filepath.Join(dir, "session.json")
+		raw, err := coworkReadRegular(metadata, 8192)
+		if _, statErr := os.Lstat(metadata); os.IsNotExist(statErr) {
+			raw, _ = json.Marshal(coworkSession{V: 1, ID: id, Started: now.UnixMilli(), Task: task})
+			if err = coworkPublish(metadata, raw); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+		var session coworkSession
+		if json.Unmarshal(raw, &session) != nil || session.V != 1 || session.ID != id {
+			return errors.New("session identity mismatch")
+		}
+		if err := coworkTouch(filepath.Join(dir, "active"), now); err != nil {
+			return err
 		}
 		if event == "start" {
-			pruneCowork(sessions, id, now)
+			if err := os.Remove(filepath.Join(dir, "ended")); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		target := filepath.Join(receipts, key+".json")
+		_, err = os.Lstat(target)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if os.IsNotExist(err) {
+			entries, err := os.ReadDir(receipts)
+			if err != nil {
+				return err
+			}
+			count := 0
+			for _, entry := range entries {
+				if filepath.Ext(entry.Name()) == ".json" {
+					count++
+				}
+			}
+			if count >= 5000 {
+				if err := coworkPublish(filepath.Join(dir, "truncated"), nil); err != nil && !os.IsExist(err) {
+					return err
+				}
+			} else if err := coworkPublish(target, data); err != nil && !os.IsExist(err) {
+				return err
+			}
+		}
+		if event == "end" {
+			if err := coworkPublish(filepath.Join(dir, "ended"), nil); err != nil && !os.IsExist(err) {
+				return err
+			}
 		}
 		return nil
-	}
-	if err = coworkExclusive(target, data); err != nil && !os.IsExist(err) {
-		return err
-	}
-	if event == "end" {
-		_ = coworkExclusive(filepath.Join(dir, "ended"), nil)
-	}
+	}()
 	if event == "start" {
-		pruneCowork(sessions, id, now)
+		pruneCowork(sessions, sessionKey, now)
 	}
-	return nil
+	return err
 }
+
+func coworkExpired(dir string, now time.Time) bool {
+	st, err := os.Lstat(filepath.Join(dir, "active"))
+	if os.IsNotExist(err) {
+		st, err = os.Lstat(filepath.Join(dir, "session.json"))
+	}
+	return err == nil && st.Mode().IsRegular() && now.Sub(st.ModTime()) > 7*24*time.Hour
+}
+
 func pruneCowork(sessions, current string, now time.Time) {
-	entries, err := os.ReadDir(sessions)
+	f, err := os.Open(sessions)
 	if err != nil {
 		return
 	}
+	defer f.Close()
+	entries, _ := f.ReadDir(64)
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == current || !coworkID.MatchString(entry.Name()) {
+		if !entry.IsDir() || entry.Name() == current || len(entry.Name()) != 32 {
+			continue
+		}
+		if _, err := hex.DecodeString(entry.Name()); err != nil {
 			continue
 		}
 		dir := filepath.Join(sessions, entry.Name())
-		st, e := os.Stat(filepath.Join(dir, "r"))
-		if e != nil {
-			st, e = os.Stat(filepath.Join(dir, "session.json"))
+		if coworkVerifyDir(dir) != nil || !coworkExpired(dir, now) {
+			continue
 		}
-		if e == nil && now.Sub(st.ModTime()) > 7*24*time.Hour {
-			_ = os.RemoveAll(dir)
+		unlock, err := coworkLock(filepath.Join(dir, ".lock"), false)
+		if err != nil {
+			continue
+		}
+		var cleanup func()
+		if coworkVerifyDir(dir) == nil && coworkExpired(dir, now) {
+			cleanup = coworkPruneLocked(dir)
+		}
+		unlock()
+		if cleanup != nil {
+			cleanup()
 		}
 	}
 }

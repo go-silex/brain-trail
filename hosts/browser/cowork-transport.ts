@@ -73,6 +73,7 @@ export function coworkTransport(session: string): DashboardTransport {
   let shared = sharedView(VIEW_STATE0)
   let settings = savedSettings()
   let lang = savedLang()
+  let truncated = false
   const stopReplay = () => {
     clearInterval(replayTimer)
     replayTimer = undefined
@@ -87,9 +88,14 @@ export function coworkTransport(session: string): DashboardTransport {
       events: projection.events,
       settings,
       coach: { text: '', at: 0, busy: false },
-      workspace: projection.paths.length
-        ? { kind: 'ready', layoutRev, shallow: false }
-        : { kind: 'failed', message: 'No files observed yet' },
+      coworkCoverage: {
+        truncated,
+        partialInventory: projection.partialInventory,
+      },
+      workspace:
+        projection.paths.length || projection.connected.length
+          ? { kind: 'ready', layoutRev, shallow: false }
+          : { kind: 'failed', message: 'No files observed yet' },
       linked: [],
       connected: projection.connected,
       costHistory: { median: undefined, count: 0, monthUsd: 0 },
@@ -107,12 +113,16 @@ export function coworkTransport(session: string): DashboardTransport {
   }
   const refreshProjection = () => {
     const next = projectCowork(receipts)
-    const nextLayoutKey = JSON.stringify([next.root, next.paths])
+    const nextLayoutKey = JSON.stringify([
+      next.root,
+      next.paths,
+      next.connected.length > 0,
+    ])
     const nextKey = JSON.stringify(next)
     projection = next
     if (layoutKey !== nextLayoutKey) {
       layoutKey = nextLayoutKey
-      if (next.paths.length) {
+      if (next.paths.length || next.connected.length) {
         layoutRev++
         const title =
           next.root.replace(/\\/g, '/').split('/').filter(Boolean).pop() ||
@@ -158,32 +168,39 @@ export function coworkTransport(session: string): DashboardTransport {
         !Number.isSafeInteger(data.next) ||
         (data.next as number) < cursor ||
         typeof data.ended !== 'boolean' ||
-        typeof data.truncated !== 'boolean'
+        typeof data.truncated !== 'boolean' ||
+        typeof data.more !== 'boolean' ||
+        (data.more && data.next === cursor)
       )
         throw new Error('Invalid receipts')
       const batch: CoworkReceipt[] = []
       let last = cursor
       for (const value of data.receipts) {
-        const receipt = parseCoworkReceipt(value)
+        const n =
+          typeof value === 'object' && value !== null && !Array.isArray(value)
+            ? (value as Record<string, unknown>).n
+            : undefined
         if (
-          !receipt ||
-          !Number.isSafeInteger(receipt.n) ||
-          receipt.n <= last ||
-          receipt.n > (data.next as number)
+          !Number.isSafeInteger(n) ||
+          (n as number) <= last ||
+          (n as number) > (data.next as number)
         )
-          throw new Error('Invalid receipt')
-        last = receipt.n
-        batch.push(receipt)
+          continue
+        last = n as number
+        const receipt = parseCoworkReceipt(value)
+        if (receipt) batch.push(receipt)
       }
-      if (batch.length && last !== data.next) throw new Error('Invalid cursor')
-      if (!batch.length && data.next !== cursor)
-        throw new Error('Invalid cursor')
       receipts = receipts.concat(batch)
       cursor = data.next as number
-      // An empty poll changes nothing once the first snapshot is out.
-      if (batch.length > 0 || revision === 0) refreshProjection()
-      if (!data.ended || batch.length === 1000)
-        pollTimer = setTimeout(poll, batch.length === 1000 ? 0 : 1000)
+      const coverageChanged = !truncated && data.truncated
+      truncated ||= data.truncated
+      if (batch.length > 0 || revision === 0) {
+        const previousRevision = revision
+        refreshProjection()
+        if (coverageChanged && revision === previousRevision) publish()
+      } else if (coverageChanged) publish()
+      if (data.more || !data.ended)
+        pollTimer = setTimeout(poll, data.more ? 0 : 1000)
     } catch {
       if (!active) return
       active = false

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -13,20 +14,54 @@ import (
 )
 
 func TestCoworkDetector(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Claude")
 	for _, tc := range []struct {
 		path string
 		want bool
-	}{{"/home/u/.config/Claude/local-agent-mode-sessions/a/b/local_123/outputs", true}, {"/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/a/b/agent/local_ditto_123/outputs", true}, {`C:\Users\u\Claude\local-agent-mode-sessions\a\local_123\outputs`, true}, {"/a/xlocal-agent-mode-sessions/local_1", false}, {"/sessions/local_1", false}, {"", false}, {"/local-agent-mode-sessions/a/../b", false}} {
-		if got := isLocalCowork(tc.path); got != tc.want {
+	}{
+		{filepath.Join(root, "local-agent-mode-sessions", "a", "b", "local_123", "outputs"), true},
+		{filepath.Join(root, "local-agent-mode-sessions", "a", "b", "agent", "local_ditto_123", "outputs"), true},
+		{filepath.Join(filepath.Dir(root), "project", "local-agent-mode-sessions", "a", "b", "local_123"), false},
+		{filepath.Join(root, "local-agent-mode-sessions", "a", "local_123"), false},
+		{filepath.Join(root, "xlocal-agent-mode-sessions", "a", "b", "local_123"), false},
+		{filepath.Join("relative", "local-agent-mode-sessions", "a", "b", "local_123"), false},
+	} {
+		if got := coworkTaskAt(tc.path, root, false) != ""; got != tc.want {
 			t.Errorf("%q: %v", tc.path, got)
 		}
 	}
 }
+func TestCoworkDetectorPlatformRoots(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", root)
+		t.Setenv("LOCALAPPDATA", root)
+		for _, cwd := range []string{
+			filepath.Join(root, "Claude", "local-agent-mode-sessions", "a", "b", "local_1", "outputs"),
+			filepath.Join(root, "Packages", "Claude_package", "LocalCache", "Roaming", "Claude", "local-agent-mode-sessions", "a", "b", "agent", "local_ditto_1", "outputs"),
+		} {
+			if !isLocalCowork(cwd) {
+				t.Fatalf("trusted Windows root rejected: %q", cwd)
+			}
+		}
+	} else {
+		config, err := os.UserConfigDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cwd := filepath.Join(config, "Claude", "local-agent-mode-sessions", "a", "b", "local_1", "outputs")
+		if !isLocalCowork(cwd) {
+			t.Fatalf("trusted root rejected: %q", cwd)
+		}
+	}
+}
+
 func TestCoworkProjection(t *testing.T) {
 	for _, tc := range []struct{ tool, field, kind string }{{"Read", "file_path", "read"}, {"Write", "file_path", "write"}, {"Edit", "file_path", "write"}, {"NotebookEdit", "notebook_path", "write"}} {
 		t.Run(tc.tool, func(t *testing.T) {
 			var p coworkPayload
-			_ = json.Unmarshal([]byte(fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":%q,"tool_use_id":"1","tool_input":{%q:"/tmp/test"}}`, tc.tool, tc.field)), &p)
+			file := filepath.Join(t.TempDir(), "test")
+			_ = json.Unmarshal([]byte(fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":%q,"tool_use_id":"1","tool_input":{%q:%q}}`, tc.tool, tc.field, file)), &p)
 			r, _, ok := projectCowork(p, 1)
 			if !ok || len(r.Files) != 1 || r.Files[0].K != tc.kind {
 				t.Fatalf("%+v", r)
@@ -46,8 +81,10 @@ func TestCoworkProjection(t *testing.T) {
 	}
 	for _, name := range []string{"Glob", "Grep"} {
 		t.Run(name, func(t *testing.T) {
-			p := coworkPayload{Event: "PostToolUse", ToolName: name, ToolUseID: "x", CWD: "/cwd"}
-			p.Input.Path = "/base"
+			volumeRoot := filepath.VolumeName(t.TempDir()) + string(os.PathSeparator)
+			cwd, base := filepath.Join(volumeRoot, "cwd"), filepath.Join(volumeRoot, "base")
+			p := coworkPayload{Event: "PostToolUse", ToolName: name, ToolUseID: "x", CWD: cwd}
+			p.RawInput, _ = json.Marshal(map[string]string{"path": base})
 			names := make([]string, 205)
 			for i := range names {
 				names[i] = fmt.Sprintf("%d", i)
@@ -55,13 +92,13 @@ func TestCoworkProjection(t *testing.T) {
 			b, _ := json.Marshal(map[string]any{"filenames": names})
 			p.RawResponse = b
 			r, _, _ := projectCowork(p, 1)
-			if len(r.Seen) != 200 || r.Seen[0] != "/base/0" {
+			if len(r.Seen) != 200 || r.Seen[0] != filepath.Join(base, "0") {
 				t.Fatal(r.Seen)
 			}
-			p.Input.Path = "relative"
+			p.RawInput = []byte(`{"path":"relative"}`)
 			r, _, _ = projectCowork(p, 1)
-			if r.Seen[0] != "/cwd/0" {
-				t.Fatal(r.Seen[0])
+			if len(r.Seen) == 0 || r.Seen[0] != filepath.Join(cwd, "0") {
+				t.Fatal(r.Seen)
 			}
 		})
 	}
@@ -77,9 +114,35 @@ func TestCoworkProjection(t *testing.T) {
 		}
 	}
 }
+func TestCoworkLenientInputAndControlPaths(t *testing.T) {
+	p := coworkPayload{Event: "PostToolUse", ToolName: "mcp__drive__search", ToolUseID: "1", RawInput: []byte(`{"path":["one","two"]}`)}
+	r, _, ok := projectCowork(p, 1)
+	if !ok || r.MCP == nil || r.MCP.Tool != "search" {
+		t.Fatalf("connector lost: %+v", r)
+	}
+	p.ToolName = "Read"
+	p.RawInput, _ = json.Marshal(map[string]any{"file_path": filepath.Join(t.TempDir(), "bad\nname")})
+	r, _, ok = projectCowork(p, 1)
+	if !ok || len(r.Files) != 0 {
+		t.Fatalf("control character retained: %+v", r)
+	}
+	p.ToolName = "Glob"
+	p.CWD = t.TempDir()
+	p.RawInput = []byte(`{"path":["invalid"]}`)
+	p.RawResponse = []byte(`{"is_error":"invalid","filenames":["good",3,"bad\nname"]}`)
+	r, _, ok = projectCowork(p, 1)
+	if !ok || !r.Ok || len(r.Seen) != 1 || r.Seen[0] != filepath.Join(p.CWD, "good") {
+		t.Fatalf("lenient decoding: %+v", r)
+	}
+}
+
 func TestCoworkRejectAndPrivacy(t *testing.T) {
 	root := t.TempDir()
-	cwd := "/x/local-agent-mode-sessions/a/local_1/outputs"
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(config, "Claude", "local-agent-mode-sessions", "a", "b", "local_1", "outputs")
 	now := time.Now()
 	for _, data := range []string{"not json", strings.Repeat("a", coworkInputLimit+1), fmt.Sprintf(`{"cwd":%q,"session_id":"../x","hook_event_name":"SessionStart"}`, cwd)} {
 		captureCowork(strings.NewReader(data), root, now)
@@ -88,9 +151,15 @@ func TestCoworkRejectAndPrivacy(t *testing.T) {
 		t.Fatal("invalid payload created store")
 	}
 	secret := "SECRET_SYNTHETIC_CANARY"
-	payload := fmt.Sprintf(`{"cwd":%q,"session_id":"ok","hook_event_name":"PostToolUse","tool_name":"Read","tool_use_id":"a","prompt":%q,"error":%q,"tool_input":{"file_path":"/tmp/file","command":%q,"query":%q},"tool_response":{"content":%q}}`, cwd, secret, secret, secret, secret, secret)
+	file := filepath.Join(t.TempDir(), "file")
+	payloadBytes, _ := json.Marshal(map[string]any{"cwd": cwd, "session_id": "ok", "hook_event_name": "PostToolUse", "tool_name": "Read", "tool_use_id": "a", "prompt": secret, "error": secret, "tool_input": map[string]any{"file_path": file, "command": secret, "query": secret}, "tool_response": map[string]any{"content": secret}})
+	payload := string(payloadBytes)
 	captureCowork(strings.NewReader(payload), root, now)
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
+	receipts, err := os.ReadDir(filepath.Join(root, "sessions", coworkSessionKey("ok"), "r"))
+	if err != nil || len(receipts) != 1 {
+		t.Fatalf("expected one stored receipt: %v, %v", receipts, err)
+	}
+	err = filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
 		}
@@ -123,7 +192,7 @@ func TestCoworkConcurrentDedupeCapPrune(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	dir := filepath.Join(root, "sessions", "s", "r")
+	dir := filepath.Join(root, "sessions", coworkSessionKey("s"), "r")
 	entries, e := os.ReadDir(dir)
 	if e != nil || len(entries) != 1 {
 		t.Fatalf("%d %v", len(entries), e)
@@ -136,11 +205,11 @@ func TestCoworkConcurrentDedupeCapPrune(t *testing.T) {
 	if e := writeCoworkReceipt(root, "s", "local_x", "overflow", []byte(`{}`), "tool", now); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := os.Stat(filepath.Join(root, "sessions", "s", "truncated")); e != nil {
+	if _, e := os.Stat(filepath.Join(root, "sessions", coworkSessionKey("s"), "truncated")); e != nil {
 		t.Fatal(e)
 	}
 	old := now.Add(-8 * 24 * time.Hour)
-	if e := os.Chtimes(dir, old, old); e != nil {
+	if e := os.Chtimes(filepath.Join(root, "sessions", coworkSessionKey("s"), "active"), old, old); e != nil {
 		t.Fatal(e)
 	}
 	if e := writeCoworkReceipt(root, "new", "local_y", "start", []byte(`{}`), "start", now); e != nil {

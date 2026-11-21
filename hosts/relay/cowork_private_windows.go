@@ -3,12 +3,50 @@
 package main
 
 import (
-	"golang.org/x/sys/windows"
+	"errors"
 	"os"
+	"path/filepath"
+
+	"golang.org/x/sys/windows"
 )
 
+func coworkLocalBase() (string, error) { return localBase() }
+
+func coworkVerifyDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("untrusted store directory")
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !windows.EqualSid(owner, user.User.Sid) {
+		return errors.New("untrusted store owner")
+	}
+	return nil
+}
+
 func coworkPrivateMkdir(dir string) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	err := os.Mkdir(dir, 0700)
+	if os.IsNotExist(err) {
+		if err = coworkPrivateMkdir(filepath.Dir(dir)); err != nil {
+			return err
+		}
+		err = os.Mkdir(dir, 0700)
+	}
+	if err != nil && !os.IsExist(err) {
+		return err
+	}
+	if err = coworkVerifyDir(dir); err != nil {
 		return err
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
