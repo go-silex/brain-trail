@@ -475,6 +475,17 @@ func TestCoworkAliasTrustBeforeCanonicalization(t *testing.T) {
 	if err := writeCoworkReceipt(root, "id", "task", "key", []byte(`{}`), "tool", time.Now()); err == nil {
 		t.Fatal("accepted nested alias in non-sticky writable directory")
 	}
+	private := filepath.Join(unsafe, "private")
+	if err := os.Mkdir(private, 0700); err != nil {
+		t.Fatal(err)
+	}
+	privateAlias := filepath.Join(private, "alias")
+	if err := os.Symlink(real, privateAlias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coworkCanonicalPath(privateAlias); err == nil {
+		t.Fatal("accepted alias below non-sticky writable grandparent")
+	}
 	if runtime.GOOS != "darwin" {
 		t.Setenv("XDG_STATE_HOME", outer)
 		if _, err := coworkStoreRoot(); err == nil {
@@ -492,14 +503,17 @@ func TestCoworkAliasTrustBeforeCanonicalization(t *testing.T) {
 			t.Fatalf("rejected trusted configured state alias: %v", err)
 		}
 	}
-	if os.Geteuid() == 0 {
+	t.Run("foreign-owned alias", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("changing symlink ownership requires root")
+		}
 		if err := os.Lchown(inner, 1, -1); err != nil {
-			t.Fatal(err)
+			t.Skipf("cannot change symlink owner: %v", err)
 		}
 		if err := writeCoworkReceipt(root, "id", "task", "key", []byte(`{}`), "tool", time.Now()); err == nil {
 			t.Fatal("accepted foreign-owned alias")
 		}
-	}
+	})
 }
 
 func TestCoworkWaitingWriterDoesNotCreateReceiptsInRecreatedSession(t *testing.T) {

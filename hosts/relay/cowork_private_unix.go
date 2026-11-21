@@ -52,14 +52,8 @@ func coworkVerifyAliases(path string) error {
 		if !ok || (st.Uid != 0 && st.Uid != uint32(os.Geteuid())) {
 			return fmt.Errorf("untrusted alias %s", next)
 		}
-		parent, err := os.Lstat(dir)
-		if err != nil {
+		if err := coworkWalkAncestors(dir, false); err != nil {
 			return err
-		}
-		parentStat, ok := parent.Sys().(*syscall.Stat_t)
-		if !ok || !parent.IsDir() || (parentStat.Uid != 0 && parentStat.Uid != uint32(os.Geteuid())) ||
-			(parent.Mode().Perm()&0022 != 0 && parent.Mode()&os.ModeSticky == 0) {
-			return fmt.Errorf("untrusted alias parent %s", dir)
 		}
 		links++
 		if links > 255 {

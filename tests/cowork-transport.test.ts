@@ -846,7 +846,7 @@ test('only valid responses reset the deadline and delayed retries stop before fe
     await advance(5000)
     expect(status()).toBe('reconnecting')
     expect(calls).toBe(6)
-    await advance(1)
+    await advance(50001)
     expect(status()).toBe('closed')
     expect(calls).toBe(6)
     expect(scheduled).toEqual([])
@@ -898,6 +898,54 @@ test('rejects a replacement instance with an inconsistent raw cursor', async () 
     expect(closed).toEqual(['disconnected'])
     expect(events.length).toBe(before)
     expect(scheduled).toEqual([])
+  } finally {
+    dispose()
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('healthy polling survives a suspended timer longer than a minute', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  let now = 0
+  let calls = 0
+  const scheduled: Array<() => void> = []
+  globalThis.setTimeout = ((fn: () => void) => {
+    scheduled.push(fn)
+    return 1
+  }) as typeof setTimeout
+  globalThis.fetch = (async () => {
+    calls++
+    return {
+      ok: true,
+      json: async () => ({
+        session: 'task',
+        instance: 1,
+        receipts: [],
+        next: 0,
+        ended: true,
+        truncated: false,
+        more: false,
+      }),
+    } as Response
+  }) as typeof fetch
+  const events: ServerEvent[] = []
+  const dispose = coworkTransport('task', () => now).listen({
+    ready() {},
+    event: (event) => events.push(event),
+    closed() {},
+  })
+  try {
+    await settle()
+    now = 61000
+    scheduled.shift()?.()
+    await settle()
+    expect(calls).toBe(2)
+    const last = events.filter((event) => event.kind === 'snapshot').at(-1)
+    if (last?.kind !== 'snapshot') throw new Error('Missing snapshot')
+    expect(last.facts.coworkCoverage?.status).toBe(undefined)
+    expect(scheduled.length).toBe(1)
   } finally {
     dispose()
     globalThis.fetch = originalFetch

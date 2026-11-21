@@ -96,7 +96,7 @@ export function coworkTransport(
   let lang = savedLang()
   let truncated = false
   let pollStatus: 'reconnecting' | 'unavailable' | 'closed' | undefined
-  let lastValid = clock()
+  let failureSince: number | undefined
   const stopReplay = () => {
     clearInterval(replayTimer)
     replayTimer = undefined
@@ -171,7 +171,7 @@ export function coworkTransport(
   }
   const poll = async () => {
     if (!active) return
-    if (clock() - lastValid > 60000) {
+    if (failureSince !== undefined && clock() - failureSince > 60000) {
       pollStatus = 'closed'
       publish()
       return
@@ -188,6 +188,7 @@ export function coworkTransport(
       )
     } catch {
       if (!active) return
+      failureSince ??= clock()
       if (pollStatus !== 'reconnecting') {
         pollStatus = 'reconnecting'
         publish()
@@ -197,6 +198,7 @@ export function coworkTransport(
     }
     if (!active) return
     if (!response.ok) {
+      failureSince ??= clock()
       const nextStatus =
         response.status === 401 || response.status === 403
           ? 'closed'
@@ -217,6 +219,7 @@ export function coworkTransport(
       } catch (error) {
         if (error instanceof SyntaxError) throw error
         if (!active) return
+        failureSince ??= clock()
         if (pollStatus !== 'reconnecting') {
           pollStatus = 'reconnecting'
           publish()
@@ -258,7 +261,7 @@ export function coworkTransport(
           (data.receipts.length === 0 && data.next !== cursor))
       )
         throw new Error('Invalid receipts')
-      lastValid = clock()
+      failureSince = undefined
       if (changedInstance) {
         pollStatus = undefined
         instance = data.instance as number
@@ -315,7 +318,7 @@ export function coworkTransport(
     listen(nextSink) {
       sink = nextSink
       active = true
-      lastValid = clock()
+      failureSince = undefined
       nextSink.ready()
       void poll()
       return () => {
