@@ -297,8 +297,8 @@ func TestCoworkRejectsUnsafeAncestors(t *testing.T) {
 		t.Fatal(err)
 	}
 	root = filepath.Join(link, "missing", "brain-trail", "cowork", "v1")
-	if err := write(); err == nil {
-		t.Fatal("accepted symlink ancestor")
+	if err := write(); err != nil {
+		t.Fatalf("rejected canonicalizable symlink ancestor: %v", err)
 	}
 	root = filepath.Join(ancestor, "missing", "brain-trail", "cowork", "v1")
 	if err := os.Chmod(ancestor, os.ModeSticky|0777); err != nil {
@@ -313,6 +313,76 @@ func TestCoworkRejectsUnsafeAncestors(t *testing.T) {
 	}
 	if err := write(); err == nil {
 		t.Fatal("accepted writable cowork ancestor")
+	}
+}
+
+func TestCoworkCanonicalStateAndStickyBoundaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix state and symlink semantics")
+	}
+	base := coworkTestTempDir(t)
+	link := filepath.Join(base, "alias")
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	canonicalReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(link, "missing", "state")
+	if runtime.GOOS != "darwin" {
+		t.Setenv("XDG_STATE_HOME", state)
+		root, err := coworkStoreRoot()
+		if err != nil || root != filepath.Join(canonicalReal, "missing", "state", "brain-trail", "cowork", "v1") {
+			t.Fatalf("canonical root = %q, %v", root, err)
+		}
+	}
+	root := filepath.Join(state, "brain-trail", "cowork", "v1")
+	write := func() error {
+		return writeCoworkReceipt(root, "id", "local_task", "key", []byte(`{}`), "tool", time.Now())
+	}
+	if err := write(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(state, os.ModeSticky|0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(); err == nil {
+		t.Fatal("accepted sticky writable state")
+	}
+	if err := os.Chmod(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	brain := filepath.Join(state, "brain-trail")
+	if err := os.Chmod(brain, os.ModeSticky|0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(); err == nil {
+		t.Fatal("accepted sticky writable brain-trail")
+	}
+}
+
+func TestCoworkRejectsForeignOwnedState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ownership semantics")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("changing directory ownership requires root")
+	}
+	state := filepath.Join(coworkTestTempDir(t), "state")
+	if err := os.Mkdir(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(state, 1, -1); err != nil {
+		t.Skipf("cannot change directory owner: %v", err)
+	}
+	root := filepath.Join(state, "brain-trail", "cowork", "v1")
+	if err := writeCoworkReceipt(root, "id", "local_task", "key", []byte(`{}`), "tool", time.Now()); err == nil {
+		t.Fatal("accepted foreign-owned state")
 	}
 }
 

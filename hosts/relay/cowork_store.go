@@ -51,7 +51,7 @@ func coworkStoreRoot() (string, error) {
 	if !filepath.IsAbs(base) {
 		return "", errors.New("invalid state directory")
 	}
-	return filepath.Join(base, "brain-trail", "cowork", "v1"), nil
+	return coworkCanonicalRoot(filepath.Join(base, "brain-trail", "cowork", "v1"))
 }
 func coworkSessionKey(id string) string {
 	sum := sha256.Sum256([]byte(id))
@@ -128,6 +128,11 @@ func writeCoworkReceipt(root, id, task, key string, data []byte, event string, n
 	if !coworkID.MatchString(id) || len(data) > 8192 {
 		return errors.New("invalid session or receipt")
 	}
+	var err error
+	root, err = coworkCanonicalRoot(root)
+	if err != nil {
+		return err
+	}
 	if err := coworkVerifyAncestors(root); err != nil {
 		return err
 	}
@@ -151,16 +156,19 @@ func writeCoworkReceipt(root, id, task, key string, data []byte, event string, n
 	if err := coworkPrivateMkdir(dir); err != nil {
 		return err
 	}
+	receipts := filepath.Join(dir, "r")
+	if err := coworkPrivateMkdir(receipts); err != nil {
+		return err
+	}
+	if err := coworkVerifyStorePath(root, receipts); err != nil {
+		return err
+	}
 	unlock, err := coworkLock(filepath.Join(dir, ".lock"), true)
 	if err != nil {
 		return err
 	}
 	err = func() error {
 		defer unlock()
-		receipts := filepath.Join(dir, "r")
-		if err := coworkPrivateMkdir(receipts); err != nil {
-			return err
-		}
 		metadata := filepath.Join(dir, "session.json")
 		raw, err := coworkReadRegular(metadata, 8192)
 		if _, statErr := os.Lstat(metadata); os.IsNotExist(statErr) {

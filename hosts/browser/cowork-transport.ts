@@ -74,7 +74,10 @@ function save(key: string, value: string) {
   }
 }
 
-export function coworkTransport(session: string): DashboardTransport {
+export function coworkTransport(
+  session: string,
+  clock: () => number = Date.now,
+): DashboardTransport {
   let sink: Parameters<DashboardTransport['listen']>[0] | undefined
   let active = false
   let controller: AbortController | undefined
@@ -93,6 +96,7 @@ export function coworkTransport(session: string): DashboardTransport {
   let lang = savedLang()
   let truncated = false
   let pollStatus: 'reconnecting' | 'unavailable' | 'closed' | undefined
+  let fetchFailureSince: number | undefined
   const stopReplay = () => {
     clearInterval(replayTimer)
     replayTimer = undefined
@@ -179,14 +183,19 @@ export function coworkTransport(session: string): DashboardTransport {
       )
     } catch {
       if (!active) return
-      if (pollStatus !== 'reconnecting') {
-        pollStatus = 'reconnecting'
+      const now = clock()
+      fetchFailureSince ??= now
+      const remaining = 60000 - (now - fetchFailureSince)
+      const nextStatus = remaining <= 0 ? 'closed' : 'reconnecting'
+      if (pollStatus !== nextStatus) {
+        pollStatus = nextStatus
         publish()
       }
-      pollTimer = setTimeout(poll, 5000)
+      if (remaining > 0) pollTimer = setTimeout(poll, Math.min(5000, remaining))
       return
     }
     if (!active) return
+    fetchFailureSince = undefined
     if (!response.ok) {
       const nextStatus =
         response.status === 401 || response.status === 403
@@ -224,12 +233,30 @@ export function coworkTransport(session: string): DashboardTransport {
         !Array.isArray(data.receipts) ||
         !Number.isSafeInteger(data.instance) ||
         !Number.isSafeInteger(data.next) ||
-        (data.next as number) < cursor ||
         typeof data.ended !== 'boolean' ||
         typeof data.truncated !== 'boolean' ||
-        typeof data.more !== 'boolean' ||
-        (data.more && data.next === cursor)
+        typeof data.more !== 'boolean'
       )
+        throw new Error('Invalid receipts')
+      const statusChanged = pollStatus !== undefined
+      const changedInstance =
+        instance !== undefined && instance !== data.instance
+      if (changedInstance) {
+        pollStatus = undefined
+        instance = data.instance as number
+        cursor = 0
+        receipts = []
+        projection = projectCowork(receipts)
+        projectionKey = ''
+        layoutKey = ''
+        truncated = false
+        stopReplay()
+        shared = sharedView(VIEW_STATE0)
+        refreshProjection()
+        pollTimer = setTimeout(poll, 0)
+        return
+      }
+      if ((data.next as number) < cursor || (data.more && data.next === cursor))
         throw new Error('Invalid receipts')
       const rawLast = data.receipts[data.receipts.length - 1]
       if (
@@ -243,26 +270,8 @@ export function coworkTransport(session: string): DashboardTransport {
             : undefined)
       )
         throw new Error('Invalid receipts')
-      const statusChanged = pollStatus !== undefined
       pollStatus = undefined
-      const changedInstance =
-        instance !== undefined && instance !== data.instance
-      if (changedInstance) {
-        cursor = 0
-        receipts = []
-        projection = projectCowork(receipts)
-        projectionKey = ''
-        layoutKey = ''
-        truncated = false
-        stopReplay()
-        shared = sharedView(VIEW_STATE0)
-      }
       instance = data.instance as number
-      if (changedInstance) {
-        refreshProjection()
-        pollTimer = setTimeout(poll, 0)
-        return
-      }
       const batch: CoworkReceipt[] = []
       let last = cursor
       for (const value of data.receipts) {

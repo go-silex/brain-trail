@@ -721,3 +721,136 @@ test('consumer notices are bilingual and preserve coverage after recovery', () =
     'History capped · Partial inventory',
   )
 })
+
+test('recreated instances refetch from zero before comparing old cursor', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  try {
+    for (const recreated of [
+      { receipts: [], next: 8 },
+      { receipts: [receipt], next: 1 },
+    ]) {
+      const scheduled: Array<() => void> = []
+      globalThis.setTimeout = ((fn: () => void) => {
+        scheduled.push(fn)
+        return 1
+      }) as typeof setTimeout
+      const urls: string[] = []
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        const page =
+          urls.length === 1
+            ? { instance: 1, receipts: [{ ...receipt, n: 8 }], next: 8 }
+            : urls.length === 2
+              ? { instance: 2, ...recreated }
+              : { instance: 2, receipts: [receipt], next: 1 }
+        return {
+          ok: true,
+          json: async () => ({
+            session: 'task',
+            ended: false,
+            truncated: false,
+            more: false,
+            ...page,
+          }),
+        } as Response
+      }) as typeof fetch
+      const events: ServerEvent[] = []
+      const closed: string[] = []
+      const dispose = coworkTransport('task').listen({
+        ready() {},
+        event: (event) => events.push(event),
+        closed: (reason) => closed.push(reason),
+      })
+      await settle()
+      scheduled.shift()?.()
+      await settle()
+      scheduled.shift()?.()
+      await settle()
+      expect(urls).toEqual([
+        'cowork/receipts?session=task&after=0',
+        'cowork/receipts?session=task&after=8',
+        'cowork/receipts?session=task&after=0',
+      ])
+      expect(closed).toEqual([])
+      const last = events.filter((event) => event.kind === 'snapshot').at(-1)
+      if (last?.kind !== 'snapshot') throw new Error('Missing snapshot')
+      expect(last.facts.workspace.kind).toBe('ready')
+      dispose()
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('fetch rejection window resets on HTTP response and closes after 60 seconds', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  let now = 0
+  const scheduled: Array<{ fn: () => void; delay: number }> = []
+  globalThis.setTimeout = ((fn: () => void, delay: number) => {
+    scheduled.push({ fn, delay })
+    return 1
+  }) as typeof setTimeout
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    if (calls === 3) return { ok: false, status: 404 } as Response
+    if (calls === 5)
+      return {
+        ok: true,
+        json: async () => ({
+          session: 'task',
+          instance: 1,
+          receipts: [],
+          next: 0,
+          ended: true,
+          truncated: false,
+          more: false,
+        }),
+      } as Response
+    throw new Error('network')
+  }) as typeof fetch
+  const events: ServerEvent[] = []
+  const dispose = coworkTransport('task', () => now).listen({
+    ready() {},
+    event: (event) => events.push(event),
+    closed() {},
+  })
+  const status = () => {
+    const event = events.filter((value) => value.kind === 'snapshot').at(-1)
+    if (event?.kind !== 'snapshot') throw new Error('Missing snapshot')
+    return event.facts.coworkCoverage?.status
+  }
+  const advance = async (elapsed: number) => {
+    const timer = scheduled.shift()
+    if (!timer) throw new Error('Missing retry')
+    now += elapsed
+    timer.fn()
+    await settle()
+  }
+  try {
+    await settle()
+    expect(status()).toBe('reconnecting')
+    await advance(55000)
+    expect(status()).toBe('reconnecting')
+    await advance(5000)
+    expect(status()).toBe('unavailable')
+    await advance(5000)
+    expect(status()).toBe('reconnecting')
+    await advance(5000)
+    expect(status()).toBe(undefined)
+    await advance(5000)
+    expect(status()).toBe('reconnecting')
+    await advance(55000)
+    expect(status()).toBe('reconnecting')
+    await advance(5000)
+    expect(status()).toBe('closed')
+    expect(scheduled).toEqual([])
+  } finally {
+    dispose()
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})

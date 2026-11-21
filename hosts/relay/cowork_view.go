@@ -286,7 +286,9 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if changed {
-			after = 0
+			v.mu.Unlock()
+			jsonOut(w, map[string]any{"session": id, "instance": session.Started, "receipts": []coworkIndexedReceipt{}, "next": after, "ended": ended, "truncated": truncated, "more": false})
+			return
 		}
 		start := after
 		if start > len(all) {
@@ -322,6 +324,11 @@ func coworkView(assets, session, root string) error {
 		if st, err := os.Stat(filepath.Join(assets, name)); err != nil || !st.Mode().IsRegular() {
 			return errors.New("missing browser assets")
 		}
+	}
+	var err error
+	root, err = coworkCanonicalRoot(root)
+	if err != nil {
+		return err
 	}
 	dir, err := privateTempDir()
 	if err != nil {

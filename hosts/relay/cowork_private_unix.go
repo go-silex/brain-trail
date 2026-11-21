@@ -17,10 +17,109 @@ func coworkCreateTemp(dir string) (*os.File, error) {
 	return os.CreateTemp(dir, ".tmp-*")
 }
 
+// Resolve only an existing prefix so a not-yet-created state directory keeps its
+// intended name while symlinked system or home ancestors are canonical.
+func coworkCanonicalPath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("invalid store directory")
+	}
+	path = filepath.Clean(path)
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", err
+		}
+		// A component may have appeared since EvalSymlinks; retry unless
+		// it is a dangling symlink, which must not be treated as missing.
+		info, statErr := os.Lstat(path)
+		if statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", err
+			}
+			continue
+		}
+		if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		missing = append(missing, filepath.Base(path))
+		path = parent
+	}
+}
+
+func coworkCanonicalRoot(root string) (string, error) {
+	boundary := filepath.Dir(root)
+	suffix := []string{filepath.Base(root)}
+	if filepath.Base(root) == "v1" && filepath.Base(boundary) == "cowork" && filepath.Base(filepath.Dir(boundary)) == "brain-trail" {
+		boundary = filepath.Dir(filepath.Dir(boundary))
+		suffix = []string{"brain-trail", "cowork", "v1"}
+	}
+	base, err := coworkCanonicalPath(boundary)
+	if err != nil {
+		return "", err
+	}
+	expected := base
+	for _, part := range suffix {
+		expected = filepath.Join(expected, part)
+		info, statErr := os.Lstat(expected)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("untrusted store directory")
+		}
+	}
+	resolved, err := coworkCanonicalPath(root)
+	if err != nil {
+		return "", err
+	}
+	if resolved != expected {
+		return "", errors.New("store path changed during canonicalization")
+	}
+	return resolved, nil
+}
+
+func coworkVerifyStorePath(root, leaf string) error {
+	for dir := leaf; ; dir = filepath.Dir(dir) {
+		if err := coworkVerifyDir(dir); err != nil {
+			return err
+		}
+		if dir == root {
+			break
+		}
+		if filepath.Dir(dir) == dir {
+			return errors.New("invalid store path")
+		}
+	}
+	start := filepath.Dir(root)
+	if filepath.Base(root) == "v1" && filepath.Base(start) == "cowork" && filepath.Base(filepath.Dir(start)) == "brain-trail" {
+		for _, dir := range []string{start, filepath.Dir(start), filepath.Dir(filepath.Dir(start))} {
+			if err := coworkVerifyDir(dir); err != nil {
+				return err
+			}
+		}
+	}
+	return coworkWalkAncestors(leaf, false)
+}
+
 func coworkVerifyAncestors(dir string) error {
+	return coworkWalkAncestors(dir, true)
+}
+
+func coworkWalkAncestors(dir string, allowMissing bool) error {
 	for {
 		info, err := os.Lstat(dir)
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && (!allowMissing || !os.IsNotExist(err)) {
 			return err
 		}
 		if err == nil {
@@ -45,7 +144,7 @@ func coworkOpenDir(dir string) (int, error) {
 		return -1, err
 	}
 	var st unix.Stat_t
-	if err = unix.Fstat(fd, &st); err != nil || st.Uid != uint32(os.Geteuid()) {
+	if err = unix.Fstat(fd, &st); err != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&0022 != 0 {
 		unix.Close(fd)
 		return -1, errors.New("untrusted store directory")
 	}
@@ -95,6 +194,9 @@ func coworkPrepareParent(dir string) error {
 		return err
 	}
 	if err := coworkEnsureState(filepath.Dir(dir)); err != nil {
+		return err
+	}
+	if err := coworkVerifyDir(filepath.Dir(dir)); err != nil {
 		return err
 	}
 	var st unix.Stat_t

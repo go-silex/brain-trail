@@ -17,6 +17,10 @@ func coworkLocalBase() (string, error) { return localBase() }
 
 func coworkVerifyAncestors(dir string) error { return nil }
 
+func coworkCanonicalPath(path string) (string, error) { return path, nil }
+func coworkCanonicalRoot(root string) (string, error) { return root, nil }
+func coworkVerifyStorePath(root, leaf string) error   { return nil }
+
 func coworkCreateTemp(dir string) (*os.File, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {

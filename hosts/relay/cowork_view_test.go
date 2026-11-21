@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -317,6 +318,71 @@ func TestCoworkViewerInstanceChangesDuringDiscovery(t *testing.T) {
 	current, receipts, _, _, changed, status := v.discoverSession("s", old)
 	if status != 0 || !changed || current.Started != 2 || len(receipts) != 1 || receipts[0].Ev != "end" || receipts[0].N != 1 {
 		t.Fatalf("instance race: session=%+v receipts=%+v changed=%v status=%d", current, receipts, changed, status)
+	}
+}
+
+func TestCoworkViewerHandlerInstanceChangesDuringDiscovery(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sessions", coworkSessionKey("s"))
+	if err := os.MkdirAll(filepath.Join(dir, "r"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("session.json", `{"v":1,"id":"s","started":1}`)
+	write("r/a.json", `{"v":1,"ev":"start"}`)
+	v := &coworkViewer{relay: &relay{host: "127.0.0.1:1234", token: "t"}, root: root}
+	r := httptest.NewRequest("GET", "http://127.0.0.1:1234/s/t/cowork/receipts?session=s&after=8", nil)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	v.mu.Lock()
+	go func() {
+		defer close(done)
+		v.serveHTTP(w, r)
+	}()
+	// Wait until the handler has loaded the old instance and is blocked on v.mu.
+	deadline := time.Now().Add(5 * time.Second)
+	blocked := false
+	for time.Now().Before(deadline) {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(stack, "[sync.Mutex.Lock]") && strings.Contains(stack, "(*coworkViewer).serveHTTP") {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !blocked {
+		v.mu.Unlock()
+		<-done
+		t.Fatal("handler did not reach discovery lock")
+	}
+	write("session.json", `{"v":1,"id":"s","started":2}`)
+	write("r/a.json", `{"v":1,"ev":"end"}`)
+	v.mu.Unlock()
+	<-done
+	var page struct {
+		Instance int64             `json:"instance"`
+		Receipts []json.RawMessage `json:"receipts"`
+		Next     int               `json:"next"`
+		More     bool              `json:"more"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 || page.Instance != 2 || page.Receipts == nil || len(page.Receipts) != 0 || page.Next != 8 || page.More {
+		t.Fatalf("instance race page: status=%d body=%s error=%v", w.Code, w.Body.String(), err)
+	}
+	restart := httptest.NewRecorder()
+	v.serveHTTP(restart, httptest.NewRequest("GET", "http://127.0.0.1:1234/s/t/cowork/receipts?session=s&after=0", nil))
+	if err := json.Unmarshal(restart.Body.Bytes(), &page); err != nil || restart.Code != 200 || page.Instance != 2 || len(page.Receipts) != 1 || page.Next != 1 || page.More {
+		t.Fatalf("restart page: status=%d body=%s error=%v", restart.Code, restart.Body.String(), err)
 	}
 }
 
