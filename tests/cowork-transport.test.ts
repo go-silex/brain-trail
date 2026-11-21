@@ -357,7 +357,11 @@ test('connector-only task publishes a ready empty layout and observed events', a
             tool: 'mcp__drive__read',
             ok: true,
             agent: false,
-            mcp: { server: 'drive', tool: 'read' },
+            mcp: {
+              server: 'drive',
+              tool: 'read',
+              source: { private: 'ignored' },
+            },
           },
         ],
         next: 1,
@@ -382,6 +386,46 @@ test('connector-only task publishes a ready empty layout and observed events', a
     expect(snapshot.facts.workspace.kind).toBe('ready')
     expect(snapshot.facts.connected.length).toBe(1)
     expect(snapshot.facts.events.some((event) => event.k === 'mcp')).toBe(true)
+    expect(snapshot.facts.coworkCoverage?.partialInventory).toBe(false)
+    expect(snapshot.facts.events.find((event) => event.k === 'mcp')).toEqual({
+      k: 'mcp',
+      server: 'drive',
+      tool: 'read',
+      label: '',
+      at: 100,
+    })
+  } finally {
+    dispose()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('publishes partial inventory coverage from a partial receipt', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      json: async () => ({
+        session: 'task',
+        instance: 1,
+        receipts: [{ ...receipt, part: true }],
+        next: 1,
+        ended: true,
+        truncated: false,
+        more: false,
+      }),
+    }) as Response) as typeof fetch
+  const events: ServerEvent[] = []
+  const dispose = coworkTransport('task').listen({
+    ready() {},
+    event: (value) => events.push(value),
+    closed() {},
+  })
+  try {
+    await settle()
+    const snapshot = events.find((event) => event.kind === 'snapshot')
+    if (snapshot?.kind !== 'snapshot') throw new Error('Missing snapshot')
+    expect(snapshot.facts.coworkCoverage?.partialInventory).toBe(true)
   } finally {
     dispose()
     globalThis.fetch = originalFetch

@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+func discoverCoworkNames(t *testing.T, v *coworkViewer, id string, started int64) []string {
+	t.Helper()
+	names, err := v.discover(id, started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
 func TestCoworkViewer(t *testing.T) {
 	root := t.TempDir()
 	assets := t.TempDir()
@@ -94,7 +103,7 @@ func TestCoworkViewer(t *testing.T) {
 		Ended     bool  `json:"ended"`
 		Truncated bool  `json:"truncated"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Receipts) != 1 || page.Receipts[0].N != 4 || page.Receipts[0].Tool != "Glob" || page.Next != 4 || page.Instance != 10 {
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Receipts) != 1 || page.Receipts[0].N != 4 || page.Receipts[0].Tool != "Glob" || page.Next != 4 || page.Instance == 0 {
 		t.Fatalf("page: %s %v", w.Body.String(), err)
 	}
 	write("r/_later.json", `{"v":1,"at":5,"ev":"start"}`)
@@ -186,7 +195,7 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 		return w.Body.Len(), page
 	}
 	size, first := get(0)
-	if size > 1536*1024 || !first.More || !first.Ended || first.Next == 0 || first.Next >= 400 || first.Instance != 1 {
+	if size > 1536*1024 || !first.More || !first.Ended || first.Next == 0 || first.Next >= 400 || first.Instance == 0 {
 		t.Fatalf("first page: size=%d next=%d more=%v ended=%v", size, first.Next, first.More, first.Ended)
 	}
 	last := first
@@ -209,7 +218,7 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 	write("session.json", `{"v":1,"id":"s","started":2}`)
 	write("r/new.json", `{"v":1,"at":2,"ev":"start"}`)
 	_, recreated := get(0)
-	if len(recreated.Receipts) != 1 || recreated.Next != 1 || recreated.More || recreated.Instance != 2 {
+	if len(recreated.Receipts) != 1 || recreated.Next != 1 || recreated.More || recreated.Instance == first.Instance {
 		t.Fatalf("recreated: %+v", recreated)
 	}
 }
@@ -229,7 +238,7 @@ func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := &coworkViewer{root: root}
-	if got := v.discover("s", 1); len(got) != 0 {
+	if got := discoverCoworkNames(t, v, "s", 1); len(got) != 0 {
 		t.Fatalf("invalid receipt discovered: %v", got)
 	}
 	if err := os.Remove(name); err != nil {
@@ -241,14 +250,14 @@ func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
 	if err := os.Chtimes(dir, when, when); err != nil {
 		t.Fatal(err)
 	}
-	if got := v.discover("s", 1); len(got) != 1 {
+	if got := discoverCoworkNames(t, v, "s", 1); len(got) != 1 {
 		t.Fatalf("unreadable receipt was not retried: %v", got)
 	}
 	later := when.Add(time.Second)
 	if err := os.Chtimes(dir, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if got := v.discover("s", 1); len(got) != 1 {
+	if got := discoverCoworkNames(t, v, "s", 1); len(got) != 1 {
 		t.Fatalf("changed mtime not discovered: %v", got)
 	}
 	if err := os.Rename(dir, dir+"-old"); err != nil {
@@ -263,7 +272,7 @@ func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
 	if err := os.Chtimes(dir, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if got := v.discover("s", 1); len(got) != 2 {
+	if got := discoverCoworkNames(t, v, "s", 1); len(got) != 2 {
 		t.Fatalf("replacement directory not discovered: %v", got)
 	}
 }
@@ -279,7 +288,7 @@ func TestCoworkViewerRecentEqualMtimeRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := &coworkViewer{root: root}
-	if got := v.discover("s", 1); len(got) != 0 {
+	if got := discoverCoworkNames(t, v, "s", 1); len(got) != 0 {
 		t.Fatalf("unexpected initial receipts: %v", got)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "new.json"), []byte(`{"v":1,"ev":"start"}`), 0600); err != nil {
@@ -288,7 +297,7 @@ func TestCoworkViewerRecentEqualMtimeRetries(t *testing.T) {
 	if err := os.Chtimes(dir, when, when); err != nil {
 		t.Fatal(err)
 	}
-	if got := v.discover("s", 1); len(got) != 1 {
+	if got := discoverCoworkNames(t, v, "s", 1); len(got) != 1 {
 		t.Fatalf("equal recent mtime hid new receipt: %v", got)
 	}
 }
@@ -309,13 +318,13 @@ func TestCoworkViewerInstanceChangesDuringDiscovery(t *testing.T) {
 	write("r/a.json", `{"v":1,"ev":"start"}`)
 	v := &coworkViewer{root: root}
 	old, ok := v.loadSession("s")
-	if !ok || len(v.discover("s", old.Started)) != 1 {
+	if !ok || len(discoverCoworkNames(t, v, "s", old.Started)) != 1 {
 		t.Fatal("failed to seed old instance")
 	}
 	write("session.json", `{"v":1,"id":"s","started":2}`)
 	write("r/a.json", `{"v":1,"ev":"end"}`)
 	current, receipts, _, _, changed, status := v.discoverSession("s", old)
-	if status != 0 || !changed || current.Started != 2 || len(receipts) != 1 || receipts[0].Ev != "end" || receipts[0].N != 1 {
+	if status != 0 || !changed || current.Started != 2 || len(receipts) != 1 || receipts[0] != "a.json" {
 		t.Fatalf("instance race: session=%+v receipts=%+v changed=%v status=%d", current, receipts, changed, status)
 	}
 }
@@ -372,12 +381,13 @@ func TestCoworkViewerHandlerInstanceChangesDuringDiscovery(t *testing.T) {
 		Next     int               `json:"next"`
 		More     bool              `json:"more"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 || page.Instance != 2 || page.Receipts == nil || len(page.Receipts) != 0 || page.Next != 8 || page.More {
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 || page.Instance == 0 || page.Receipts == nil || len(page.Receipts) != 0 || page.Next != 8 || page.More {
 		t.Fatalf("instance race page: status=%d body=%s error=%v", w.Code, w.Body.String(), err)
 	}
+	instance := page.Instance
 	restart := httptest.NewRecorder()
 	v.serveHTTP(restart, httptest.NewRequest("GET", "http://127.0.0.1:1234/s/t/cowork/receipts?session=s&after=0", nil))
-	if err := json.Unmarshal(restart.Body.Bytes(), &page); err != nil || restart.Code != 200 || page.Instance != 2 || len(page.Receipts) != 1 || page.Next != 1 || page.More {
+	if err := json.Unmarshal(restart.Body.Bytes(), &page); err != nil || restart.Code != 200 || page.Instance != instance || len(page.Receipts) != 1 || page.Next != 1 || page.More {
 		t.Fatalf("restart page: status=%d body=%s error=%v", restart.Code, restart.Body.String(), err)
 	}
 }
@@ -432,5 +442,64 @@ func TestCoworkViewerSelectsSummariesWithoutReadingReceipts(t *testing.T) {
 	sessions := v.sessions()
 	if len(sessions) != 100 || sessions[0].ID != "s100" || sessions[99].ID != "s001" || sessions[0].Calls != 1 || len(v.cache) != 0 {
 		t.Fatalf("unexpected summaries: count=%d cache=%d", len(sessions), len(v.cache))
+	}
+}
+
+func TestCoworkViewerLRUInstancesAndOnDemandBodies(t *testing.T) {
+	root := t.TempDir()
+	v := &coworkViewer{relay: &relay{host: "127.0.0.1:1234", token: "t"}, root: root}
+	write := func(id, name, body string) {
+		t.Helper()
+		dir := filepath.Join(root, "sessions", coworkSessionKey(id))
+		if err := os.MkdirAll(filepath.Join(dir, "r"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type page struct {
+		Instance int64                  `json:"instance"`
+		Next     int                    `json:"next"`
+		Receipts []coworkIndexedReceipt `json:"receipts"`
+	}
+	get := func(id string, after int) page {
+		t.Helper()
+		w := httptest.NewRecorder()
+		v.serveHTTP(w, httptest.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:1234/s/t/cowork/receipts?session=%s&after=%d", id, after), nil))
+		var p page
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &p) != nil {
+			t.Fatalf("page %s: status %d body %s", id, w.Code, w.Body.String())
+		}
+		if len(v.cache) > coworkViewCacheEntries || v.cacheBytes > coworkViewCacheBytes {
+			t.Fatalf("cache exceeds limits: %d entries, %d bytes", len(v.cache), v.cacheBytes)
+		}
+		return p
+	}
+	write("s", "session.json", `{"v":1,"id":"s","started":1}`)
+	write("s", "r/z.json", `{"v":1,"ev":"start"}`)
+	first := get("s", 0)
+	write("s", "r/a.json", `{"v":1,"ev":"end"}`)
+	second := get("s", 1)
+	if second.Instance != first.Instance || len(second.Receipts) != 1 || second.Receipts[0].N != 2 || second.Receipts[0].Ev != "end" {
+		t.Fatalf("new receipt changed existing sequence: %+v", second)
+	}
+	write("s", "r/z.json", `{"v":1,"ev":"tool","tool":"Read"}`)
+	revisit := get("s", 0)
+	if revisit.Instance != first.Instance || len(revisit.Receipts) != 2 || revisit.Receipts[0].Tool != "Read" || revisit.Receipts[0].N != 1 {
+		t.Fatalf("body was not read on demand: %+v", revisit)
+	}
+	for i := range coworkViewCacheEntries {
+		id := fmt.Sprintf("other%d", i)
+		write(id, "session.json", fmt.Sprintf(`{"v":1,"id":%q,"started":1}`, id))
+		write(id, "r/one.json", `{"v":1,"ev":"start"}`)
+		get(id, 0)
+	}
+	rebuilt := get("s", 0)
+	if rebuilt.Instance == first.Instance || len(rebuilt.Receipts) != 2 || rebuilt.Receipts[0].Ev != "end" || rebuilt.Receipts[0].N != 1 || rebuilt.Receipts[1].N != 2 {
+		t.Fatalf("evicted task did not get a fresh instance: %+v", rebuilt)
+	}
+	if again := get("s", 1); again.Instance != rebuilt.Instance || len(again.Receipts) != 1 || again.Receipts[0].N != 2 {
+		t.Fatalf("rebuilt cursor not stable: %+v", again)
 	}
 }

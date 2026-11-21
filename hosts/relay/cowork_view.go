@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -32,11 +33,17 @@ type coworkViewSession struct {
 	Calls     int    `json:"calls"`
 }
 
+const coworkViewCacheEntries = 16
+const coworkViewCacheBytes = 2 << 20
+
 type coworkViewCache struct {
 	started  int64
+	instance int64
 	indexed  map[string]bool
-	receipts []coworkIndexedReceipt
+	names    []string
+	bytes    int
 	dirInfo  os.FileInfo
+	element  *list.Element
 }
 
 type coworkViewer struct {
@@ -45,6 +52,9 @@ type coworkViewer struct {
 	session         string
 	mu              sync.Mutex
 	cache           map[string]*coworkViewCache
+	lru             list.List
+	cacheBytes      int
+	nextInstance    int64
 	activity        chan struct{}
 	beforeDiscovery func()
 }
@@ -78,31 +88,55 @@ func coworkMarker(dir, name string) bool {
 	return err == nil && st.Mode().IsRegular()
 }
 
-// discover assigns sequence numbers once, independent of receipt timestamps.
-// The caller holds v.mu until it has selected the response slice.
-func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt {
+// Sequence numbers are stable for the lifetime of a cached instance.
+func (v *coworkViewer) forgetCache(id string) {
+	if c := v.cache[id]; c != nil {
+		v.cacheBytes -= c.bytes
+		v.lru.Remove(c.element)
+		delete(v.cache, id)
+	}
+}
+
+func (v *coworkViewer) discover(id string, started int64) ([]string, error) {
 	if v.cache == nil {
 		v.cache = make(map[string]*coworkViewCache)
 	}
 	cache := v.cache[id]
-	if cache == nil || cache.started != started {
-		cache = &coworkViewCache{started: started, indexed: make(map[string]bool)}
-		v.cache[id] = cache
+	if cache != nil && cache.started != started {
+		v.forgetCache(id)
+		cache = nil
 	}
+	if cache == nil {
+		now := time.Now().UnixMilli()
+		if now <= v.nextInstance {
+			now = v.nextInstance + 1
+		}
+		v.nextInstance = now
+		cache = &coworkViewCache{started: started, instance: now, indexed: make(map[string]bool), bytes: len(id) + 128}
+		cache.element = v.lru.PushFront(id)
+		v.cache[id] = cache
+		v.cacheBytes += cache.bytes
+	} else {
+		v.lru.MoveToFront(cache.element)
+	}
+	defer func() {
+		for len(v.cache) > coworkViewCacheEntries || v.cacheBytes > coworkViewCacheBytes {
+			v.forgetCache(v.lru.Back().Value.(string))
+		}
+	}()
 	scanStart := time.Now()
 	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id), "r")
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
 		cache.dirInfo = nil
-		return cache.receipts
+		return cache.names, nil
 	}
 	if cache.dirInfo != nil && os.SameFile(cache.dirInfo, info) && cache.dirInfo.ModTime().Equal(info.ModTime()) {
-		return cache.receipts
+		return cache.names, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		cache.dirInfo = nil
-		return cache.receipts
+		return nil, err
 	}
 	cache.dirInfo = nil
 	allRead := true
@@ -117,31 +151,41 @@ func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt
 			allRead = false
 			continue
 		}
+		n := len(name) + 128
+		if cache.bytes+n > coworkViewCacheBytes {
+			v.forgetCache(id)
+			return nil, errors.New("receipt index exceeds cache budget")
+		}
 		cache.indexed[name] = true
-		cache.receipts = append(cache.receipts, coworkIndexedReceipt{coworkReceipt: receipt, N: len(cache.receipts) + 1})
+		cache.names = append(cache.names, name)
+		cache.bytes += n
+		v.cacheBytes += n
 	}
 	if allRead && !info.ModTime().After(scanStart.Add(-2*time.Second)) {
 		cache.dirInfo = info
 	}
-	return cache.receipts
+	return cache.names, nil
 }
 
 // discoverSession validates the instance again after enumeration, while v.mu is held.
-func (v *coworkViewer) discoverSession(id string, session coworkSession) (coworkSession, []coworkIndexedReceipt, bool, bool, bool, int) {
+func (v *coworkViewer) discoverSession(id string, session coworkSession) (coworkSession, []string, bool, bool, bool, int) {
 	changed := false
 	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id))
 	for range 3 {
 		ended, truncated := coworkMarker(dir, "ended"), coworkMarker(dir, "truncated")
-		all := v.discover(id, session.Started)
+		all, err := v.discover(id, session.Started)
+		if err != nil {
+			return session, nil, false, false, changed, http.StatusServiceUnavailable
+		}
 		current, exists := v.loadSession(id)
 		if !exists {
-			delete(v.cache, id)
+			v.forgetCache(id)
 			return session, nil, false, false, changed, http.StatusNotFound
 		}
 		if current.Started == session.Started {
 			return current, all, ended, truncated, changed, 0
 		}
-		delete(v.cache, id)
+		v.forgetCache(id)
 		session = current
 		changed = true
 	}
@@ -289,9 +333,10 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)
 			return
 		}
+		instance := v.cache[id].instance
 		if changed {
 			v.mu.Unlock()
-			jsonOut(w, map[string]any{"session": id, "instance": session.Started, "receipts": []coworkIndexedReceipt{}, "next": after, "ended": ended, "truncated": truncated, "more": false})
+			jsonOut(w, map[string]any{"session": id, "instance": instance, "receipts": []coworkIndexedReceipt{}, "next": after, "ended": ended, "truncated": truncated, "more": false})
 			return
 		}
 		start := after
@@ -299,22 +344,39 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			start = len(all)
 		}
 		end, size := start, 512
-		for end < len(all) && end-start < 1000 {
-			b, err := ascii(all[end])
+		result := make([]coworkIndexedReceipt, 0)
+		dir := filepath.Join(v.root, "sessions", coworkSessionKey(id), "r")
+		for end < len(all) && len(result) < 1000 {
+			b, err := coworkReadRegular(filepath.Join(dir, all[end]), 8192)
+			var receipt coworkReceipt
+			if err != nil || json.Unmarshal(b, &receipt) != nil || receipt.V != 1 {
+				v.mu.Unlock()
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			indexed := coworkIndexedReceipt{coworkReceipt: receipt, N: end + 1}
+			b, err = ascii(indexed)
 			if err != nil || size+len(b)+1 > 1536*1024 {
 				break
 			}
 			size += len(b) + 1
+			result = append(result, indexed)
 			end++
 		}
-		result := append([]coworkIndexedReceipt{}, all[start:end]...)
+		current, exists := v.loadSession(id)
+		if !exists || current.Started != session.Started {
+			v.forgetCache(id)
+			v.mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		more := end < len(all)
 		next := after
 		if end > start {
-			next = all[end-1].N
+			next = end
 		}
 		v.mu.Unlock()
-		jsonOut(w, map[string]any{"session": id, "instance": session.Started, "receipts": result, "next": next, "ended": ended, "truncated": truncated, "more": more})
+		jsonOut(w, map[string]any{"session": id, "instance": instance, "receipts": result, "next": next, "ended": ended, "truncated": truncated, "more": more})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

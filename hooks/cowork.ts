@@ -13,7 +13,8 @@ export type CoworkReceipt = {
   agent?: boolean
   files?: { p: string; k: 'read' | 'write' }[]
   seen?: string[]
-  mcp?: { server: string; tool: string; source?: string }
+  mcp?: { server: string; tool: string }
+  part?: true
 }
 
 const object = (v: unknown): v is Record<string, unknown> =>
@@ -38,7 +39,8 @@ export const parseCoworkReceipt = (
     (value.n as number) < 1 ||
     !Number.isSafeInteger(value.at) ||
     (value.at as number) < 0 ||
-    (value.ev !== 'tool' && value.ev !== 'start' && value.ev !== 'end')
+    (value.ev !== 'tool' && value.ev !== 'start' && value.ev !== 'end') ||
+    (value.part !== undefined && typeof value.part !== 'boolean')
   )
     return undefined
   const base: CoworkReceipt = {
@@ -47,6 +49,7 @@ export const parseCoworkReceipt = (
     at: value.at as number,
     ev: value.ev,
   }
+  if (value.part === true) base.part = true
   if (value.ev !== 'tool') return base
   if (
     !text(value.tool, 128) ||
@@ -83,17 +86,11 @@ export const parseCoworkReceipt = (
   }
   if (value.mcp !== undefined) {
     const m = value.mcp
-    if (
-      !object(m) ||
-      !text(m.server, 128) ||
-      !text(m.tool, 128) ||
-      (m.source !== undefined && !text(m.source, 128))
-    )
+    if (!object(m) || !text(m.server, 128) || !text(m.tool, 128))
       return undefined
     base.mcp = {
       server: m.server,
       tool: m.tool,
-      ...(typeof m.source === 'string' ? { source: m.source } : {}),
     }
   }
   return base
@@ -175,7 +172,7 @@ export const projectCowork = (
 } => {
   const ordered = [...receipts].sort((a, b) => a.at - b.at || a.n - b.n)
   const identities = new Set<string>()
-  let partialInventory = false
+  let partialInventory = ordered.some((r) => r.part === true)
   for (const r of ordered) {
     if (r.ev !== 'tool' || !r.ok) continue
     for (const path of [

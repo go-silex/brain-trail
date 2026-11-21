@@ -26,7 +26,6 @@ type coworkFile struct {
 type coworkMCP struct {
 	Server string `json:"server"`
 	Tool   string `json:"tool"`
-	Source string `json:"source,omitempty"`
 }
 type coworkReceipt struct {
 	V     int          `json:"v"`
@@ -37,6 +36,7 @@ type coworkReceipt struct {
 	Agent bool         `json:"agent"`
 	Files []coworkFile `json:"files,omitempty"`
 	Seen  []string     `json:"seen,omitempty"`
+	Part  bool         `json:"part,omitempty"`
 	MCP   *coworkMCP   `json:"mcp,omitempty"`
 }
 type coworkPayload struct {
@@ -49,8 +49,7 @@ type coworkPayload struct {
 	RawInput    json.RawMessage `json:"tool_input"`
 	RawResponse json.RawMessage `json:"tool_response"`
 	MCPServer   struct {
-		Name   string `json:"name"`
-		Source string `json:"source"`
+		Name string `json:"name"`
 	} `json:"mcp_server"`
 }
 
@@ -196,15 +195,15 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 					tool = rest
 				}
 			}
-			if !coworkPrintable(server) || !coworkPrintable(tool) || !coworkPrintable(p.MCPServer.Source) {
+			if !coworkPrintable(server) || !coworkPrintable(tool) {
 				return r, "", false
 			}
-			r.MCP = &coworkMCP{Server: server, Tool: tool, Source: p.MCPServer.Source}
+			r.MCP = &coworkMCP{Server: server, Tool: tool}
 		}
 		if r.Ok {
 			budget := 8192 - 256 - coworkJSONStringSize(r.Tool)
 			if r.MCP != nil {
-				budget -= coworkJSONStringSize(r.MCP.Server) + coworkJSONStringSize(r.MCP.Tool) + coworkJSONStringSize(r.MCP.Source)
+				budget -= coworkJSONStringSize(r.MCP.Server) + coworkJSONStringSize(r.MCP.Tool)
 			}
 			var input map[string]json.RawMessage
 			switch p.ToolName {
@@ -255,15 +254,13 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 						continue
 					}
 					size := coworkJSONStringSize(f) + 1
-					if size > budget {
+					if len(r.Seen) == 200 || size > budget {
+						r.Part = true
 						continue
 					}
 					budget -= size
 					seen[f] = true
 					r.Seen = append(r.Seen, f)
-					if len(r.Seen) == 200 {
-						break
-					}
 				}
 			}
 		}

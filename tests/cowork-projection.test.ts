@@ -40,6 +40,21 @@ test('validates and allowlists untrusted receipt fields', async () => {
   )
 })
 
+test('drops connector source and validates partial receipt coverage', async () => {
+  const raw = {
+    ...receipt(1, 42, 'mcp__drive__read'),
+    mcp: { server: 'drive', tool: 'read', source: { private: 'ignored' } },
+  }
+  const parsed = parseCoworkReceipt(raw)
+  expect(parsed?.mcp).toEqual({ server: 'drive', tool: 'read' })
+  expect(parseCoworkReceipt({ ...raw, part: 'true' })).toBe(undefined)
+  expect(parseCoworkReceipt({ ...raw, part: false })).toEqual(parsed)
+  const partial = parseCoworkReceipt({ ...raw, part: true })
+  if (!parsed || !partial) throw new Error('Expected valid receipts')
+  expect(projectCowork([parsed]).partialInventory).toBe(false)
+  expect(projectCowork([partial]).partialInventory).toBe(true)
+})
+
 test('orders receipts and projects observed paths relative to their common directory', async () => {
   const result = projectCowork([
     receipt(3, 20, 'Grep', {

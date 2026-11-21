@@ -19,7 +19,6 @@ type coworkSession struct {
 	V       int    `json:"v"`
 	ID      string `json:"id"`
 	Started int64  `json:"started"`
-	Task    string `json:"task"`
 }
 
 func strconvInt(n int64) string { return strconv.FormatInt(n, 10) }
@@ -179,7 +178,7 @@ func writeCoworkReceiptWaiting(root, id, task, key string, data []byte, event st
 		metadata := filepath.Join(dir, "session.json")
 		raw, err := coworkReadRegular(metadata, 8192)
 		if _, statErr := os.Lstat(metadata); os.IsNotExist(statErr) {
-			raw, _ = json.Marshal(coworkSession{V: 1, ID: id, Started: now.UnixMilli(), Task: task})
+			raw, _ = json.Marshal(coworkSession{V: 1, ID: id, Started: now.UnixMilli()})
 			if err = coworkPublish(metadata, raw); err != nil {
 				return err
 			}
@@ -256,18 +255,54 @@ func pruneCowork(sessions, current string, now time.Time) {
 		return
 	}
 	defer unlockPass()
+	cursorPath := filepath.Join(sessions, ".prune-cursor")
+	cursor, _ := coworkReadRegular(cursorPath, 1024)
+	after := string(cursor)
+	less := func(a, b string) bool {
+		if (a > after) != (b > after) {
+			return a > after
+		}
+		return a < b
+	}
 	f, err := os.Open(sessions)
 	if err != nil {
 		return
 	}
-	names, err := f.Readdirnames(-1)
-	f.Close()
-	if err != nil || len(names) == 0 {
-		return
+	defer f.Close()
+	// The flat on-disk layout has no portable durable directory cookie. Scan
+	// it linearly, but retain only the next 64 entries in cursor order.
+	names := make([]string, 0, 64)
+	for {
+		batch, readErr := f.Readdirnames(256)
+		for _, name := range batch {
+			tomb := strings.HasPrefix(name, ".prune-") && name != ".prune-lock" && name != ".prune-cursor"
+			if !tomb {
+				if len(name) != 32 {
+					continue
+				}
+				if _, err := hex.DecodeString(name); err != nil {
+					continue
+				}
+			}
+			pos := sort.Search(len(names), func(i int) bool { return !less(names[i], name) })
+			if pos >= 64 {
+				continue
+			}
+			if len(names) < 64 {
+				names = append(names, "")
+			}
+			copy(names[pos+1:], names[pos:len(names)-1])
+			names[pos] = name
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return
+			}
+			break
+		}
 	}
-	candidates := names[:0]
 	for _, name := range names {
-		if strings.HasPrefix(name, ".prune-") && name != ".prune-lock" && name != ".prune-cursor" {
+		if strings.HasPrefix(name, ".prune-") {
 			dir := filepath.Join(sessions, name)
 			if coworkVerifyDir(dir) == nil {
 				unlock, err := coworkLock(filepath.Join(dir, ".lock"), false)
@@ -278,32 +313,6 @@ func pruneCowork(sessions, current string, now time.Time) {
 			}
 			continue
 		}
-		if len(name) == 32 {
-			if _, err := hex.DecodeString(name); err == nil {
-				candidates = append(candidates, name)
-			}
-		}
-	}
-	names = candidates
-	if len(names) == 0 {
-		return
-	}
-	sort.Strings(names)
-	cursorPath := filepath.Join(sessions, ".prune-cursor")
-	cursor, _ := coworkReadRegular(cursorPath, 1024)
-	start := sort.SearchStrings(names, string(cursor))
-	for start < len(names) && names[start] <= string(cursor) {
-		start++
-	}
-	if start == len(names) {
-		start = 0
-	}
-	count := len(names)
-	if count > 64 {
-		count = 64
-	}
-	for i := range count {
-		name := names[(start+i)%len(names)]
 		if name == current {
 			continue
 		}
@@ -335,9 +344,12 @@ func pruneCowork(sessions, current string, now time.Time) {
 			cleanup()
 		}
 	}
+	if len(names) == 0 {
+		return
+	}
 	if tmp, err := os.CreateTemp(sessions, ".tmp-cursor-"); err == nil {
 		path := tmp.Name()
-		_, writeErr := tmp.WriteString(names[(start+count-1)%len(names)])
+		_, writeErr := tmp.WriteString(names[len(names)-1])
 		closeErr := tmp.Close()
 		if writeErr == nil && closeErr == nil {
 			_ = os.Rename(path, cursorPath)

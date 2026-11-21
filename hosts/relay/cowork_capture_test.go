@@ -233,6 +233,88 @@ func TestCoworkRejectAndPrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCoworkCapturePrivacyAndPartialReceipts(t *testing.T) {
+	root := coworkTestStoreRoot(t)
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(config, "Claude", "local-agent-mode-sessions", "a", "b", "local_1", "outputs")
+	capture := func(id string, fields map[string]any) map[string]json.RawMessage {
+		t.Helper()
+		fields["cwd"] = cwd
+		fields["session_id"] = "interface"
+		fields["hook_event_name"] = "PostToolUse"
+		fields["tool_use_id"] = id
+		payload, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		captureCowork(bytes.NewReader(payload), root, time.Now())
+		key := sha256.Sum256([]byte("tool:" + id))
+		data, err := os.ReadFile(filepath.Join(root, "sessions", coworkSessionKey("interface"), "r", fmt.Sprintf("%x.json", key[:16])))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte("SOURCE_SECRET_CANARY")) || bytes.Contains(data, []byte(`"source"`)) {
+			t.Fatal("source leaked into receipt")
+		}
+		var receipt map[string]json.RawMessage
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	mcp := capture("mcp", map[string]any{
+		"tool_name":  "mcp__drive__search",
+		"mcp_server": map[string]any{"name": "drive", "source": "https://example.test/?token=SOURCE_SECRET_CANARY"},
+	})
+	var connector map[string]string
+	if err := json.Unmarshal(mcp["mcp"], &connector); err != nil || len(connector) != 2 || connector["server"] != "drive" || connector["tool"] != "search" {
+		t.Fatalf("unexpected connector: %v, %v", connector, err)
+	}
+	for _, tool := range []string{"Glob", "Grep"} {
+		for _, tc := range []struct {
+			name  string
+			names []string
+			part  bool
+			count int
+		}{
+			{name: "exact-cap", names: func() []string {
+				names := make([]string, 200)
+				for i := range names {
+					names[i] = fmt.Sprintf("f%d", i)
+				}
+				return names
+			}(), count: 200},
+			{name: "cap", names: func() []string {
+				names := make([]string, 201)
+				for i := range names {
+					names[i] = fmt.Sprintf("f%d", i)
+				}
+				return names
+			}(), part: true, count: 200},
+			{name: "budget", names: []string{strings.Repeat("a", 3000), strings.Repeat("b", 3000), strings.Repeat("c", 3000)}, part: true, count: 2},
+		} {
+			t.Run(tool+"/"+tc.name, func(t *testing.T) {
+				receipt := capture(tool+"-"+tc.name, map[string]any{
+					"tool_name":     tool,
+					"tool_input":    map[string]any{"path": filepath.VolumeName(cwd) + string(os.PathSeparator)},
+					"tool_response": map[string]any{"filenames": tc.names},
+				})
+				var seen []string
+				if err := json.Unmarshal(receipt["seen"], &seen); err != nil || len(seen) != tc.count {
+					t.Fatalf("seen count = %d, want %d: %v", len(seen), tc.count, err)
+				}
+				part, present := receipt["part"]
+				if tc.part && string(part) != "true" || !tc.part && present {
+					t.Fatalf("part = %s (present %t), want %t", part, present, tc.part)
+				}
+			})
+		}
+	}
+}
 func TestCoworkConcurrentDedupeCapPrune(t *testing.T) {
 	root := coworkTestStoreRoot(t)
 	now := time.Now()

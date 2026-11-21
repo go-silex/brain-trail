@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,6 +58,25 @@ func TestCoworkStoreIdentityResumeAndDuplicates(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "r", "forbidden.json")); !os.IsNotExist(err) {
 		t.Fatal("wrote to mismatched session")
+	}
+}
+
+func TestCoworkStoreLargeTaskRemainsReadable(t *testing.T) {
+	root := filepath.Join(coworkTestTempDir(t), "store")
+	now := time.Now()
+	task := "local_" + strings.Repeat("x", 16384)
+	for _, event := range []string{"start", "tool"} {
+		if err := writeCoworkReceipt(root, "session", task, event, []byte(`{"v":1}`), event, now); err != nil {
+			t.Fatalf("%s: %v", event, err)
+		}
+	}
+	viewer := coworkViewer{root: root}
+	if session, ok := viewer.loadSession("session"); !ok || session.ID != "session" {
+		t.Fatal("session metadata is not readable by viewer")
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sessions", coworkSessionKey("session"), "session.json"))
+	if err != nil || len(data) > 8192 || strings.Contains(string(data), "local_") {
+		t.Fatalf("unexpected session metadata: length=%d error=%v", len(data), err)
 	}
 }
 
@@ -164,6 +184,42 @@ func TestCoworkPruneProgressAndRecovery(t *testing.T) {
 	}
 	if _, err := os.Stat(tomb); !os.IsNotExist(err) {
 		t.Fatal("interrupted tombstone was not removed")
+	}
+}
+
+func TestCoworkPruneRotatesAcrossTombstoneBatches(t *testing.T) {
+	sessions := filepath.Join(coworkTestTempDir(t), "sessions")
+	if err := coworkPrivateMkdir(sessions); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := range 130 {
+		if err := coworkPrivateMkdir(filepath.Join(sessions, fmt.Sprintf(".prune-%03d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orphan := filepath.Join(sessions, coworkSessionKey("orphan"))
+	if err := coworkPrivateMkdir(orphan); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+	pruneCowork(sessions, "", now)
+	remaining, err := filepath.Glob(filepath.Join(sessions, ".prune-[0-9]*"))
+	if err != nil || len(remaining) != 66 {
+		t.Fatalf("first pass left %d tombstones, want 66: %v", len(remaining), err)
+	}
+	for range 3 {
+		pruneCowork(sessions, "", now)
+	}
+	remaining, err = filepath.Glob(filepath.Join(sessions, ".prune-[0-9]*"))
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("tombstones not recovered: %d, %v", len(remaining), err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan not pruned: %v", err)
 	}
 }
 
@@ -426,12 +482,18 @@ func TestCoworkPruneRetiresLockedDirectory(t *testing.T) {
 		unlock()
 		t.Fatal("live session name still exists")
 	}
-	entries, err := os.ReadDir(sessions)
-	if err != nil || len(entries) != 1 {
+	entries, err := filepath.Glob(filepath.Join(sessions, ".prune-*"))
+	var tomb string
+	for _, entry := range entries {
+		if filepath.Base(entry) != ".prune-lock" {
+			tomb = entry
+			break
+		}
+	}
+	if err != nil || tomb == "" {
 		unlock()
 		t.Fatal("missing tombstone", err)
 	}
-	tomb := filepath.Join(sessions, entries[0].Name())
 	pruneCowork(sessions, "", time.Now())
 	if _, err := os.Stat(tomb); err != nil {
 		unlock()
@@ -517,9 +579,6 @@ func TestCoworkAliasTrustBeforeCanonicalization(t *testing.T) {
 }
 
 func TestCoworkWaitingWriterDoesNotCreateReceiptsInRecreatedSession(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix locked directory retirement")
-	}
 	root := filepath.Join(coworkTestTempDir(t), "store")
 	if err := coworkPrivateMkdir(root); err != nil {
 		t.Fatal(err)
