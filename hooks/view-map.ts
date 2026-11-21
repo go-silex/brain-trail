@@ -23,7 +23,12 @@ export const renderMap = <N, Press>(
 ): { node: N; drawn: DrawnMap | undefined; header?: N; footer?: N } => {
   const S = strings(s.lang, s.assistant)
   const { h, Box, Text, Button } = R
-  if (b.kind === 'failed')
+  if (b.kind === 'failed') {
+    if (s.cowork)
+      return {
+        node: h(Text, { dimColor: true, wrap: 'wrap' }, b.message),
+        drawn: undefined,
+      }
     return {
       node: h(
         Box,
@@ -37,6 +42,7 @@ export const renderMap = <N, Press>(
       ),
       drawn: undefined,
     }
+  }
   if (b.kind === 'loading')
     return {
       node: h(Text, { dimColor: true }, S.packing(b.seconds)),

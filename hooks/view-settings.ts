@@ -65,78 +65,81 @@ export const renderSettings = <N, Press>(
   return R.h(
     R.Box,
     { flexDirection: 'column', gap: 'sm' },
-    card(
-      R,
-      s,
-      'open-with',
-      S.openWith,
-      R.h(
-        R.Box,
-        { flexDirection: 'column', gap: 'sm' },
+    !s.cowork &&
+      card(
+        R,
+        s,
+        'open-with',
+        S.openWith,
         R.h(
-          R.Text,
-          { size: 'caption', dimColor: true, wrap: 'wrap' },
-          S.openWithWhy,
-        ),
-        b.appsUnavailable &&
+          R.Box,
+          { flexDirection: 'column', gap: 'sm' },
           R.h(
             R.Text,
             { size: 'caption', dimColor: true, wrap: 'wrap' },
-            S.appsUnavailable,
+            S.openWithWhy,
           ),
-        appRow('openMd', S.openMd),
-        appRow('openOther', S.openOther),
-      ),
-    ),
-    card(
-      R,
-      s,
-      'plan',
-      S.planTitle,
-      R.h(
-        R.Box,
-        { flexDirection: 'column', gap: 'xs' },
-        R.h(
-          R.Text,
-          { size: 'caption', dimColor: true, wrap: 'wrap' },
-          S.planWhy,
+          b.appsUnavailable &&
+            R.h(
+              R.Text,
+              { size: 'caption', dimColor: true, wrap: 'wrap' },
+              S.appsUnavailable,
+            ),
+          appRow('openMd', S.openMd),
+          appRow('openOther', S.openOther),
         ),
-        R.h(R.Input, {
-          key: 'plan-usd',
-          placeholder: S.planPlaceholder,
-          value: set.planUsd !== undefined ? String(set.planUsd) : '',
-          submitLabel: S.save,
-          onSubmit: (v: string) => {
-            const n = Number(v.replace(',', '.').replace(/[^0-9.]/g, ''))
-            return save({ planUsd: n > 0 ? n : null })
-          },
-        }),
       ),
-    ),
-    card(
-      R,
-      s,
-      'trail',
-      S.trailCard,
-      R.h(
-        R.Box,
-        { flexDirection: 'column', gap: 'xs' },
-        R.h(
-          R.Text,
-          { size: 'caption', dimColor: true, wrap: 'wrap' },
-          S.clearWhy,
-        ),
+    !s.cowork &&
+      card(
+        R,
+        s,
+        'plan',
+        S.planTitle,
         R.h(
           R.Box,
-          { flexDirection: 'row' },
-          R.h(R.Button, {
-            key: 'clear',
-            label: S.clear,
-            onPress: () => act.clearTrail(),
+          { flexDirection: 'column', gap: 'xs' },
+          R.h(
+            R.Text,
+            { size: 'caption', dimColor: true, wrap: 'wrap' },
+            S.planWhy,
+          ),
+          R.h(R.Input, {
+            key: 'plan-usd',
+            placeholder: S.planPlaceholder,
+            value: set.planUsd !== undefined ? String(set.planUsd) : '',
+            submitLabel: S.save,
+            onSubmit: (v: string) => {
+              const n = Number(v.replace(',', '.').replace(/[^0-9.]/g, ''))
+              return save({ planUsd: n > 0 ? n : null })
+            },
           }),
         ),
       ),
-    ),
+    !s.cowork &&
+      card(
+        R,
+        s,
+        'trail',
+        S.trailCard,
+        R.h(
+          R.Box,
+          { flexDirection: 'column', gap: 'xs' },
+          R.h(
+            R.Text,
+            { size: 'caption', dimColor: true, wrap: 'wrap' },
+            S.clearWhy,
+          ),
+          R.h(
+            R.Box,
+            { flexDirection: 'row' },
+            R.h(R.Button, {
+              key: 'clear',
+              label: S.clear,
+              onPress: () => act.clearTrail(),
+            }),
+          ),
+        ),
+      ),
     card(
       R,
       s,

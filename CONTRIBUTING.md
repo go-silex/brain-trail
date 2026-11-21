@@ -90,13 +90,16 @@ These checks do not capture Claude Desktop's own pixels on Linux. Real Desktop a
 | `hooks/register.tsx`, `hooks/app-binding.ts`, `hosts/native/` | Claude capture, lifecycle, native controls and verifier-bound binding; native command/file authority. |
 | `hooks/map.ts`, `hosts/browser/`, `hosts/mcp-app/` | One page/controller and SVG 2D/WebGL 3D renderer; browser SSE/POST and App-only MCP adapters. |
 | `hosts/omp/` | OMP capture, lifecycle, persistence and native command authority. |
-| `hosts/relay/` | Packaged Go browser/private relay and stdio MCP server; approved grants, leases and requests; shared native client. |
+| `hosts/relay/` | Packaged Go browser/private relay and stdio MCP server; approved grants, leases and requests; shared native client; Cowork `cowork-capture` receipts and the read-only `cowork-view` server. |
+| `hooks/cowork.ts`, `hosts/browser/cowork-transport.ts` | Cowork receipt validation and projection into trail events; page-local transport that owns replay and display settings for a Cowork view. |
 
 The host owns replay and shared preview, zoomed and play state. Tabs and WebGL camera remain surface-local. Hosts retain separate durable stores.
 
 Workspace discovery removes Git-reported repository-local environment variables before listing files in the workspace, so inherited `GIT_DIR` or `GIT_INDEX_FILE` cannot redirect that listing to another repository. Native and OMP use the same explicit inventory safety arguments: fsmonitor and pager off, hooks pointed at the platform null device, and the `ext` protocol disabled. On Windows, native inventory uses validated absolute `SystemRoot\System32\cmd.exe` with `/d /v:off`, a quote-free body of validated names and static arguments, and `NoDefaultCurrentDirectoryInExePath` for the child. After stripping local variables both hosts set `GIT_NO_LAZY_FETCH=1`, which suppresses lazy fetching only on Git 2.44 or newer. Ordinary global config, excludes, `safe.directory` and credentials remain available.
 
 When Git inventory fails or returns no files, native workspace discovery falls back to filesystem enumeration. On Windows this uses the absolute `System32\WindowsPowerShell\v1.0\powershell.exe` under the validated `SystemRoot`; a missing or invalid root raises an inventory error before launching a shell.
+
+Local Claude Cowork support is in preview and not yet registered in `hooks/hooks.json`. `brain-trail-relay cowork-capture` reads one hook payload on stdin and records a content-free receipt only when the hook's working directory is a Desktop local-agent session folder (`…/local-agent-mode-sessions/…/local_*`); it always exits 0 silently. Receipts keep tool names, success, sub-agent flag, absolute file targets, Glob/Grep result filenames and MCP server/tool names, never prompts, results, commands, queries, URLs or errors. They live in `$XDG_STATE_HOME` (`~/.local/state`), `~/Library/Application Support` or `%LOCALAPPDATA%` under `brain-trail/cowork/v1/`, one O_EXCL file per tool call, at most 5,000 per task, and idle tasks are pruned after seven days. `brain-trail-relay cowork-view ASSETS [SESSION]` serves them read-only to the browser dashboard (`?host=cowork`); the page projects them and keeps Cowork-specific capabilities: no context meter, Coach, file preview or open, and no missing-link judgement because note links are not read.
 
 ChatGPT is deferred; an OpenAI API integration is not a substitute for a ChatGPT host adapter.
 

@@ -32,6 +32,13 @@ import type {
 import { DomRenderer, runtime } from './dom'
 import type { DashboardTransport, PageBootstrap } from './transport'
 
+// Cowork never reads the notes, so their links are unknown: treat every pair as linked rather than call a jump unlinked.
+const UNMEASURED_LINKS: ReadonlySet<string> = new (class extends Set<string> {
+  override has() {
+    return true
+  }
+})()
+
 export async function toggleDocumentFullscreen() {
   if (document.fullscreenElement) await document.exitFullscreen()
   else await document.documentElement.requestFullscreen()
@@ -356,7 +363,11 @@ export function startPage(
     container.dataset.tab = state.tab
     const f = facts,
       connected = new Map(f.connected.map(([k, v]) => [k, new Set(v)])),
-      fold = { index, connected, linked: new Set(f.linked) }
+      fold = {
+        index,
+        connected,
+        linked: f.ownerHost === 'cowork' ? UNMEASURED_LINKS : new Set(f.linked),
+      }
     let body: TabSnapshot
     switch (state.tab) {
       case 'context':
@@ -453,6 +464,7 @@ export function startPage(
       ),
       lang: f.lang,
       assistant: f.assistant,
+      cowork: f.ownerHost === 'cowork',
       costInfoCommand: f.ownerHost === 'code' ? '/cost' : '/session info',
       palette:
         document.documentElement.dataset.theme === 'light' ||
@@ -491,7 +503,8 @@ export function startPage(
     if (
       event.kind === 'snapshot' &&
       event.facts?.ownerHost !== 'code' &&
-      event.facts?.ownerHost !== 'omp'
+      event.facts?.ownerHost !== 'omp' &&
+      event.facts?.ownerHost !== 'cowork'
     ) {
       toast('Invalid dashboard event')
       return

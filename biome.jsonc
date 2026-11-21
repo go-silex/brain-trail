@@ -120,6 +120,7 @@
         "types/apps.ts",
         "hooks/app-binding.ts",
         "hooks/acts.ts",
+        "hooks/cowork.ts",
         "hooks/fold.ts",
         "hooks/readout.ts",
         "hooks/pointer.ts",

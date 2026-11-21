@@ -33,6 +33,7 @@ Test only on systems and data you own or are authorized to assess. Do not access
 - Relay cleanup on POSIX is best effort. On Windows or after an ungraceful kill, a private dead socket or expired bootstrap file can remain; there is no unsafe scavenger. Browser-port takeover after relay death remains a residual risk. The design does not defend against arbitrary malicious code running as the same OS account, administrator or root.
 - Claude's durable store remains separate from OMP's active-profile `brain-trail/trail.sqlite`, which holds settings, costs and captured tool-call data. Captures may contain session content; workspace paths and layouts are cached too. Clearing the visible trail does not erase stored captures.
 - OMP Coach reads the selected `AGENTS.md` or `CLAUDE.md` in the actual session working directory and runs a quiet turn with tools disabled. Apply fills the OMP editor; it does not send a prompt or write the file.
+- The preview Cowork viewer (`cowork-view`) is a separate process with its own `127.0.0.1` listener, one-use 120-second launch file and session token, and the same Host/Origin checks. It serves only the dashboard assets and two read-only JSON endpoints over the local Cowork receipt store; it accepts no POST, command, file preview or external open, and exits after 30 minutes without requests. Its receipts exclude prompts, tool results, commands and errors but do record local file paths and connector names, in owner-only directories. Possession of the session URL reveals every listed task's receipts.
 
 ## MCP App boundaries
 

@@ -938,12 +938,29 @@ func serve(assets string) error {
 }
 func main() {
 	var e error
+	if len(os.Args) >= 2 && os.Args[1] == "cowork-capture" {
+		root, err := coworkStoreRoot()
+		if err == nil {
+			captureCowork(os.Stdin, root, time.Now())
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "serve" {
 		e = serve(os.Args[2])
 	} else if len(os.Args) == 3 && os.Args[1] == "mcp" {
 		e = serveMCP(os.Args[2])
+	} else if (len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "cowork-view" {
+		var root string
+		root, e = coworkStoreRoot()
+		if e == nil {
+			session := ""
+			if len(os.Args) == 4 {
+				session = os.Args[3]
+			}
+			e = coworkView(os.Args[2], session, root)
+		}
 	} else {
-		e = errors.New("usage: brain-trail-relay serve|mcp ASSETS")
+		e = errors.New("usage: brain-trail-relay serve|mcp ASSETS | cowork-view ASSETS [SESSION] | cowork-capture")
 	}
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)
