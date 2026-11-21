@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -47,6 +48,20 @@ func coworkPruneLocked(dir string) func() {
 	return func() { _ = os.RemoveAll(tombstone) }
 }
 
+// FILE_ID_INFO consists of a 64-bit volume serial number and a 128-bit file ID.
+type coworkDirectoryIdentity struct {
+	volume uint64
+	fileID [16]byte
+}
+
+func coworkDirectoryLockOffset(identity coworkDirectoryIdentity) uint64 {
+	var data [24]byte
+	binary.LittleEndian.PutUint64(data[:8], identity.volume)
+	copy(data[8:], identity.fileID[:])
+	key := sha256.Sum256(data[:])
+	return binary.LittleEndian.Uint64(key[:8])&0x7fffffffffffffff | 1
+}
+
 func coworkLock(path string, wait bool) (func(), error) {
 	return coworkLockWaiting(path, wait, nil)
 }
@@ -56,17 +71,16 @@ func coworkLock(path string, wait bool) (func(), error) {
 func coworkLockWaiting(path string, wait bool, waiting func()) (func(), error) {
 	var pinned *os.File
 	var info os.FileInfo
+	var identity coworkDirectoryIdentity
 	var err error
 	var overlapped windows.Overlapped
 	if filepath.Base(path) == ".lock" {
 		dir := filepath.Dir(path)
-		var identity [12]byte
-		pinned, info, identity, err = coworkOpenLockDirectory(dir)
+		pinned, identity, err = coworkOpenLockDirectory(dir)
 		if err != nil {
 			return nil, err
 		}
-		key := sha256.Sum256(identity[:])
-		offset := binary.LittleEndian.Uint64(key[:8])&0x7fffffffffffffff | 1
+		offset := coworkDirectoryLockOffset(identity)
 		overlapped.Offset = uint32(offset)
 		overlapped.OffsetHigh = uint32(offset >> 32)
 		path = dir
@@ -104,8 +118,20 @@ func coworkLockWaiting(path string, wait bool, waiting func()) (func(), error) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	current, err := os.Lstat(path)
-	if err != nil || !os.SameFile(info, current) {
+	replaced := false
+	if pinned != nil {
+		current, currentIdentity, openErr := coworkOpenLockDirectory(path)
+		if openErr != nil {
+			replaced = true
+		} else {
+			replaced = identity != currentIdentity
+			current.Close()
+		}
+	} else {
+		current, statErr := os.Lstat(path)
+		replaced = statErr != nil || !os.SameFile(info, current)
+	}
+	if replaced {
 		windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &overlapped)
 		f.Close()
 		if pinned != nil {
@@ -122,35 +148,31 @@ func coworkLockWaiting(path string, wait bool, waiting func()) (func(), error) {
 	}, nil
 }
 
-func coworkOpenLockDirectory(path string) (*os.File, os.FileInfo, [12]byte, error) {
-	var identity [12]byte
+func coworkOpenLockDirectory(path string) (*os.File, coworkDirectoryIdentity, error) {
+	var identity coworkDirectoryIdentity
 	wide, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return nil, nil, identity, err
+		return nil, identity, err
 	}
 	handle, err := windows.CreateFile(wide, windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		return nil, nil, identity, err
+		return nil, identity, err
 	}
 	var attrs windows.ByHandleFileInformation
 	if err = windows.GetFileInformationByHandle(handle, &attrs); err != nil ||
 		attrs.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 ||
 		attrs.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		windows.CloseHandle(handle)
-		return nil, nil, identity, errors.New("invalid lock directory")
+		return nil, identity, errors.New("invalid lock directory")
 	}
-	binary.LittleEndian.PutUint32(identity[0:4], attrs.VolumeSerialNumber)
-	binary.LittleEndian.PutUint32(identity[4:8], attrs.FileIndexHigh)
-	binary.LittleEndian.PutUint32(identity[8:12], attrs.FileIndexLow)
-	f := os.NewFile(uintptr(handle), path)
-	info, err := f.Stat()
-	if err != nil || !info.IsDir() {
-		f.Close()
-		return nil, nil, identity, errors.New("invalid lock directory")
+	if err = windows.GetFileInformationByHandleEx(handle, windows.FileIdInfo,
+		(*byte)(unsafe.Pointer(&identity)), uint32(unsafe.Sizeof(identity))); err != nil {
+		windows.CloseHandle(handle)
+		return nil, identity, err
 	}
-	return f, info, identity, nil
+	return os.NewFile(uintptr(handle), path), identity, nil
 }
 
 func coworkOpenLockFile(path string) (*os.File, os.FileInfo, error) {

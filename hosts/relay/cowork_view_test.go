@@ -493,13 +493,91 @@ func TestCoworkViewerLRUInstancesAndOnDemandBodies(t *testing.T) {
 		id := fmt.Sprintf("other%d", i)
 		write(id, "session.json", fmt.Sprintf(`{"v":1,"id":%q,"started":1}`, id))
 		write(id, "r/one.json", `{"v":1,"ev":"start"}`)
+		if i == coworkViewCacheEntries-1 {
+			v.cache["s"].lastUsed = time.Now().Add(-coworkViewIdle - time.Second)
+		}
 		get(id, 0)
 	}
+	v.cache["other0"].lastUsed = time.Now().Add(-coworkViewIdle - time.Second)
 	rebuilt := get("s", 0)
 	if rebuilt.Instance == first.Instance || len(rebuilt.Receipts) != 2 || rebuilt.Receipts[0].Ev != "end" || rebuilt.Receipts[0].N != 1 || rebuilt.Receipts[1].N != 2 {
 		t.Fatalf("evicted task did not get a fresh instance: %+v", rebuilt)
 	}
 	if again := get("s", 1); again.Instance != rebuilt.Instance || len(again.Receipts) != 1 || again.Receipts[0].N != 2 {
 		t.Fatalf("rebuilt cursor not stable: %+v", again)
+	}
+}
+
+func TestCoworkViewerProtectsActiveFullIndexes(t *testing.T) {
+	root := t.TempDir()
+	v := &coworkViewer{relay: &relay{host: "127.0.0.1:1234", token: "t"}, root: root}
+	for i := range 5 {
+		id := fmt.Sprintf("task%d", i)
+		dir := filepath.Join(root, "sessions", coworkSessionKey(id))
+		if err := os.MkdirAll(filepath.Join(dir, "r"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte(fmt.Sprintf(`{"v":1,"id":%q,"started":1}`, id)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for n := range 5000 {
+			if err := os.WriteFile(filepath.Join(dir, "r", fmt.Sprintf("%04d.json", n)), []byte(`{"v":1,"at":1,"ev":"start"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	type page struct {
+		Instance int64                  `json:"instance"`
+		Next     int                    `json:"next"`
+		More     bool                   `json:"more"`
+		Receipts []coworkIndexedReceipt `json:"receipts"`
+	}
+	get := func(id string, after int) (int, page) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		v.serveHTTP(w, httptest.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:1234/s/t/cowork/receipts?session=%s&after=%d", id, after), nil))
+		var p page
+		if w.Code == 200 {
+			if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return w.Code, p
+	}
+	var instances [4]int64
+	var offsets [4]int
+	for round := range 5 {
+		for i := range 4 {
+			status, p := get(fmt.Sprintf("task%d", i), offsets[i])
+			if status != 200 || len(p.Receipts) != 1000 || p.Next != offsets[i]+1000 || p.More != (round < 4) {
+				t.Fatalf("task %d round %d: status %d page %+v", i, round, status, p)
+			}
+			if round == 0 {
+				instances[i] = p.Instance
+			}
+			if p.Instance == 0 || p.Instance != instances[i] {
+				t.Fatalf("task %d instance changed: %d to %d", i, instances[i], p.Instance)
+			}
+			offsets[i] = p.Next
+		}
+		if status, _ := get("task4", 0); status != 503 {
+			t.Fatalf("active cache admitted fifth task: status %d", status)
+		}
+	}
+	if len(v.cache) != 4 || v.cacheBytes > coworkViewCacheBytes {
+		t.Fatalf("cache limits: %d entries, %d bytes", len(v.cache), v.cacheBytes)
+	}
+	v.cache["task0"].lastUsed = time.Now().Add(-coworkViewIdle - time.Second)
+	if status, p := get("task4", 0); status != 200 || p.Instance == 0 {
+		t.Fatalf("idle cache entry not evicted: status %d page %+v", status, p)
+	}
+	if v.cache["task0"] != nil {
+		t.Fatal("idle LRU entry retained")
+	}
+	for i := 1; i < 4; i++ {
+		status, p := get(fmt.Sprintf("task%d", i), offsets[i])
+		if status != 200 || p.Instance != instances[i] || p.More || p.Next != 5000 {
+			t.Fatalf("hot task %d changed after eviction: status %d page %+v", i, status, p)
+		}
 	}
 }

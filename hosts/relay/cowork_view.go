@@ -33,8 +33,10 @@ type coworkViewSession struct {
 	Calls     int    `json:"calls"`
 }
 
-const coworkViewCacheEntries = 16
-const coworkViewCacheBytes = 2 << 20
+const coworkViewCacheEntries = 4
+const coworkViewTaskBytes = 2 << 20
+const coworkViewCacheBytes = coworkViewCacheEntries * coworkViewTaskBytes
+const coworkViewIdle = 30 * time.Second
 
 type coworkViewCache struct {
 	started  int64
@@ -42,6 +44,7 @@ type coworkViewCache struct {
 	indexed  map[string]bool
 	names    []string
 	bytes    int
+	lastUsed time.Time
 	dirInfo  os.FileInfo
 	element  *list.Element
 }
@@ -106,24 +109,28 @@ func (v *coworkViewer) discover(id string, started int64) ([]string, error) {
 		v.forgetCache(id)
 		cache = nil
 	}
+	now := time.Now()
 	if cache == nil {
-		now := time.Now().UnixMilli()
-		if now <= v.nextInstance {
-			now = v.nextInstance + 1
+		if len(v.cache) >= coworkViewCacheEntries {
+			oldest := v.cache[v.lru.Back().Value.(string)]
+			if now.Sub(oldest.lastUsed) <= coworkViewIdle {
+				return nil, errors.New("receipt index cache is busy")
+			}
+			v.forgetCache(v.lru.Back().Value.(string))
 		}
-		v.nextInstance = now
-		cache = &coworkViewCache{started: started, instance: now, indexed: make(map[string]bool), bytes: len(id) + 128}
+		instance := now.UnixMilli()
+		if instance <= v.nextInstance {
+			instance = v.nextInstance + 1
+		}
+		v.nextInstance = instance
+		cache = &coworkViewCache{started: started, instance: instance, indexed: make(map[string]bool), bytes: len(id) + 128}
 		cache.element = v.lru.PushFront(id)
 		v.cache[id] = cache
 		v.cacheBytes += cache.bytes
 	} else {
 		v.lru.MoveToFront(cache.element)
 	}
-	defer func() {
-		for len(v.cache) > coworkViewCacheEntries || v.cacheBytes > coworkViewCacheBytes {
-			v.forgetCache(v.lru.Back().Value.(string))
-		}
-	}()
+	cache.lastUsed = now
 	scanStart := time.Now()
 	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id), "r")
 	info, err := os.Stat(dir)
@@ -152,8 +159,7 @@ func (v *coworkViewer) discover(id string, started int64) ([]string, error) {
 			continue
 		}
 		n := len(name) + 128
-		if cache.bytes+n > coworkViewCacheBytes {
-			v.forgetCache(id)
+		if cache.bytes+n > coworkViewTaskBytes {
 			return nil, errors.New("receipt index exceeds cache budget")
 		}
 		cache.indexed[name] = true
