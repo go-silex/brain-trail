@@ -784,7 +784,7 @@ test('recreated instances refetch from zero before comparing old cursor', async 
   }
 })
 
-test('fetch rejection window resets on HTTP response and closes after 60 seconds', async () => {
+test('only valid responses reset the deadline and delayed retries stop before fetch', async () => {
   const originalFetch = globalThis.fetch
   const originalSetTimeout = globalThis.setTimeout
   let now = 0
@@ -796,8 +796,10 @@ test('fetch rejection window resets on HTTP response and closes after 60 seconds
   let calls = 0
   globalThis.fetch = (async () => {
     calls++
-    if (calls === 3) return { ok: false, status: 404 } as Response
-    if (calls === 5)
+    if (calls === 2 || calls === 4 || calls === 5)
+      return { ok: false, status: 404 } as Response
+    if (calls === 6) return { ok: false, status: 500 } as Response
+    if (calls === 3)
       return {
         ok: true,
         json: async () => ({
@@ -833,20 +835,68 @@ test('fetch rejection window resets on HTTP response and closes after 60 seconds
   try {
     await settle()
     expect(status()).toBe('reconnecting')
-    await advance(55000)
-    expect(status()).toBe('reconnecting')
+    await advance(30000)
+    expect(status()).toBe('unavailable')
+    await advance(30000)
+    expect(status()).toBe(undefined)
+    await advance(50000)
+    expect(status()).toBe('unavailable')
     await advance(5000)
     expect(status()).toBe('unavailable')
     await advance(5000)
     expect(status()).toBe('reconnecting')
-    await advance(5000)
-    expect(status()).toBe(undefined)
-    await advance(5000)
-    expect(status()).toBe('reconnecting')
-    await advance(55000)
-    expect(status()).toBe('reconnecting')
-    await advance(5000)
+    expect(calls).toBe(6)
+    await advance(1)
     expect(status()).toBe('closed')
+    expect(calls).toBe(6)
+    expect(scheduled).toEqual([])
+  } finally {
+    dispose()
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('rejects a replacement instance with an inconsistent raw cursor', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  const scheduled: Array<() => void> = []
+  globalThis.setTimeout = ((fn: () => void) => {
+    scheduled.push(fn)
+    return 1
+  }) as typeof setTimeout
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    const page =
+      calls === 1
+        ? { instance: 1, receipts: [{ ...receipt, n: 8 }], next: 8 }
+        : { instance: 2, receipts: [{ ...receipt, n: 2 }], next: 3 }
+    return {
+      ok: true,
+      json: async () => ({
+        session: 'task',
+        ended: false,
+        truncated: false,
+        more: false,
+        ...page,
+      }),
+    } as Response
+  }) as typeof fetch
+  const closed: string[] = []
+  const events: ServerEvent[] = []
+  const dispose = coworkTransport('task').listen({
+    ready() {},
+    event: (event) => events.push(event),
+    closed: (reason) => closed.push(reason),
+  })
+  try {
+    await settle()
+    const before = events.length
+    scheduled.shift()?.()
+    await settle()
+    expect(closed).toEqual(['disconnected'])
+    expect(events.length).toBe(before)
     expect(scheduled).toEqual([])
   } finally {
     dispose()

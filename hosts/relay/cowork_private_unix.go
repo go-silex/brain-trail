@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -17,6 +18,65 @@ func coworkCreateTemp(dir string) (*os.File, error) {
 	return os.CreateTemp(dir, ".tmp-*")
 }
 
+// Check every alias, including aliases in link targets, before resolving it.
+func coworkVerifyAliases(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("invalid store directory")
+	}
+	pending := strings.Split(strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator)), string(filepath.Separator))
+	dir := string(filepath.Separator)
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			dir = filepath.Dir(dir)
+			continue
+		}
+		next := filepath.Join(dir, part)
+		info, err := os.Lstat(next)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			dir = next
+			continue
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || (st.Uid != 0 && st.Uid != uint32(os.Geteuid())) {
+			return fmt.Errorf("untrusted alias %s", next)
+		}
+		parent, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		parentStat, ok := parent.Sys().(*syscall.Stat_t)
+		if !ok || !parent.IsDir() || (parentStat.Uid != 0 && parentStat.Uid != uint32(os.Geteuid())) ||
+			(parent.Mode().Perm()&0022 != 0 && parent.Mode()&os.ModeSticky == 0) {
+			return fmt.Errorf("untrusted alias parent %s", dir)
+		}
+		links++
+		if links > 255 {
+			return errors.New("too many symlinks")
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return err
+		}
+		if filepath.IsAbs(target) {
+			dir = string(filepath.Separator)
+		}
+		pending = append(strings.Split(target, string(filepath.Separator)), pending...)
+	}
+	return nil
+}
+
 // Resolve only an existing prefix so a not-yet-created state directory keeps its
 // intended name while symlinked system or home ancestors are canonical.
 func coworkCanonicalPath(path string) (string, error) {
@@ -24,6 +84,9 @@ func coworkCanonicalPath(path string) (string, error) {
 		return "", errors.New("invalid store directory")
 	}
 	path = filepath.Clean(path)
+	if err := coworkVerifyAliases(path); err != nil {
+		return "", err
+	}
 	var missing []string
 	for {
 		resolved, err := filepath.EvalSymlinks(path)

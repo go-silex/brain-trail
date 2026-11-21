@@ -446,3 +446,114 @@ func TestCoworkPruneRetiresLockedDirectory(t *testing.T) {
 		t.Fatal("tombstone not cleaned")
 	}
 }
+
+func TestCoworkAliasTrustBeforeCanonicalization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink ownership and permissions")
+	}
+	base := coworkTestTempDir(t)
+	real := filepath.Join(base, "real")
+	unsafe := filepath.Join(base, "unsafe")
+	if err := os.Mkdir(real, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(unsafe, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafe, 0777); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(unsafe, "inner")
+	if err := os.Symlink(real, inner); err != nil {
+		t.Fatal(err)
+	}
+	outer := filepath.Join(base, "outer")
+	if err := os.Symlink(inner, outer); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(outer, "brain-trail", "cowork", "v1")
+	if err := writeCoworkReceipt(root, "id", "task", "key", []byte(`{}`), "tool", time.Now()); err == nil {
+		t.Fatal("accepted nested alias in non-sticky writable directory")
+	}
+	if runtime.GOOS != "darwin" {
+		t.Setenv("XDG_STATE_HOME", outer)
+		if _, err := coworkStoreRoot(); err == nil {
+			t.Fatal("canonicalized untrusted configured state alias")
+		}
+	}
+	if err := os.Chmod(unsafe, os.ModeSticky|0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCoworkReceipt(root, "id", "task", "key", []byte(`{}`), "tool", time.Now()); err != nil {
+		t.Fatalf("rejected trusted sticky alias: %v", err)
+	}
+	if runtime.GOOS != "darwin" {
+		if _, err := coworkStoreRoot(); err != nil {
+			t.Fatalf("rejected trusted configured state alias: %v", err)
+		}
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(inner, 1, -1); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeCoworkReceipt(root, "id", "task", "key", []byte(`{}`), "tool", time.Now()); err == nil {
+			t.Fatal("accepted foreign-owned alias")
+		}
+	}
+}
+
+func TestCoworkWaitingWriterDoesNotCreateReceiptsInRecreatedSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix locked directory retirement")
+	}
+	root := filepath.Join(coworkTestTempDir(t), "store")
+	if err := coworkPrivateMkdir(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := coworkPrivateMkdir(filepath.Join(root, "sessions")); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "sessions", coworkSessionKey("id"))
+	if err := coworkPrivateMkdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := coworkLock(filepath.Join(dir, ".lock"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- writeCoworkReceiptWaiting(root, "id", "task", "key", []byte(`{}`), "tool", time.Now(), func() { close(waiting) })
+	}()
+	select {
+	case <-waiting:
+	case err := <-result:
+		unlock()
+		t.Fatalf("writer did not wait: %v", err)
+	case <-time.After(time.Second):
+		unlock()
+		t.Fatal("writer did not reach lock")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "r")); !os.IsNotExist(err) {
+		unlock()
+		t.Fatal("writer created receipts before locking")
+	}
+	cleanup := coworkPruneLocked(dir)
+	if cleanup == nil {
+		unlock()
+		t.Fatal("could not retire session")
+	}
+	defer cleanup()
+	if err := coworkPrivateMkdir(dir); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	unlock()
+	if err := <-result; err == nil {
+		t.Fatal("writer acquired retired lock")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "r")); !os.IsNotExist(err) {
+		t.Fatal("writer modified recreated session")
+	}
+}

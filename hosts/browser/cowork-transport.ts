@@ -96,7 +96,7 @@ export function coworkTransport(
   let lang = savedLang()
   let truncated = false
   let pollStatus: 'reconnecting' | 'unavailable' | 'closed' | undefined
-  let fetchFailureSince: number | undefined
+  let lastValid = clock()
   const stopReplay = () => {
     clearInterval(replayTimer)
     replayTimer = undefined
@@ -171,6 +171,11 @@ export function coworkTransport(
   }
   const poll = async () => {
     if (!active) return
+    if (clock() - lastValid > 60000) {
+      pollStatus = 'closed'
+      publish()
+      return
+    }
     controller = new AbortController()
     let response: Response
     try {
@@ -183,19 +188,14 @@ export function coworkTransport(
       )
     } catch {
       if (!active) return
-      const now = clock()
-      fetchFailureSince ??= now
-      const remaining = 60000 - (now - fetchFailureSince)
-      const nextStatus = remaining <= 0 ? 'closed' : 'reconnecting'
-      if (pollStatus !== nextStatus) {
-        pollStatus = nextStatus
+      if (pollStatus !== 'reconnecting') {
+        pollStatus = 'reconnecting'
         publish()
       }
-      if (remaining > 0) pollTimer = setTimeout(poll, Math.min(5000, remaining))
+      pollTimer = setTimeout(poll, 5000)
       return
     }
     if (!active) return
-    fetchFailureSince = undefined
     if (!response.ok) {
       const nextStatus =
         response.status === 401 || response.status === 403
@@ -233,14 +233,32 @@ export function coworkTransport(
         !Array.isArray(data.receipts) ||
         !Number.isSafeInteger(data.instance) ||
         !Number.isSafeInteger(data.next) ||
+        (data.next as number) < 0 ||
         typeof data.ended !== 'boolean' ||
         typeof data.truncated !== 'boolean' ||
         typeof data.more !== 'boolean'
       )
         throw new Error('Invalid receipts')
+      const rawLast = data.receipts[data.receipts.length - 1]
+      if (
+        data.receipts.length > 0 &&
+        (typeof rawLast !== 'object' ||
+          rawLast === null ||
+          Array.isArray(rawLast) ||
+          (rawLast as Record<string, unknown>).n !== data.next)
+      )
+        throw new Error('Invalid receipts')
       const statusChanged = pollStatus !== undefined
       const changedInstance =
         instance !== undefined && instance !== data.instance
+      if (
+        !changedInstance &&
+        ((data.next as number) < cursor ||
+          (data.more && data.next === cursor) ||
+          (data.receipts.length === 0 && data.next !== cursor))
+      )
+        throw new Error('Invalid receipts')
+      lastValid = clock()
       if (changedInstance) {
         pollStatus = undefined
         instance = data.instance as number
@@ -256,20 +274,6 @@ export function coworkTransport(
         pollTimer = setTimeout(poll, 0)
         return
       }
-      if ((data.next as number) < cursor || (data.more && data.next === cursor))
-        throw new Error('Invalid receipts')
-      const rawLast = data.receipts[data.receipts.length - 1]
-      if (
-        data.next !==
-        (data.receipts.length === 0
-          ? cursor
-          : typeof rawLast === 'object' &&
-              rawLast !== null &&
-              !Array.isArray(rawLast)
-            ? (rawLast as Record<string, unknown>).n
-            : undefined)
-      )
-        throw new Error('Invalid receipts')
       pollStatus = undefined
       instance = data.instance as number
       const batch: CoworkReceipt[] = []
@@ -311,6 +315,7 @@ export function coworkTransport(
     listen(nextSink) {
       sink = nextSink
       active = true
+      lastValid = clock()
       nextSink.ready()
       void poll()
       return () => {

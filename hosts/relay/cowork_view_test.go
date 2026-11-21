@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -339,37 +338,34 @@ func TestCoworkViewerHandlerInstanceChangesDuringDiscovery(t *testing.T) {
 	r := httptest.NewRequest("GET", "http://127.0.0.1:1234/s/t/cowork/receipts?session=s&after=8", nil)
 	w := httptest.NewRecorder()
 	done := make(chan struct{})
-	v.mu.Lock()
+	loaded := make(chan struct{})
+	resume := make(chan struct{})
+	released := false
+	v.beforeDiscovery = func() {
+		close(loaded)
+		<-resume
+	}
 	go func() {
 		defer close(done)
 		v.serveHTTP(w, r)
 	}()
-	// Wait until the handler has loaded the old instance and is blocked on v.mu.
-	deadline := time.Now().Add(5 * time.Second)
-	blocked := false
-	for time.Now().Before(deadline) {
-		buf := make([]byte, 1<<20)
-		n := runtime.Stack(buf, true)
-		for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
-			if strings.Contains(stack, "[sync.Mutex.Lock]") && strings.Contains(stack, "(*coworkViewer).serveHTTP") {
-				blocked = true
-				break
-			}
+	defer func() {
+		if !released {
+			close(resume)
+			<-done
 		}
-		if blocked {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if !blocked {
-		v.mu.Unlock()
-		<-done
-		t.Fatal("handler did not reach discovery lock")
+	}()
+	select {
+	case <-loaded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not reach discovery")
 	}
 	write("session.json", `{"v":1,"id":"s","started":2}`)
 	write("r/a.json", `{"v":1,"ev":"end"}`)
-	v.mu.Unlock()
+	close(resume)
+	released = true
 	<-done
+	v.beforeDiscovery = nil
 	var page struct {
 		Instance int64             `json:"instance"`
 		Receipts []json.RawMessage `json:"receipts"`

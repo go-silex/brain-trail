@@ -40,12 +40,13 @@ type coworkViewCache struct {
 }
 
 type coworkViewer struct {
-	relay    *relay
-	root     string
-	session  string
-	mu       sync.Mutex
-	cache    map[string]*coworkViewCache
-	activity chan struct{}
+	relay           *relay
+	root            string
+	session         string
+	mu              sync.Mutex
+	cache           map[string]*coworkViewCache
+	activity        chan struct{}
+	beforeDiscovery func()
 }
 
 func coworkValidID(id string) bool {
@@ -277,6 +278,9 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+		}
+		if v.beforeDiscovery != nil {
+			v.beforeDiscovery()
 		}
 		v.mu.Lock()
 		session, all, ended, truncated, changed, status := v.discoverSession(id, session)

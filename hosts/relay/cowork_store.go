@@ -125,6 +125,10 @@ func coworkTouch(path string, now time.Time) error {
 }
 
 func writeCoworkReceipt(root, id, task, key string, data []byte, event string, now time.Time) error {
+	return writeCoworkReceiptWaiting(root, id, task, key, data, event, now, nil)
+}
+
+func writeCoworkReceiptWaiting(root, id, task, key string, data []byte, event string, now time.Time, waiting func()) error {
 	if !coworkID.MatchString(id) || len(data) > 8192 {
 		return errors.New("invalid session or receipt")
 	}
@@ -156,19 +160,22 @@ func writeCoworkReceipt(root, id, task, key string, data []byte, event string, n
 	if err := coworkPrivateMkdir(dir); err != nil {
 		return err
 	}
-	receipts := filepath.Join(dir, "r")
-	if err := coworkPrivateMkdir(receipts); err != nil {
+	if err := coworkVerifyStorePath(root, dir); err != nil {
 		return err
 	}
-	if err := coworkVerifyStorePath(root, receipts); err != nil {
-		return err
-	}
-	unlock, err := coworkLock(filepath.Join(dir, ".lock"), true)
+	unlock, err := coworkLockWaiting(filepath.Join(dir, ".lock"), true, waiting)
 	if err != nil {
 		return err
 	}
 	err = func() error {
 		defer unlock()
+		receipts := filepath.Join(dir, "r")
+		if err := coworkPrivateMkdir(receipts); err != nil {
+			return err
+		}
+		if err := coworkVerifyStorePath(root, receipts); err != nil {
+			return err
+		}
 		metadata := filepath.Join(dir, "session.json")
 		raw, err := coworkReadRegular(metadata, 8192)
 		if _, statErr := os.Lstat(metadata); os.IsNotExist(statErr) {
