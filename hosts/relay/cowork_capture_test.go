@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -136,13 +137,22 @@ func TestCoworkLenientInputAndControlPaths(t *testing.T) {
 	}
 }
 
+func coworkTestStoreRoot(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "store")
+}
+
 func TestCoworkCaptureResolvesRootAfterAdmission(t *testing.T) {
 	config, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cwd := filepath.Join(config, "Claude", "local-agent-mode-sessions", "acct", "org", "local_1", "outputs")
-	root := filepath.Join(t.TempDir(), "store")
+	root := coworkTestStoreRoot(t)
 	calls := 0
 	resolve := func() (string, error) { calls++; return root, nil }
 	payload := func(cwd, event string) string {
@@ -173,7 +183,7 @@ func TestCoworkRelativePathLengthBeforeJoin(t *testing.T) {
 }
 
 func TestCoworkRejectAndPrivacy(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "store")
+	root := coworkTestStoreRoot(t)
 	config, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +205,8 @@ func TestCoworkRejectAndPrivacy(t *testing.T) {
 	if err != nil || len(receipts) != 1 {
 		t.Fatalf("expected one stored receipt: %v, %v", receipts, err)
 	}
-	receiptData, err := os.ReadFile(filepath.Join(root, "sessions", coworkSessionKey("ok"), "r", receipts[0].Name()))
+	key := sha256.Sum256([]byte("tool:a"))
+	receiptData, err := os.ReadFile(filepath.Join(root, "sessions", coworkSessionKey("ok"), "r", fmt.Sprintf("%x.json", key[:16])))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +234,7 @@ func TestCoworkRejectAndPrivacy(t *testing.T) {
 	}
 }
 func TestCoworkConcurrentDedupeCapPrune(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "store")
+	root := coworkTestStoreRoot(t)
 	now := time.Now()
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {

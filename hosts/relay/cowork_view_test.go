@@ -156,7 +156,7 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 	}
 	write("session.json", `{"v":1,"id":"s","started":1}`)
 	for i := range 400 {
-		write(filepath.Join("r", fmt.Sprintf("%04d.json", i)), fmt.Sprintf(`{"v":1,"at":1,"ev":"tool","tool":"Glob","seen":[%q]}`, "/"+strings.Repeat("é", 2500)))
+		write(filepath.Join("r", fmt.Sprintf("%04d.json", i)), fmt.Sprintf(`{"v":1,"at":1,"ev":"tool","tool":"Glob","seen":[%q,%q,%q]}`, "/projets/"+strings.Repeat("é", 600)+"/a.go", "/docs/"+strings.Repeat("界", 400)+"/b.md", "/src/"+strings.Repeat("ø", 600)+"/c.ts"))
 	}
 	write("r/.tmp-ignore.json", `{"v":1,"ev":"start"}`)
 	write("r/oversize.json", strings.Repeat("x", 8193))
@@ -221,7 +221,7 @@ func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := filepath.Join(dir, "pending.json")
-	if err := os.WriteFile(name, []byte("invalid"), 0600); err != nil {
+	if err := os.Mkdir(name, 0700); err != nil {
 		t.Fatal(err)
 	}
 	when := time.Unix(1000, 0)
@@ -232,11 +232,17 @@ func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
 	if got := v.discover("s", 1); len(got) != 0 {
 		t.Fatalf("invalid receipt discovered: %v", got)
 	}
+	if err := os.Remove(name); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(name, []byte(`{"v":1,"ev":"start"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := v.discover("s", 1); len(got) != 0 {
-		t.Fatalf("unchanged directory was rescanned: %v", got)
+	if err := os.Chtimes(dir, when, when); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.discover("s", 1); len(got) != 1 {
+		t.Fatalf("unreadable receipt was not retried: %v", got)
 	}
 	later := when.Add(time.Second)
 	if err := os.Chtimes(dir, later, later); err != nil {
@@ -259,6 +265,58 @@ func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
 	}
 	if got := v.discover("s", 1); len(got) != 2 {
 		t.Fatalf("replacement directory not discovered: %v", got)
+	}
+}
+
+func TestCoworkViewerRecentEqualMtimeRetries(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sessions", coworkSessionKey("s"), "r")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now()
+	if err := os.Chtimes(dir, when, when); err != nil {
+		t.Fatal(err)
+	}
+	v := &coworkViewer{root: root}
+	if got := v.discover("s", 1); len(got) != 0 {
+		t.Fatalf("unexpected initial receipts: %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.json"), []byte(`{"v":1,"ev":"start"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dir, when, when); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.discover("s", 1); len(got) != 1 {
+		t.Fatalf("equal recent mtime hid new receipt: %v", got)
+	}
+}
+
+func TestCoworkViewerInstanceChangesDuringDiscovery(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sessions", coworkSessionKey("s"))
+	if err := os.MkdirAll(filepath.Join(dir, "r"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("session.json", `{"v":1,"id":"s","started":1}`)
+	write("r/a.json", `{"v":1,"ev":"start"}`)
+	v := &coworkViewer{root: root}
+	old, ok := v.loadSession("s")
+	if !ok || len(v.discover("s", old.Started)) != 1 {
+		t.Fatal("failed to seed old instance")
+	}
+	write("session.json", `{"v":1,"id":"s","started":2}`)
+	write("r/a.json", `{"v":1,"ev":"end"}`)
+	current, receipts, _, _, changed, status := v.discoverSession("s", old)
+	if status != 0 || !changed || current.Started != 2 || len(receipts) != 1 || receipts[0].Ev != "end" || receipts[0].N != 1 {
+		t.Fatalf("instance race: session=%+v receipts=%+v changed=%v status=%d", current, receipts, changed, status)
 	}
 }
 

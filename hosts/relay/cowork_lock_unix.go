@@ -33,6 +33,10 @@ func coworkPruneLocked(dir string) func() {
 }
 
 func coworkLock(path string, wait bool) (func(), error) {
+	return coworkLockWaiting(path, wait, nil)
+}
+
+func coworkLockWaiting(path string, wait bool, waiting func()) (func(), error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
@@ -52,6 +56,10 @@ func coworkLock(path string, wait bool) (func(), error) {
 		if (err != unix.EWOULDBLOCK && err != unix.EAGAIN) || !wait || time.Now().After(deadline) {
 			f.Close()
 			return nil, err
+		}
+		if waiting != nil {
+			waiting()
+			waiting = nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

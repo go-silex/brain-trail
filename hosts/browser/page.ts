@@ -30,6 +30,7 @@ import type {
   ServerEvent,
 } from '../../types/browser'
 import { DomRenderer, runtime } from './dom'
+import { coworkNotices } from './cowork-transport'
 import type { DashboardTransport, PageBootstrap } from './transport'
 
 // Cowork never reads the notes, so their links are unknown: treat every pair as linked rather than call a jump unlinked.
@@ -533,18 +534,8 @@ export function startPage(
     if (event.kind === 'snapshot' && event.revision > revision) {
       revision = event.revision
       facts = event.facts
-      if (facts.ownerHost === 'cowork') {
-        const notices: string[] = []
-        if (facts.coworkCoverage?.truncated)
-          notices.push(
-            facts.lang === 'fr' ? 'Historique plafonné' : 'History capped',
-          )
-        if (facts.coworkCoverage?.partialInventory)
-          notices.push(
-            facts.lang === 'fr' ? 'Inventaire partiel' : 'Partial inventory',
-          )
-        status.textContent = notices.join(' · ')
-      }
+      if (facts.ownerHost === 'cowork')
+        status.textContent = coworkNotices(facts.coworkCoverage, facts.lang)
       const previousPreview = state.preview
       const enableFollow = !state.zoomed && event.shared.zoomed
       state = {

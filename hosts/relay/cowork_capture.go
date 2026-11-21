@@ -235,6 +235,7 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 				if !coworkAbsolute(base) {
 					base = p.CWD
 				}
+				baseAbsolute := coworkAbsolute(base)
 				seen := map[string]bool{}
 				var filenames []json.RawMessage
 				_ = json.Unmarshal(response["filenames"], &filenames)
@@ -244,7 +245,7 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 						continue
 					}
 					if !coworkAbsolute(f) {
-						if !coworkAbsolute(base) || len(base)+len(f)+1 > 4096 {
+						if !baseAbsolute || len(base)+len(f)+1 > 4096 {
 							continue
 						}
 						f = filepath.Join(base, f)

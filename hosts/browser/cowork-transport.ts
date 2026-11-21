@@ -22,6 +22,23 @@ import type { DashboardTransport } from './transport'
 
 const SETTINGS_KEY = 'brain-trail-cowork-settings'
 const LANG_KEY = 'brain-trail-cowork-lang'
+export function coworkNotices(
+  coverage: FactsWire['coworkCoverage'],
+  lang: FactsWire['lang'],
+): string {
+  const notices: string[] = []
+  if (coverage?.status === 'reconnecting')
+    notices.push(lang === 'fr' ? 'Reconnexion en cours' : 'Reconnecting')
+  else if (coverage?.status === 'unavailable')
+    notices.push(lang === 'fr' ? 'Tâche indisponible' : 'Task unavailable')
+  else if (coverage?.status === 'closed')
+    notices.push(lang === 'fr' ? 'Visionneuse fermée' : 'Viewer closed')
+  if (coverage?.truncated)
+    notices.push(lang === 'fr' ? 'Historique plafonné' : 'History capped')
+  if (coverage?.partialInventory)
+    notices.push(lang === 'fr' ? 'Inventaire partiel' : 'Partial inventory')
+  return notices.join(' · ')
+}
 
 function savedSettings(): TrailSettings {
   const settings: TrailSettings = {
@@ -75,6 +92,7 @@ export function coworkTransport(session: string): DashboardTransport {
   let settings = savedSettings()
   let lang = savedLang()
   let truncated = false
+  let pollStatus: 'reconnecting' | 'unavailable' | 'closed' | undefined
   const stopReplay = () => {
     clearInterval(replayTimer)
     replayTimer = undefined
@@ -92,6 +110,7 @@ export function coworkTransport(session: string): DashboardTransport {
       coworkCoverage: {
         truncated,
         partialInventory: projection.partialInventory,
+        status: pollStatus,
       },
       workspace:
         projection.paths.length || projection.connected.length
@@ -149,16 +168,53 @@ export function coworkTransport(session: string): DashboardTransport {
   const poll = async () => {
     if (!active) return
     controller = new AbortController()
+    let response: Response
     try {
-      const response = await fetch(
+      response = await fetch(
         `cowork/receipts?session=${encodeURIComponent(session)}&after=${cursor}`,
         {
           signal: controller.signal,
           referrerPolicy: 'no-referrer',
         },
       )
-      if (!response.ok) throw new Error('Cowork receipts unavailable')
-      const body: unknown = await response.json()
+    } catch {
+      if (!active) return
+      if (pollStatus !== 'reconnecting') {
+        pollStatus = 'reconnecting'
+        publish()
+      }
+      pollTimer = setTimeout(poll, 5000)
+      return
+    }
+    if (!active) return
+    if (!response.ok) {
+      const nextStatus =
+        response.status === 401 || response.status === 403
+          ? 'closed'
+          : response.status === 404
+            ? 'unavailable'
+            : 'reconnecting'
+      if (pollStatus !== nextStatus) {
+        pollStatus = nextStatus
+        publish()
+      }
+      if (nextStatus !== 'closed') pollTimer = setTimeout(poll, 5000)
+      return
+    }
+    try {
+      let body: unknown
+      try {
+        body = await response.json()
+      } catch (error) {
+        if (error instanceof SyntaxError) throw error
+        if (!active) return
+        if (pollStatus !== 'reconnecting') {
+          pollStatus = 'reconnecting'
+          publish()
+        }
+        pollTimer = setTimeout(poll, 5000)
+        return
+      }
       if (!active) return
       if (typeof body !== 'object' || body === null || Array.isArray(body))
         throw new Error('Invalid receipts')
@@ -187,6 +243,8 @@ export function coworkTransport(session: string): DashboardTransport {
             : undefined)
       )
         throw new Error('Invalid receipts')
+      const statusChanged = pollStatus !== undefined
+      pollStatus = undefined
       const changedInstance =
         instance !== undefined && instance !== data.instance
       if (changedInstance) {
@@ -229,8 +287,9 @@ export function coworkTransport(session: string): DashboardTransport {
       if (batch.length > 0 || revision === 0) {
         const previousRevision = revision
         refreshProjection()
-        if (coverageChanged && revision === previousRevision) publish()
-      } else if (coverageChanged) publish()
+        if ((coverageChanged || statusChanged) && revision === previousRevision)
+          publish()
+      } else if (coverageChanged || statusChanged) publish()
       pollTimer = setTimeout(poll, data.more ? 0 : data.ended ? 5000 : 1000)
     } catch {
       if (!active) return

@@ -11,8 +11,19 @@ import (
 	"time"
 )
 
+func coworkTestTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 func TestCoworkStoreIdentityResumeAndDuplicates(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "store")
+	root := filepath.Join(coworkTestTempDir(t), "store")
 	now := time.Now().Truncate(time.Second)
 	put := func(id, key, event string, at time.Time) {
 		t.Helper()
@@ -26,6 +37,7 @@ func TestCoworkStoreIdentityResumeAndDuplicates(t *testing.T) {
 		t.Fatal("case-sensitive IDs collide")
 	}
 	dir := filepath.Join(root, "sessions", coworkSessionKey("TaskA"))
+	put("TaskA", "first", "tool", now)
 	put("TaskA", "first", "tool", now.Add(time.Hour))
 	st, err := os.Stat(filepath.Join(dir, "active"))
 	if err != nil || !st.ModTime().Equal(now.Add(time.Hour)) {
@@ -49,7 +61,7 @@ func TestCoworkStoreIdentityResumeAndDuplicates(t *testing.T) {
 }
 
 func TestCoworkStoreCapAndPruningLock(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "store")
+	root := filepath.Join(coworkTestTempDir(t), "store")
 	now := time.Now().Truncate(time.Second)
 	old := now.Add(-8 * 24 * time.Hour)
 	if err := writeCoworkReceipt(root, "old", "local_old", "first", []byte(`{}`), "tool", old); err != nil {
@@ -96,7 +108,7 @@ func TestCoworkStoreCapAndPruningLock(t *testing.T) {
 }
 
 func TestCoworkStoreRejectsLinksAndLargeFiles(t *testing.T) {
-	base := t.TempDir()
+	base := coworkTestTempDir(t)
 	target := filepath.Join(base, "target")
 	if err := os.Mkdir(target, 0700); err != nil {
 		t.Fatal(err)
@@ -123,7 +135,7 @@ func TestCoworkStoreRejectsLinksAndLargeFiles(t *testing.T) {
 }
 
 func TestCoworkPruneProgressAndRecovery(t *testing.T) {
-	sessions := filepath.Join(t.TempDir(), "sessions")
+	sessions := filepath.Join(coworkTestTempDir(t), "sessions")
 	if err := coworkPrivateMkdir(sessions); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +168,7 @@ func TestCoworkPruneProgressAndRecovery(t *testing.T) {
 }
 
 func TestCoworkPruneCursorDoesNotFollowSymlink(t *testing.T) {
-	base := t.TempDir()
+	base := coworkTestTempDir(t)
 	sessions := filepath.Join(base, "sessions")
 	if err := coworkPrivateMkdir(sessions); err != nil {
 		t.Fatal(err)
@@ -180,7 +192,7 @@ func TestCoworkPruneCursorDoesNotFollowSymlink(t *testing.T) {
 }
 
 func TestCoworkConcurrentWritesAndLifecycleNames(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "store")
+	root := filepath.Join(coworkTestTempDir(t), "store")
 	now := time.Now()
 	var wg sync.WaitGroup
 	errs := make(chan error, 24)
@@ -216,10 +228,7 @@ func TestCoworkParentPermissionsUnchanged(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission semantics")
 	}
-	state := t.TempDir()
-	if err := os.Chmod(state, 0700); err != nil {
-		t.Fatal(err)
-	}
+	state := coworkTestTempDir(t)
 	parent := filepath.Join(state, "brain-trail")
 	if err := os.Mkdir(parent, 0750); err != nil {
 		t.Fatal(err)
@@ -247,10 +256,7 @@ func TestCoworkCreatesMissingStatePrivately(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix state path")
 	}
-	base := t.TempDir()
-	if err := os.Chmod(base, 0700); err != nil {
-		t.Fatal(err)
-	}
+	base := coworkTestTempDir(t)
 	state := filepath.Join(base, "missing", "state")
 	root := filepath.Join(state, "brain-trail", "cowork", "v1")
 	if err := writeCoworkReceipt(root, "id", "local_task", "key", []byte(`{}`), "tool", time.Now()); err != nil {
@@ -264,8 +270,54 @@ func TestCoworkCreatesMissingStatePrivately(t *testing.T) {
 	}
 }
 
+func TestCoworkRejectsUnsafeAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ancestor semantics")
+	}
+	base := coworkTestTempDir(t)
+	ancestor := filepath.Join(base, "ancestor")
+	if err := os.Mkdir(ancestor, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(ancestor, "missing", "brain-trail", "cowork", "v1")
+	write := func() error {
+		return writeCoworkReceipt(root, "id", "local_task", "key", []byte(`{}`), "tool", time.Now())
+	}
+	if err := os.Chmod(ancestor, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(); err == nil {
+		t.Fatal("accepted writable ancestor")
+	}
+	if err := os.Chmod(ancestor, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(ancestor, link); err != nil {
+		t.Fatal(err)
+	}
+	root = filepath.Join(link, "missing", "brain-trail", "cowork", "v1")
+	if err := write(); err == nil {
+		t.Fatal("accepted symlink ancestor")
+	}
+	root = filepath.Join(ancestor, "missing", "brain-trail", "cowork", "v1")
+	if err := os.Chmod(ancestor, os.ModeSticky|0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(); err != nil {
+		t.Fatalf("rejected sticky ancestor: %v", err)
+	}
+	cowork := filepath.Dir(root)
+	if err := os.Chmod(cowork, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(); err == nil {
+		t.Fatal("accepted writable cowork ancestor")
+	}
+}
+
 func TestCoworkPruneRetiresLockedDirectory(t *testing.T) {
-	sessions := filepath.Join(t.TempDir(), "sessions")
+	sessions := filepath.Join(coworkTestTempDir(t), "sessions")
 	if err := coworkPrivateMkdir(sessions); err != nil {
 		t.Fatal(err)
 	}
@@ -280,14 +332,21 @@ func TestCoworkPruneRetiresLockedDirectory(t *testing.T) {
 	waiting := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
-		close(waiting)
-		release, err := coworkLock(filepath.Join(dir, ".lock"), true)
+		release, err := coworkLockWaiting(filepath.Join(dir, ".lock"), true, func() { close(waiting) })
 		if err == nil {
 			release()
 		}
 		result <- err
 	}()
-	<-waiting
+	select {
+	case <-waiting:
+	case err := <-result:
+		unlock()
+		t.Fatalf("competitor did not wait for lock: %v", err)
+	case <-time.After(time.Second):
+		unlock()
+		t.Fatal("competitor did not reach lock")
+	}
 	cleanup := coworkPruneLocked(dir)
 	if cleanup == nil {
 		unlock()

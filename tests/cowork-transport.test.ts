@@ -1,6 +1,9 @@
 /// <reference lib="dom" />
 import { expect, test } from 'claude-code/testing'
-import { coworkTransport } from '../hosts/browser/cowork-transport'
+import {
+  coworkNotices,
+  coworkTransport,
+} from '../hosts/browser/cowork-transport'
 import type { ServerEvent } from '../types/browser'
 
 const settle = async () => {
@@ -562,4 +565,159 @@ test('rejects pages whose raw final sequence disagrees with the cursor', async (
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('ended task remains visible through rejection and 404, then recovers a new instance', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  const scheduled: Array<{ fn: () => void; delay: number }> = []
+  globalThis.setTimeout = ((fn: () => void, delay: number) => {
+    scheduled.push({ fn, delay })
+    return 1
+  }) as typeof setTimeout
+  const urls: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    urls.push(String(input))
+    if (urls.length === 2) throw new Error('network')
+    if (urls.length === 3) return { ok: false, status: 404 } as Response
+    const body =
+      urls.length === 1
+        ? {
+            instance: 1,
+            receipts: [receipt],
+            next: 1,
+            ended: true,
+            truncated: true,
+          }
+        : urls.length === 4
+          ? {
+              instance: 2,
+              receipts: [],
+              next: 1,
+              ended: false,
+              truncated: false,
+            }
+          : {
+              instance: 2,
+              receipts: [
+                { ...receipt, files: [{ p: '/new/b.md', k: 'read' }] },
+              ],
+              next: 1,
+              ended: false,
+              truncated: false,
+            }
+    return {
+      ok: true,
+      json: async () => ({ session: 'task', more: false, ...body }),
+    } as Response
+  }) as typeof fetch
+  const events: ServerEvent[] = []
+  const closed: string[] = []
+  const transport = coworkTransport('task')
+  const dispose = transport.listen({
+    ready() {},
+    event: (event) => events.push(event),
+    closed: (reason) => closed.push(reason),
+  })
+  const snapshot = () => {
+    const event = events.filter((value) => value.kind === 'snapshot').at(-1)
+    if (!event || event.kind !== 'snapshot') throw new Error('Missing snapshot')
+    return event
+  }
+  try {
+    await settle()
+    const originalEvents = snapshot().facts.events
+    for (const status of ['reconnecting', 'unavailable']) {
+      const timer = scheduled.shift()
+      expect(timer?.delay).toBe(5000)
+      timer?.fn()
+      await settle()
+      expect(snapshot().facts.coworkCoverage?.status).toBe(status)
+      expect(snapshot().facts.coworkCoverage?.truncated).toBe(true)
+      expect(snapshot().facts.events).toEqual(originalEvents)
+      expect(snapshot().facts.workspace.kind).toBe('ready')
+    }
+    await transport.execute({
+      v: 1,
+      generation: 1,
+      command: { kind: 'lang', lang: 'fr' },
+    })
+    expect(snapshot().facts.lang).toBe('fr')
+    expect(snapshot().facts.coworkCoverage?.status).toBe('unavailable')
+    scheduled.shift()?.fn()
+    await settle()
+    expect(snapshot().facts.coworkCoverage?.status).toBe(undefined)
+    expect(scheduled[0]?.delay).toBe(0)
+    scheduled.shift()?.fn()
+    await settle()
+    expect(urls).toEqual([
+      'cowork/receipts?session=task&after=0',
+      'cowork/receipts?session=task&after=1',
+      'cowork/receipts?session=task&after=1',
+      'cowork/receipts?session=task&after=1',
+      'cowork/receipts?session=task&after=0',
+    ])
+    expect(snapshot().facts.coworkCoverage?.truncated).toBe(false)
+    expect(closed).toEqual([])
+  } finally {
+    dispose()
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('HTTP retryable failures recover and authorization failures stop polling', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  try {
+    for (const status of [500, 413, 401, 403]) {
+      const scheduled: Array<{ fn: () => void; delay: number }> = []
+      globalThis.setTimeout = ((fn: () => void, delay: number) => {
+        scheduled.push({ fn, delay })
+        return 1
+      }) as typeof setTimeout
+      globalThis.fetch = (async () =>
+        ({ ok: false, status }) as Response) as typeof fetch
+      const events: ServerEvent[] = []
+      const closed: string[] = []
+      const dispose = coworkTransport('task').listen({
+        ready() {},
+        event: (event) => events.push(event),
+        closed: (reason) => closed.push(reason),
+      })
+      await settle()
+      const event = events[0]
+      if (event?.kind !== 'snapshot') throw new Error('Missing status snapshot')
+      const terminal = status === 401 || status === 403
+      expect(event.facts.coworkCoverage?.status).toBe(
+        terminal ? 'closed' : 'reconnecting',
+      )
+      expect(scheduled.length).toBe(terminal ? 0 : 1)
+      if (!terminal) expect(scheduled[0]?.delay).toBe(5000)
+      expect(closed).toEqual([])
+      dispose()
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('consumer notices are bilingual and preserve coverage after recovery', () => {
+  const coverage = { truncated: true, partialInventory: true } as const
+  expect(coworkNotices({ ...coverage, status: 'reconnecting' }, 'en')).toBe(
+    'Reconnecting · History capped · Partial inventory',
+  )
+  expect(coworkNotices({ ...coverage, status: 'unavailable' }, 'fr')).toBe(
+    'Tâche indisponible · Historique plafonné · Inventaire partiel',
+  )
+  expect(coworkNotices({ ...coverage, status: 'closed' }, 'en')).toBe(
+    'Viewer closed · History capped · Partial inventory',
+  )
+  expect(coworkNotices({ ...coverage, status: 'closed' }, 'fr')).toBe(
+    'Visionneuse fermée · Historique plafonné · Inventaire partiel',
+  )
+  expect(coworkNotices(coverage, 'en')).toBe(
+    'History capped · Partial inventory',
+  )
 })

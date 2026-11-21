@@ -89,7 +89,7 @@ func coworkPublish(path string, data []byte) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	f, err := coworkCreateTemp(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
@@ -127,6 +127,9 @@ func coworkTouch(path string, now time.Time) error {
 func writeCoworkReceipt(root, id, task, key string, data []byte, event string, now time.Time) error {
 	if !coworkID.MatchString(id) || len(data) > 8192 {
 		return errors.New("invalid session or receipt")
+	}
+	if err := coworkVerifyAncestors(root); err != nil {
+		return err
 	}
 	sessions := filepath.Join(root, "sessions")
 	if filepath.Base(root) == "v1" && filepath.Base(filepath.Dir(root)) == "cowork" {

@@ -3,14 +3,54 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 func coworkLocalBase() (string, error) { return localBase() }
+
+func coworkVerifyAncestors(dir string) error { return nil }
+
+func coworkCreateTemp(dir string) (*os.File, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, err
+	}
+	sid := user.User.Sid.String()
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;SY)(A;;FA;;;" + sid + ")")
+	if err != nil {
+		return nil, err
+	}
+	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	for range 100 {
+		var random [16]byte
+		if _, err = rand.Read(random[:]); err != nil {
+			return nil, err
+		}
+		path := filepath.Join(dir, ".tmp-"+hex.EncodeToString(random[:]))
+		wide, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return nil, err
+		}
+		handle, err := windows.CreateFile(wide, windows.GENERIC_READ|windows.GENERIC_WRITE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			&sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return os.NewFile(uintptr(handle), path), nil
+	}
+	return nil, errors.New("could not create temporary file")
+}
 
 func coworkVerifyDir(dir string) error {
 	info, err := os.Lstat(dir)

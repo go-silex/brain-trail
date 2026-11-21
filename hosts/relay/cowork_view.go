@@ -88,6 +88,7 @@ func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt
 		cache = &coworkViewCache{started: started, indexed: make(map[string]bool)}
 		v.cache[id] = cache
 	}
+	scanStart := time.Now()
 	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id), "r")
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
@@ -102,7 +103,8 @@ func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt
 		cache.dirInfo = nil
 		return cache.receipts
 	}
-	cache.dirInfo = info
+	cache.dirInfo = nil
+	allRead := true
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".tmp-") || !strings.HasSuffix(name, ".json") || cache.indexed[name] {
@@ -111,12 +113,38 @@ func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt
 		b, err := coworkReadRegular(filepath.Join(dir, name), 8192)
 		var receipt coworkReceipt
 		if err != nil || json.Unmarshal(b, &receipt) != nil || receipt.V != 1 {
+			allRead = false
 			continue
 		}
 		cache.indexed[name] = true
 		cache.receipts = append(cache.receipts, coworkIndexedReceipt{coworkReceipt: receipt, N: len(cache.receipts) + 1})
 	}
+	if allRead && !info.ModTime().After(scanStart.Add(-2*time.Second)) {
+		cache.dirInfo = info
+	}
 	return cache.receipts
+}
+
+// discoverSession validates the instance again after enumeration, while v.mu is held.
+func (v *coworkViewer) discoverSession(id string, session coworkSession) (coworkSession, []coworkIndexedReceipt, bool, bool, bool, int) {
+	changed := false
+	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id))
+	for range 3 {
+		ended, truncated := coworkMarker(dir, "ended"), coworkMarker(dir, "truncated")
+		all := v.discover(id, session.Started)
+		current, exists := v.loadSession(id)
+		if !exists {
+			delete(v.cache, id)
+			return session, nil, false, false, changed, http.StatusNotFound
+		}
+		if current.Started == session.Started {
+			return current, all, ended, truncated, changed, 0
+		}
+		delete(v.cache, id)
+		session = current
+		changed = true
+	}
+	return session, nil, false, false, changed, http.StatusServiceUnavailable
 }
 
 func (v *coworkViewer) sessions() []coworkViewSession {
@@ -250,10 +278,16 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		dir := filepath.Join(v.root, "sessions", coworkSessionKey(id))
-		ended, truncated := coworkMarker(dir, "ended"), coworkMarker(dir, "truncated")
 		v.mu.Lock()
-		all := v.discover(id, session.Started)
+		session, all, ended, truncated, changed, status := v.discoverSession(id, session)
+		if status != 0 {
+			v.mu.Unlock()
+			w.WriteHeader(status)
+			return
+		}
+		if changed {
+			after = 0
+		}
 		start := after
 		if start > len(all) {
 			start = len(all)

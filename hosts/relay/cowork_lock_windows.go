@@ -46,6 +46,10 @@ func coworkPruneLocked(dir string) func() {
 }
 
 func coworkLock(path string, wait bool) (func(), error) {
+	return coworkLockWaiting(path, wait, nil)
+}
+
+func coworkLockWaiting(path string, wait bool, waiting func()) (func(), error) {
 	wide, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -77,6 +81,10 @@ func coworkLock(path string, wait bool) (func(), error) {
 		if err != windows.ERROR_LOCK_VIOLATION || !wait || time.Now().After(deadline) {
 			f.Close()
 			return nil, err
+		}
+		if waiting != nil {
+			waiting()
+			waiting = nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
