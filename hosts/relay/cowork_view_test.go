@@ -32,6 +32,8 @@ func TestCoworkViewer(t *testing.T) {
 	write("session.json", `{"v":1,"id":"task_1","task":"local_abc","started":10}`)
 	write("r/a.json", `{"v":1,"at":20,"ev":"tool","tool":"Read","ok":true,"agent":false,"files":[{"p":"/a","k":"read"}]}`)
 	write("r/b.json", `{"v":1,"at":15,"ev":"tool","tool":"Glob","ok":true,"agent":false,"seen":["/a","/b"],"mcp":{"server":"Drive","tool":"list"}}`)
+	write("r/_start.json", `{"v":1,"at":10,"ev":"start"}`)
+	write("r/_end.json", `{"v":1,"at":11,"ev":"end"}`)
 	s := &relay{host: "127.0.0.1:1234", token: "secret", assets: assets, launch: "once", launchExpiry: time.Now().Add(time.Minute)}
 	v := &coworkViewer{relay: s, root: root, session: "task_1"}
 	request := func(method, path, host, origin string) *httptest.ResponseRecorder {
@@ -81,24 +83,25 @@ func TestCoworkViewer(t *testing.T) {
 	if item.ID != "task_1" || item.Started != 10 || item.Calls != 2 || item.Last == 0 {
 		t.Fatalf("summary: %+v", item)
 	}
-	w = request("GET", "/s/secret/cowork/receipts?session=task_1&after=1", host, "")
+	w = request("GET", "/s/secret/cowork/receipts?session=task_1&after=3", host, "")
 	var page struct {
 		Receipts []struct {
 			N    int    `json:"n"`
 			Tool string `json:"tool"`
 		} `json:"receipts"`
-		Next      int  `json:"next"`
-		Ended     bool `json:"ended"`
-		Truncated bool `json:"truncated"`
+		Instance  int64 `json:"instance"`
+		Next      int   `json:"next"`
+		Ended     bool  `json:"ended"`
+		Truncated bool  `json:"truncated"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Receipts) != 1 || page.Receipts[0].N != 2 || page.Receipts[0].Tool != "Glob" || page.Next != 2 {
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Receipts) != 1 || page.Receipts[0].N != 4 || page.Receipts[0].Tool != "Glob" || page.Next != 4 || page.Instance != 10 {
 		t.Fatalf("page: %s %v", w.Body.String(), err)
 	}
-	write("r/0.json", `{"v":1,"at":5,"ev":"start"}`)
+	write("r/_later.json", `{"v":1,"at":5,"ev":"start"}`)
 	write("ended", "")
 	write("truncated", "")
-	w = request("GET", "/s/secret/cowork/receipts?session=task_1&after=2", host, "")
-	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Receipts) != 1 || page.Receipts[0].N != 3 || !page.Ended || !page.Truncated {
+	w = request("GET", "/s/secret/cowork/receipts?session=task_1&after=4", host, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Receipts) != 1 || page.Receipts[0].N != 5 || !page.Ended || !page.Truncated {
 		t.Fatalf("discovery: %s %v", w.Body.String(), err)
 	}
 	if w.Header().Get("Content-Security-Policy") == "" || !strings.Contains(w.Header().Get("Cache-Control"), "no-store") {
@@ -153,7 +156,7 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 	}
 	write("session.json", `{"v":1,"id":"s","started":1}`)
 	for i := range 400 {
-		write(filepath.Join("r", fmt.Sprintf("%04d.json", i)), fmt.Sprintf(`{"v":1,"at":1,"ev":"tool","tool":%q}`, strings.Repeat("x", 5000)))
+		write(filepath.Join("r", fmt.Sprintf("%04d.json", i)), fmt.Sprintf(`{"v":1,"at":1,"ev":"tool","tool":"Glob","seen":[%q]}`, "/"+strings.Repeat("é", 2500)))
 	}
 	write("r/.tmp-ignore.json", `{"v":1,"ev":"start"}`)
 	write("r/oversize.json", strings.Repeat("x", 8193))
@@ -164,6 +167,7 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 		Next     int               `json:"next"`
 		More     bool              `json:"more"`
 		Ended    bool              `json:"ended"`
+		Instance int64             `json:"instance"`
 	}) {
 		t.Helper()
 		r := httptest.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:1234/s/t/cowork/receipts?session=s&after=%d", after), nil)
@@ -174,6 +178,7 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 			Next     int               `json:"next"`
 			More     bool              `json:"more"`
 			Ended    bool              `json:"ended"`
+			Instance int64             `json:"instance"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
 			t.Fatal(err)
@@ -181,12 +186,19 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 		return w.Body.Len(), page
 	}
 	size, first := get(0)
-	if size > 1536*1024 || !first.More || !first.Ended || first.Next == 0 || first.Next >= 400 {
+	if size > 1536*1024 || !first.More || !first.Ended || first.Next == 0 || first.Next >= 400 || first.Instance != 1 {
 		t.Fatalf("first page: size=%d next=%d more=%v ended=%v", size, first.Next, first.More, first.Ended)
 	}
-	_, second := get(first.Next)
-	if second.More || second.Next != 400 {
-		t.Fatalf("second page: %+v", second)
+	last := first
+	for last.More {
+		size, page := get(last.Next)
+		if size > 1536*1024 || page.Next <= last.Next {
+			t.Fatalf("page: size=%d next=%d previous=%d", size, page.Next, last.Next)
+		}
+		last = page
+	}
+	if last.Next != 400 {
+		t.Fatalf("last page: %+v", last)
 	}
 	if err := os.RemoveAll(filepath.Join(dir, "r")); err != nil {
 		t.Fatal(err)
@@ -197,8 +209,56 @@ func TestCoworkViewerByteBudgetAndRecreation(t *testing.T) {
 	write("session.json", `{"v":1,"id":"s","started":2}`)
 	write("r/new.json", `{"v":1,"at":2,"ev":"start"}`)
 	_, recreated := get(0)
-	if len(recreated.Receipts) != 1 || recreated.Next != 1 || recreated.More {
+	if len(recreated.Receipts) != 1 || recreated.Next != 1 || recreated.More || recreated.Instance != 2 {
 		t.Fatalf("recreated: %+v", recreated)
+	}
+}
+
+func TestCoworkViewerDiscoveryDirectoryCache(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sessions", coworkSessionKey("s"), "r")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(dir, "pending.json")
+	if err := os.WriteFile(name, []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Unix(1000, 0)
+	if err := os.Chtimes(dir, when, when); err != nil {
+		t.Fatal(err)
+	}
+	v := &coworkViewer{root: root}
+	if got := v.discover("s", 1); len(got) != 0 {
+		t.Fatalf("invalid receipt discovered: %v", got)
+	}
+	if err := os.WriteFile(name, []byte(`{"v":1,"ev":"start"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.discover("s", 1); len(got) != 0 {
+		t.Fatalf("unchanged directory was rescanned: %v", got)
+	}
+	later := when.Add(time.Second)
+	if err := os.Chtimes(dir, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.discover("s", 1); len(got) != 1 {
+		t.Fatalf("changed mtime not discovered: %v", got)
+	}
+	if err := os.Rename(dir, dir+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.json"), []byte(`{"v":1,"ev":"end"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dir, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.discover("s", 1); len(got) != 2 {
+		t.Fatalf("replacement directory not discovered: %v", got)
 	}
 }
 

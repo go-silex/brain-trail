@@ -244,7 +244,7 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 						continue
 					}
 					if !coworkAbsolute(f) {
-						if !coworkAbsolute(base) {
+						if !coworkAbsolute(base) || len(base)+len(f)+1 > 4096 {
 							continue
 						}
 						f = filepath.Join(base, f)
@@ -273,6 +273,10 @@ func projectCowork(p coworkPayload, at int64) (coworkReceipt, string, bool) {
 	return r, hex.EncodeToString(sum[:16]), true
 }
 func captureCowork(in io.Reader, root string, now time.Time) {
+	captureCoworkWithRoot(in, func() (string, error) { return root, nil }, now)
+}
+
+func captureCoworkWithRoot(in io.Reader, resolveRoot func() (string, error), now time.Time) {
 	type readResult struct {
 		data []byte
 		err  error
@@ -306,6 +310,10 @@ func captureCowork(in io.Reader, root string, now time.Time) {
 	encoded, err := json.Marshal(r)
 	// Paths were admitted against the encoded byte budget above.
 	if err != nil || len(encoded) > 8192 {
+		return
+	}
+	root, err := resolveRoot()
+	if err != nil {
 		return
 	}
 	_ = writeCoworkReceipt(root, p.SessionID, coworkTask(p.CWD), key, encoded, r.Ev, now)

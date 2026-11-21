@@ -36,6 +36,7 @@ type coworkViewCache struct {
 	started  int64
 	indexed  map[string]bool
 	receipts []coworkIndexedReceipt
+	dirInfo  os.FileInfo
 }
 
 type coworkViewer struct {
@@ -88,7 +89,20 @@ func (v *coworkViewer) discover(id string, started int64) []coworkIndexedReceipt
 		v.cache[id] = cache
 	}
 	dir := filepath.Join(v.root, "sessions", coworkSessionKey(id), "r")
-	entries, _ := os.ReadDir(dir)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		cache.dirInfo = nil
+		return cache.receipts
+	}
+	if cache.dirInfo != nil && os.SameFile(cache.dirInfo, info) && cache.dirInfo.ModTime().Equal(info.ModTime()) {
+		return cache.receipts
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		cache.dirInfo = nil
+		return cache.receipts
+	}
+	cache.dirInfo = info
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".tmp-") || !strings.HasSuffix(name, ".json") || cache.indexed[name] {
@@ -146,7 +160,7 @@ func (v *coworkViewer) sessions() []coworkViewSession {
 		item := coworkViewSession{ID: s.ID, Started: s.Started, Last: candidate.last, Ended: coworkMarker(dir, "ended"), Truncated: coworkMarker(dir, "truncated")}
 		receipts, _ := os.ReadDir(filepath.Join(dir, "r"))
 		for _, entry := range receipts {
-			if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".tmp-") && strings.HasSuffix(entry.Name(), ".json") {
+			if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".tmp-") && !strings.HasPrefix(entry.Name(), "_") && strings.HasSuffix(entry.Name(), ".json") {
 				item.Calls++
 			}
 		}
@@ -246,7 +260,7 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		end, size := start, 512
 		for end < len(all) && end-start < 1000 {
-			b, err := json.Marshal(all[end])
+			b, err := ascii(all[end])
 			if err != nil || size+len(b)+1 > 1536*1024 {
 				break
 			}
@@ -260,7 +274,7 @@ func (v *coworkViewer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			next = all[end-1].N
 		}
 		v.mu.Unlock()
-		jsonOut(w, map[string]any{"session": id, "receipts": result, "next": next, "ended": ended, "truncated": truncated, "more": more})
+		jsonOut(w, map[string]any{"session": id, "instance": session.Started, "receipts": result, "next": next, "ended": ended, "truncated": truncated, "more": more})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

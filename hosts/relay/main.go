@@ -939,10 +939,7 @@ func serve(assets string) error {
 func main() {
 	var e error
 	if len(os.Args) >= 2 && os.Args[1] == "cowork-capture" {
-		root, err := coworkStoreRoot()
-		if err == nil {
-			captureCowork(os.Stdin, root, time.Now())
-		}
+		captureCoworkWithRoot(os.Stdin, coworkStoreRoot, time.Now())
 		return
 	}
 	if len(os.Args) == 3 && os.Args[1] == "serve" {

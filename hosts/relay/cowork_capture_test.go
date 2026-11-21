@@ -136,8 +136,44 @@ func TestCoworkLenientInputAndControlPaths(t *testing.T) {
 	}
 }
 
+func TestCoworkCaptureResolvesRootAfterAdmission(t *testing.T) {
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(config, "Claude", "local-agent-mode-sessions", "acct", "org", "local_1", "outputs")
+	root := filepath.Join(t.TempDir(), "store")
+	calls := 0
+	resolve := func() (string, error) { calls++; return root, nil }
+	payload := func(cwd, event string) string {
+		b, _ := json.Marshal(map[string]any{"cwd": cwd, "session_id": "id", "hook_event_name": event})
+		return string(b)
+	}
+	for _, input := range []string{`{}`, payload(t.TempDir(), "SessionStart"), payload(cwd, "UserPromptSubmit")} {
+		captureCoworkWithRoot(strings.NewReader(input), resolve, time.Now())
+	}
+	if calls != 0 {
+		t.Fatalf("resolved root for rejected payload: %d", calls)
+	}
+	captureCoworkWithRoot(strings.NewReader(payload(cwd, "SessionStart")), resolve, time.Now())
+	if calls != 1 {
+		t.Fatalf("expected one root resolution, got %d", calls)
+	}
+}
+
+func TestCoworkRelativePathLengthBeforeJoin(t *testing.T) {
+	base := filepath.Join(t.TempDir(), strings.Repeat("a", 4096))
+	p := coworkPayload{Event: "PostToolUse", ToolName: "Glob", ToolUseID: "id"}
+	p.RawInput, _ = json.Marshal(map[string]string{"path": base})
+	p.RawResponse = []byte(`{"filenames":["relative"]}`)
+	r, _, ok := projectCowork(p, 1)
+	if !ok || len(r.Seen) != 0 {
+		t.Fatalf("overlong relative base admitted: %+v", r)
+	}
+}
+
 func TestCoworkRejectAndPrivacy(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "store")
 	config, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -159,6 +195,14 @@ func TestCoworkRejectAndPrivacy(t *testing.T) {
 	if err != nil || len(receipts) != 1 {
 		t.Fatalf("expected one stored receipt: %v, %v", receipts, err)
 	}
+	receiptData, err := os.ReadFile(filepath.Join(root, "sessions", coworkSessionKey("ok"), "r", receipts[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt coworkReceipt
+	if json.Unmarshal(receiptData, &receipt) != nil || receipt.Tool != "Read" || len(receipt.Files) != 1 || receipt.Files[0].P != file || receipt.Files[0].K != "read" {
+		t.Fatalf("expected Read receipt with allowed path: %+v", receipt)
+	}
 	err = filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
@@ -179,7 +223,7 @@ func TestCoworkRejectAndPrivacy(t *testing.T) {
 	}
 }
 func TestCoworkConcurrentDedupeCapPrune(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "store")
 	now := time.Now()
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {

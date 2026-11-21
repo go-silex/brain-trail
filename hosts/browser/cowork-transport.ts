@@ -66,6 +66,7 @@ export function coworkTransport(session: string): DashboardTransport {
   let cursor = 0,
     revision = 0,
     layoutRev = 0
+  let instance: number | undefined
   let receipts: CoworkReceipt[] = []
   let projection = projectCowork(receipts)
   let projectionKey = ''
@@ -116,7 +117,7 @@ export function coworkTransport(session: string): DashboardTransport {
     const nextLayoutKey = JSON.stringify([
       next.root,
       next.paths,
-      next.connected.length > 0,
+      next.paths.length === 0 && next.connected.length > 0,
     ])
     const nextKey = JSON.stringify(next)
     projection = next
@@ -165,6 +166,7 @@ export function coworkTransport(session: string): DashboardTransport {
       if (
         data.session !== session ||
         !Array.isArray(data.receipts) ||
+        !Number.isSafeInteger(data.instance) ||
         !Number.isSafeInteger(data.next) ||
         (data.next as number) < cursor ||
         typeof data.ended !== 'boolean' ||
@@ -173,6 +175,36 @@ export function coworkTransport(session: string): DashboardTransport {
         (data.more && data.next === cursor)
       )
         throw new Error('Invalid receipts')
+      const rawLast = data.receipts[data.receipts.length - 1]
+      if (
+        data.next !==
+        (data.receipts.length === 0
+          ? cursor
+          : typeof rawLast === 'object' &&
+              rawLast !== null &&
+              !Array.isArray(rawLast)
+            ? (rawLast as Record<string, unknown>).n
+            : undefined)
+      )
+        throw new Error('Invalid receipts')
+      const changedInstance =
+        instance !== undefined && instance !== data.instance
+      if (changedInstance) {
+        cursor = 0
+        receipts = []
+        projection = projectCowork(receipts)
+        projectionKey = ''
+        layoutKey = ''
+        truncated = false
+        stopReplay()
+        shared = sharedView(VIEW_STATE0)
+      }
+      instance = data.instance as number
+      if (changedInstance) {
+        refreshProjection()
+        pollTimer = setTimeout(poll, 0)
+        return
+      }
       const batch: CoworkReceipt[] = []
       let last = cursor
       for (const value of data.receipts) {
@@ -199,8 +231,7 @@ export function coworkTransport(session: string): DashboardTransport {
         refreshProjection()
         if (coverageChanged && revision === previousRevision) publish()
       } else if (coverageChanged) publish()
-      if (data.more || !data.ended)
-        pollTimer = setTimeout(poll, data.more ? 0 : 1000)
+      pollTimer = setTimeout(poll, data.more ? 0 : data.ended ? 5000 : 1000)
     } catch {
       if (!active) return
       active = false

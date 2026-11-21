@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -128,7 +130,7 @@ func writeCoworkReceipt(root, id, task, key string, data []byte, event string, n
 	}
 	sessions := filepath.Join(root, "sessions")
 	if filepath.Base(root) == "v1" && filepath.Base(filepath.Dir(root)) == "cowork" {
-		if err := coworkPrivateMkdir(filepath.Dir(filepath.Dir(root))); err != nil {
+		if err := coworkPrepareParent(filepath.Dir(filepath.Dir(root))); err != nil {
 			return err
 		}
 		if err := coworkPrivateMkdir(filepath.Dir(root)); err != nil {
@@ -178,6 +180,9 @@ func writeCoworkReceipt(root, id, task, key string, data []byte, event string, n
 				return err
 			}
 		}
+		if event == "start" || event == "end" {
+			key = "_" + key
+		}
 		target := filepath.Join(receipts, key+".json")
 		_, err = os.Lstat(target)
 		if err != nil && !os.IsNotExist(err) {
@@ -219,39 +224,106 @@ func coworkExpired(dir string, now time.Time) bool {
 	st, err := os.Lstat(filepath.Join(dir, "active"))
 	if os.IsNotExist(err) {
 		st, err = os.Lstat(filepath.Join(dir, "session.json"))
+		if os.IsNotExist(err) {
+			st, err = os.Lstat(dir)
+			return err == nil && st.IsDir() && now.Sub(st.ModTime()) > 7*24*time.Hour
+		}
 	}
 	return err == nil && st.Mode().IsRegular() && now.Sub(st.ModTime()) > 7*24*time.Hour
 }
 
 func pruneCowork(sessions, current string, now time.Time) {
+	unlockPass, err := coworkLock(filepath.Join(sessions, ".prune-lock"), false)
+	if err != nil {
+		return
+	}
+	defer unlockPass()
 	f, err := os.Open(sessions)
 	if err != nil {
 		return
 	}
-	defer f.Close()
-	entries, _ := f.ReadDir(64)
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == current || len(entry.Name()) != 32 {
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil || len(names) == 0 {
+		return
+	}
+	candidates := names[:0]
+	for _, name := range names {
+		if strings.HasPrefix(name, ".prune-") && name != ".prune-lock" && name != ".prune-cursor" {
+			dir := filepath.Join(sessions, name)
+			if coworkVerifyDir(dir) == nil {
+				unlock, err := coworkLock(filepath.Join(dir, ".lock"), false)
+				if err == nil {
+					unlock()
+					_ = os.RemoveAll(dir)
+				}
+			}
 			continue
 		}
-		if _, err := hex.DecodeString(entry.Name()); err != nil {
+		if len(name) == 32 {
+			if _, err := hex.DecodeString(name); err == nil {
+				candidates = append(candidates, name)
+			}
+		}
+	}
+	names = candidates
+	if len(names) == 0 {
+		return
+	}
+	sort.Strings(names)
+	cursorPath := filepath.Join(sessions, ".prune-cursor")
+	cursor, _ := coworkReadRegular(cursorPath, 1024)
+	start := sort.SearchStrings(names, string(cursor))
+	for start < len(names) && names[start] <= string(cursor) {
+		start++
+	}
+	if start == len(names) {
+		start = 0
+	}
+	count := len(names)
+	if count > 64 {
+		count = 64
+	}
+	for i := range count {
+		name := names[(start+i)%len(names)]
+		if name == current {
 			continue
 		}
-		dir := filepath.Join(sessions, entry.Name())
+		dir := filepath.Join(sessions, name)
 		if coworkVerifyDir(dir) != nil || !coworkExpired(dir, now) {
 			continue
 		}
+		before, statErr := os.Lstat(dir)
+		_, lockErr := os.Lstat(filepath.Join(dir, ".lock"))
 		unlock, err := coworkLock(filepath.Join(dir, ".lock"), false)
 		if err != nil {
 			continue
 		}
 		var cleanup func()
-		if coworkVerifyDir(dir) == nil && coworkExpired(dir, now) {
+		expired := coworkExpired(dir, now)
+		if !expired && statErr == nil && os.IsNotExist(lockErr) {
+			after, err := os.Lstat(dir)
+			_, activeErr := os.Lstat(filepath.Join(dir, "active"))
+			_, metadataErr := os.Lstat(filepath.Join(dir, "session.json"))
+			expired = err == nil && os.SameFile(before, after) &&
+				os.IsNotExist(activeErr) && os.IsNotExist(metadataErr) &&
+				now.Sub(before.ModTime()) > 7*24*time.Hour
+		}
+		if coworkVerifyDir(dir) == nil && expired {
 			cleanup = coworkPruneLocked(dir)
 		}
 		unlock()
 		if cleanup != nil {
 			cleanup()
 		}
+	}
+	if tmp, err := os.CreateTemp(sessions, ".tmp-cursor-"); err == nil {
+		path := tmp.Name()
+		_, writeErr := tmp.WriteString(names[(start+count-1)%len(names)])
+		closeErr := tmp.Close()
+		if writeErr == nil && closeErr == nil {
+			_ = os.Rename(path, cursorPath)
+		}
+		_ = os.Remove(path)
 	}
 }

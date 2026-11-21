@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
-import { brain } from '../../hooks/scene3d'
+import { brain, stationPosition } from '../../hooks/scene3d'
 import { kindColors } from '../../hooks/map'
 import { LOGOS } from '../../hooks/logos'
 import {
@@ -616,15 +616,8 @@ export class WebGLScene {
     const services = [...trail.perSvc.entries()]
     const stations = new Map<string, THREE.Vector3>()
     services.forEach(([name, count], i) => {
-      const angle =
-        -Math.PI / 2 +
-        (i - (services.length - 1) / 2) *
-          Math.min(0.55, (Math.PI * 1.2) / Math.max(1, services.length))
-      const position = new THREE.Vector3(
-        Math.cos(angle) * shape.rMax,
-        shape.yMax + layout.size * 0.18,
-        Math.sin(angle) * shape.rMax,
-      )
+      const { x, y, z } = stationPosition(layout, shape, i, services.length)
+      const position = new THREE.Vector3(x, y, z)
       stations.set(name, position)
       addLabel(`${name} · ${count}`, position)
       const halo = new THREE.Sprite(
@@ -784,16 +777,8 @@ export class WebGLScene {
       )
     const services = [...trail.perSvc.keys()]
     services.forEach((_, i) => {
-      const angle =
-        -Math.PI / 2 +
-        (i - (services.length - 1) / 2) *
-          Math.min(0.55, (Math.PI * 1.2) / Math.max(1, services.length))
-      include(
-        Math.cos(angle) * shape.rMax,
-        shape.yMax + layout.size * 0.18,
-        Math.sin(angle) * shape.rMax,
-        75,
-      )
+      const { x, y, z } = stationPosition(layout, shape, i, services.length)
+      include(x, y, z, 75)
     })
     this.controls.target.copy(target)
     this.camera.position.copy(target).addScaledVector(direction, distance)

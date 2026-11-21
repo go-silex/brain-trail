@@ -26,6 +26,7 @@ test('publishes layout before snapshot and keeps ended sessions readable', async
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts: [receipt],
         next: 1,
         ended: true,
@@ -98,6 +99,7 @@ test('empty session is honest and local settings and language publish snapshots'
       ok: true,
       json: async () => ({
         session: 'empty',
+        instance: 1,
         receipts: [],
         next: 0,
         ended: true,
@@ -149,6 +151,7 @@ test('rejects malformed envelopes without publishing them', async () => {
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts: [receipt],
         next: 1,
         ended: true,
@@ -190,6 +193,7 @@ test('drains all pages of an ended session before stopping', async () => {
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts: nextPage ? [{ ...receipt, n: 2 }] : first,
         next: nextPage ? 2 : 1,
         ended: true,
@@ -240,6 +244,7 @@ test('skips invalid receipts and advances to the next page', async () => {
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts: first
           ? [
               { ...receipt, n: 1, at: 'invalid' },
@@ -274,7 +279,7 @@ test('skips invalid receipts and advances to the next page', async () => {
     if (last?.kind !== 'layout') throw new Error('Missing layout')
     expect(last.layout.paths).toEqual(['a.md', 'b.md'])
     expect(closed).toEqual([])
-    expect(scheduled).toEqual([])
+    expect(scheduled[0]?.delay).toBe(5000)
   } finally {
     dispose()
     globalThis.fetch = originalFetch
@@ -296,6 +301,7 @@ test('publishes and retains truncation on an empty poll', async () => {
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts: [],
         next: 0,
         ended: ++calls === 2,
@@ -338,6 +344,7 @@ test('connector-only task publishes a ready empty layout and observed events', a
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts: [
           {
             v: 1,
@@ -398,6 +405,7 @@ test('publishes partial inventory coverage when observed files exceed the cap', 
       ok: true,
       json: async () => ({
         session: 'task',
+        instance: 1,
         receipts,
         next: 61,
         ended: true,
@@ -421,6 +429,137 @@ test('publishes partial inventory coverage when observed files exceed the cap', 
     expect(snapshot.facts.coworkCoverage?.partialInventory).toBe(true)
   } finally {
     dispose()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('continues after end, accepts late and resumed tools, and resets a recreated session', async () => {
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  const scheduled: Array<{ fn: () => void; delay: number }> = []
+  globalThis.setTimeout = ((fn: () => void, delay: number) => {
+    scheduled.push({ fn, delay })
+    return 1
+  }) as typeof setTimeout
+  const urls: string[] = []
+  const connector = {
+    v: 1,
+    n: 2,
+    at: 101,
+    ev: 'tool',
+    tool: 'mcp__drive__read',
+    ok: true,
+    agent: false,
+    mcp: { server: 'drive', tool: 'read' },
+  }
+  const pages = [
+    { instance: 1, receipts: [receipt], next: 1, ended: true, truncated: true },
+    {
+      instance: 1,
+      receipts: [connector],
+      next: 2,
+      ended: true,
+      truncated: true,
+    },
+    {
+      instance: 1,
+      receipts: [{ ...receipt, n: 3, files: [{ p: '/work/b.md', k: 'read' }] }],
+      next: 3,
+      ended: false,
+      truncated: true,
+    },
+    { instance: 2, receipts: [], next: 3, ended: false, truncated: false },
+    {
+      instance: 2,
+      receipts: [{ ...receipt, files: [{ p: '/new/c.md', k: 'read' }] }],
+      next: 1,
+      ended: false,
+      truncated: false,
+    },
+  ]
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    urls.push(String(input))
+    const page = pages[urls.length - 1]
+    return {
+      ok: true,
+      json: async () => ({ session: 'task', more: false, ...page }),
+    } as Response
+  }) as typeof fetch
+  const events: ServerEvent[] = []
+  const closed: string[] = []
+  const dispose = coworkTransport('task').listen({
+    ready() {},
+    event: (event) => events.push(event),
+    closed: (reason) => closed.push(reason),
+  })
+  try {
+    await settle()
+    for (const delay of [5000, 5000, 1000, 0]) {
+      const timer = scheduled.shift()
+      expect(timer?.delay).toBe(delay)
+      timer?.fn()
+      await settle()
+      if (urls.length === 2)
+        expect(events.filter((event) => event.kind === 'layout').length).toBe(1)
+    }
+    expect(urls).toEqual([
+      'cowork/receipts?session=task&after=0',
+      'cowork/receipts?session=task&after=1',
+      'cowork/receipts?session=task&after=2',
+      'cowork/receipts?session=task&after=3',
+      'cowork/receipts?session=task&after=0',
+    ])
+    const layouts = events.filter((event) => event.kind === 'layout')
+    const lastLayout = layouts[layouts.length - 1]
+    if (lastLayout?.kind !== 'layout') throw new Error('Missing layout')
+    expect(lastLayout.layout.paths).toEqual(['c.md'])
+    const snapshots = events.filter((event) => event.kind === 'snapshot')
+    const last = snapshots[snapshots.length - 1]
+    if (last?.kind !== 'snapshot') throw new Error('Missing snapshot')
+    expect(last.facts.connected).toEqual([])
+    expect(last.facts.coworkCoverage?.truncated).toBe(false)
+    expect(scheduled[0]?.delay).toBe(1000)
+    expect(closed).toEqual([])
+  } finally {
+    dispose()
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('rejects pages whose raw final sequence disagrees with the cursor', async () => {
+  const originalFetch = globalThis.fetch
+  try {
+    for (const page of [
+      { receipts: [], next: 1 },
+      { receipts: [receipt], next: 2 },
+      { receipts: [receipt, { ...receipt, n: 'invalid' }], next: 1 },
+    ]) {
+      globalThis.fetch = (async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            session: 'task',
+            instance: 1,
+            ended: false,
+            truncated: false,
+            more: false,
+            ...page,
+          }),
+        }) as Response) as typeof fetch
+      const events: ServerEvent[] = []
+      const closed: string[] = []
+      const dispose = coworkTransport('task').listen({
+        ready() {},
+        event: (event) => events.push(event),
+        closed: (reason) => closed.push(reason),
+      })
+      await settle()
+      expect(events).toEqual([])
+      expect(closed).toEqual(['disconnected'])
+      dispose()
+    }
+  } finally {
     globalThis.fetch = originalFetch
   }
 })
